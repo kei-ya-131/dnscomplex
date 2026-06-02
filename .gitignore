@@ -1,0 +1,13 @@
+.DS_Store
+
+# Local test artifacts and captures
+output/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local editor and temp files
+*.swp
+*.swo
+*.tmp
