@@ -71,10 +71,13 @@ assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-web.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.timer"
+assert_file "$tmpdir/root/etc/systemd/system/xray-dnscomplex.service"
 assert_file "$tmpdir/root/usr/local/sbin/dnscomplex"
+assert_file "$tmpdir/root/usr/local/lib/dnscomplex-xray/render.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py"
 assert_file "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml"
+assert_file "$tmpdir/root/usr/local/etc/xray/config.json"
 assert_file "$tmpdir/root/var/lib/dnscomplex/routeros.rsc"
 assert_file "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources"
 assert_file "$tmpdir/root/var/lib/dnscomplex/geosite/ai-support.sources"
@@ -123,7 +126,19 @@ assert_contains "$tmpdir/root/etc/sing-box/config.json" '"default_domain_resolve
 assert_contains "$tmpdir/root/etc/sing-box/config.json" '"strategy": "prefer_ipv6"'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" '"bind_interface": "ipsec-ai"'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" '"bind_interface": "ipsec-cn"'
+assert_contains "$tmpdir/root/etc/sing-box/config.json" '"tag": "ai-xray"'
+assert_contains "$tmpdir/root/etc/sing-box/config.json" '"tag": "cn-xray"'
+assert_contains "$tmpdir/root/etc/sing-box/config.json" '"server_port": 16054'
+assert_contains "$tmpdir/root/etc/sing-box/config.json" '"server_port": 16055'
 assert_not_contains "$tmpdir/root/etc/sing-box/config.json" '"routing_mark":'
+
+assert_contains "$tmpdir/root/usr/local/etc/xray/config.json" '"tag": "xray-ai-in"'
+assert_contains "$tmpdir/root/usr/local/etc/xray/config.json" '"tag": "xray-cn-in"'
+assert_contains "$tmpdir/root/usr/local/etc/xray/config.json" '"port": 16054'
+assert_contains "$tmpdir/root/usr/local/etc/xray/config.json" '"port": 16055'
+assert_contains "$tmpdir/root/usr/local/etc/xray/config.json" '"outboundTag": "xray-ai-out"'
+assert_contains "$tmpdir/root/usr/local/etc/xray/config.json" '"outboundTag": "xray-cn-out"'
+assert_contains "$tmpdir/root/usr/local/etc/xray/config.json" '"protocol": "freedom"'
 
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'server-name default'
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'bind 127.0.0.1:6053 -group default'
@@ -184,6 +199,8 @@ assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'meta mark set 0x30
 assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'meta mark set 0x351 counter comment "dnscomplex-cn-policy-restore"'
 assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'ip daddr @ai4 meta l4proto { icmp, tcp, udp } meta mark set 0x301'
 assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'ip daddr @cn4 meta l4proto { icmp, tcp, udp } meta mark set 0x351'
+assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'dnscomplex-ai-xray-icmp-drop'
+assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'dnscomplex-cn-xray-icmp-drop'
 assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'chain postrouting'
 assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'size 262144'
 assert_contains "$tmpdir/root/etc/sysctl.d/90-dnscomplex.conf" 'net.ipv4.ip_forward = 1'
@@ -199,6 +216,15 @@ assert_contains "$repo_root/install.sh" 'sysctl -w net.ipv4.ip_forward=1'
 for cmd in status test health fix doctor update-geosite add-domain remove-domain set-socks set-ipsec set-update-time refresh-nftsets refresh-cn-overrides trace-domain test-dns test-ipsec mss-calibrate routeros-print update-software backup restore metrics-sample soak; do
   assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" "$cmd"
 done
+for cmd in set-egress set-xray-uri set-xray-json test-xray xray-status render-xray; do
+  assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" "$cmd"
+done
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set Xray URI/JSON before switching AI to xray'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set Xray URI/JSON before switching CN to xray'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'AI/CN egress are not using IPsec; skipping IPsec test'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'AI_EGRESS_MODE:-ipsec'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'CN_EGRESS_MODE:-ipsec'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'xray run -test -format=json'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'migrate_config_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'config_missing_keys'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'doctor_cmd'
@@ -286,6 +312,16 @@ assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "HA_FAILOVER_POLICY='pr
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_METRICS_LISTEN='0.0.0.0'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_METRICS_PORT='9108'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "PROMETHEUS_MODE='exporter-only'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "XRAY_ENABLED='1'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_EGRESS_MODE='ipsec'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_EGRESS_MODE='ipsec'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "XRAY_LISTEN_HOST='127.0.0.1'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "XRAY_AI_SOCKS_PORT='16054'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "XRAY_CN_SOCKS_PORT='16055'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_XRAY_URI=''"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_XRAY_URI=''"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_XRAY_OUTBOUND_JSON=''"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_XRAY_OUTBOUND_JSON=''"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_NFTSET_REFRESH_DOMAINS='chatgpt.com ios.chat.openai.com openai.com api.openai.com oaistatic.com oaiusercontent.com files.oaiusercontent.com cdn.oaistatic.com persistent.oaistatic.com cdn.openai.com anthropic.com claude.ai claude.com meta.ai'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_NFTSET_REFRESH_DOMAINS='bilibili.com iqiyi.com youku.com douyin.com kuaishou.com acfun.cn mgtv.com v.qq.com qq.com tv.cctv.com'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_SUPPORT_DOMAINS=''"
@@ -293,6 +329,7 @@ assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "SING_GEOSITE_RULESET_B
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'SagerNet/sing-box'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'AdguardTeam/AdGuardHome'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'pymumu/smartdns'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'XTLS/Xray-core'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'github_latest_asset_url'
 
 assert_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources" 'openai'
@@ -321,9 +358,10 @@ assert_contains "$repo_root/install.sh" '/releases/latest'
 assert_contains "$repo_root/install.sh" 'SagerNet/sing-box'
 assert_contains "$repo_root/install.sh" 'AdguardTeam/AdGuardHome'
 assert_contains "$repo_root/install.sh" 'pymumu/smartdns'
+assert_contains "$repo_root/install.sh" 'XTLS/Xray-core'
 assert_contains "$repo_root/install.sh" 'ln -sfn /usr/local/lib/smartdns/run-smartdns /usr/sbin/smartdns'
 assert_contains "$repo_root/install.sh" 'systemctl enable smartdns'
-assert_contains "$repo_root/install.sh" 'systemctl enable --now smartdns AdGuardHome sing-box'
+assert_contains "$repo_root/install.sh" 'systemctl enable --now smartdns AdGuardHome sing-box xray-dnscomplex'
 assert_contains "$repo_root/install.sh" 'systemctl enable --now dnscomplex-web'
 assert_contains "$repo_root/install.sh" 'systemctl enable --now dnscomplex-metrics'
 assert_contains "$repo_root/install.sh" 'dnscomplex-metrics-sample.timer'
@@ -345,6 +383,18 @@ assert_not_contains "$repo_root/install.sh" 'systemd-resolved cron dnsutils'
 
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'ThreadingHTTPServer'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'CONFIG_KEYS'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'AI_EGRESS_MODE'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'AI_XRAY_URI'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'set-egress'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'set-xray-uri'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'test-xray'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '"-format=json"'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/egress/test'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/egress/apply'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/rules/domain'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/rules/geosite'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/rules/rebuild'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/trace-domain'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'AI_NFTSET_REFRESH_DOMAINS'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'smartdns_diagnostics'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'ipv6_diagnostics'
@@ -371,6 +421,7 @@ assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-web.service" 'ExecSt
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics.service" 'ExecStart=/usr/bin/python3 /usr/local/lib/dnscomplex-metrics/exporter.py'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.service" 'ExecStart=/usr/local/sbin/dnscomplex metrics-sample'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.timer" 'OnUnitActiveSec=60s'
+assert_contains "$tmpdir/root/etc/systemd/system/xray-dnscomplex.service" 'ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json'
 assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexConntrackHigh'
 assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexAdGuardCacheEnabled'
 

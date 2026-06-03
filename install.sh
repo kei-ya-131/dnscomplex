@@ -19,6 +19,16 @@ SINGBOX_SOCKS_LISTEN="0.0.0.0"
 SINGBOX_SOCKS_PORT=1080
 SINGBOX_HTTP_LISTEN="0.0.0.0"
 SINGBOX_HTTP_PORT=1081
+XRAY_ENABLED=1
+XRAY_LISTEN_HOST="127.0.0.1"
+XRAY_AI_SOCKS_PORT=16054
+XRAY_CN_SOCKS_PORT=16055
+AI_EGRESS_MODE="ipsec"
+CN_EGRESS_MODE="ipsec"
+AI_XRAY_URI=""
+CN_XRAY_URI=""
+AI_XRAY_OUTBOUND_JSON=""
+CN_XRAY_OUTBOUND_JSON=""
 APPLE_PRIVATE_RELAY_BLOCK=1
 DNSCOMPLEX_WEB_PORT=8088
 DNSCOMPLEX_UPDATE_TIME="04:20"
@@ -79,6 +89,8 @@ Optional variables:
   DEPLOY_MODE AI_IPSEC_SERVER CN_IPSEC_SERVER
   SINGBOX_SOCKS_LISTEN SINGBOX_SOCKS_PORT
   SINGBOX_HTTP_LISTEN SINGBOX_HTTP_PORT APPLE_PRIVATE_RELAY_BLOCK
+  XRAY_ENABLED AI_EGRESS_MODE CN_EGRESS_MODE AI_XRAY_URI CN_XRAY_URI
+  AI_XRAY_OUTBOUND_JSON CN_XRAY_OUTBOUND_JSON XRAY_LISTEN_HOST XRAY_AI_SOCKS_PORT XRAY_CN_SOCKS_PORT
   SINGBOX_DNS_LISTEN SINGBOX_DNS_PORT
   DNSCOMPLEX_WEB_LISTEN DNSCOMPLEX_WEB_PORT DNSCOMPLEX_WEB_PASSWORD DNSCOMPLEX_UPDATE_TIME
   DNSCOMPLEX_NFTSET_REFRESH_INTERVAL DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT IPSEC_TCP_MSS
@@ -167,6 +179,16 @@ load_config() {
   : "${SINGBOX_SOCKS_PORT:=1080}"
   : "${SINGBOX_HTTP_LISTEN:=0.0.0.0}"
   : "${SINGBOX_HTTP_PORT:=1081}"
+  : "${XRAY_ENABLED:=1}"
+  : "${XRAY_LISTEN_HOST:=127.0.0.1}"
+  : "${XRAY_AI_SOCKS_PORT:=16054}"
+  : "${XRAY_CN_SOCKS_PORT:=16055}"
+  : "${AI_EGRESS_MODE:=ipsec}"
+  : "${CN_EGRESS_MODE:=ipsec}"
+  : "${AI_XRAY_URI:=}"
+  : "${CN_XRAY_URI:=}"
+  : "${AI_XRAY_OUTBOUND_JSON:=}"
+  : "${CN_XRAY_OUTBOUND_JSON:=}"
   : "${APPLE_PRIVATE_RELAY_BLOCK:=1}"
   : "${SINGBOX_DNS_LISTEN:=127.0.0.1}"
   : "${SINGBOX_DNS_PORT:=1053}"
@@ -285,16 +307,23 @@ validate_config() {
     require_var "$name"
   done
   [[ "$SINGBOX_SOCKS_PORT" =~ ^[0-9]+$ ]] || die "SINGBOX_SOCKS_PORT must be numeric"
+  [[ "$XRAY_AI_SOCKS_PORT" =~ ^[0-9]+$ ]] || die "XRAY_AI_SOCKS_PORT must be numeric"
+  [[ "$XRAY_CN_SOCKS_PORT" =~ ^[0-9]+$ ]] || die "XRAY_CN_SOCKS_PORT must be numeric"
   [[ "$DNSCOMPLEX_WEB_PORT" =~ ^[0-9]+$ ]] || die "DNSCOMPLEX_WEB_PORT must be numeric"
   [[ "$DNSCOMPLEX_METRICS_PORT" =~ ^[0-9]+$ ]] || die "DNSCOMPLEX_METRICS_PORT must be numeric"
   [[ "$IPSEC_TCP_MSS" =~ ^[0-9]+$ ]] || die "IPSEC_TCP_MSS must be numeric"
   ((DNSCOMPLEX_WEB_PORT >= 1 && DNSCOMPLEX_WEB_PORT <= 65535)) || die "DNSCOMPLEX_WEB_PORT must be 1-65535"
+  ((XRAY_AI_SOCKS_PORT >= 1 && XRAY_AI_SOCKS_PORT <= 65535)) || die "XRAY_AI_SOCKS_PORT must be 1-65535"
+  ((XRAY_CN_SOCKS_PORT >= 1 && XRAY_CN_SOCKS_PORT <= 65535)) || die "XRAY_CN_SOCKS_PORT must be 1-65535"
   ((DNSCOMPLEX_METRICS_PORT >= 1 && DNSCOMPLEX_METRICS_PORT <= 65535)) || die "DNSCOMPLEX_METRICS_PORT must be 1-65535"
   ((IPSEC_TCP_MSS >= 536 && IPSEC_TCP_MSS <= 1460)) || die "IPSEC_TCP_MSS must be 536-1460"
   [[ "$DNSCOMPLEX_UPDATE_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "DNSCOMPLEX_UPDATE_TIME must be HH:MM"
   case "$ADGUARD_DNS_CACHE_MODE" in off|small|large) ;; *) die "ADGUARD_DNS_CACHE_MODE must be off, small, or large" ;; esac
   case "$HA_MODE" in single|primary|secondary) ;; *) die "HA_MODE must be single, primary, or secondary" ;; esac
   case "$PROMETHEUS_MODE" in exporter-only|local) ;; *) die "PROMETHEUS_MODE must be exporter-only or local" ;; esac
+  case "$AI_EGRESS_MODE" in ipsec|xray) ;; *) die "AI_EGRESS_MODE must be ipsec or xray" ;; esac
+  case "$CN_EGRESS_MODE" in ipsec|xray) ;; *) die "CN_EGRESS_MODE must be ipsec or xray" ;; esac
+  case "$XRAY_ENABLED" in 0|1) ;; *) die "XRAY_ENABLED must be 0 or 1" ;; esac
 }
 
 require_debian13() {
@@ -417,6 +446,15 @@ linux_arch() {
     aarch64|arm64) printf 'arm64\n' ;;
     armv7l) printf 'armv7\n' ;;
     *) die "unsupported architecture: $(uname -m)" ;;
+  esac
+}
+
+xray_asset_pattern() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'Xray-linux-64\\.zip$\n' ;;
+    aarch64|arm64) printf 'Xray-linux-arm64-v8a\\.zip$\n' ;;
+    armv7l) printf 'Xray-linux-arm32-v7a\\.zip$\n' ;;
+    *) die "unsupported Xray architecture: $(uname -m)" ;;
   esac
 }
 
@@ -543,6 +581,16 @@ SINGBOX_SOCKS_PORT='$SINGBOX_SOCKS_PORT'
 SINGBOX_SOCKS_LISTEN='$SINGBOX_SOCKS_LISTEN'
 SINGBOX_HTTP_PORT='$SINGBOX_HTTP_PORT'
 SINGBOX_HTTP_LISTEN='$SINGBOX_HTTP_LISTEN'
+XRAY_ENABLED='$XRAY_ENABLED'
+XRAY_LISTEN_HOST='$XRAY_LISTEN_HOST'
+XRAY_AI_SOCKS_PORT='$XRAY_AI_SOCKS_PORT'
+XRAY_CN_SOCKS_PORT='$XRAY_CN_SOCKS_PORT'
+AI_EGRESS_MODE='$AI_EGRESS_MODE'
+CN_EGRESS_MODE='$CN_EGRESS_MODE'
+AI_XRAY_URI='$AI_XRAY_URI'
+CN_XRAY_URI='$CN_XRAY_URI'
+AI_XRAY_OUTBOUND_JSON='$AI_XRAY_OUTBOUND_JSON'
+CN_XRAY_OUTBOUND_JSON='$CN_XRAY_OUTBOUND_JSON'
 APPLE_PRIVATE_RELAY_BLOCK='$APPLE_PRIVATE_RELAY_BLOCK'
 DNSCOMPLEX_WEB_LISTEN='$DNSCOMPLEX_WEB_LISTEN'
 DNSCOMPLEX_WEB_PORT='$DNSCOMPLEX_WEB_PORT'
@@ -593,6 +641,7 @@ install_packages() {
   install_smartdns_release
   install_singbox_release
   install_adguardhome_release
+  install_xray_release
 }
 
 disable_conflicting_lan_services() {
@@ -652,6 +701,316 @@ install_adguardhome_release() {
   install -m 0755 "$tmp/AdGuardHome/AdGuardHome" /opt/AdGuardHome/AdGuardHome
   /opt/AdGuardHome/AdGuardHome --version >/dev/null || die "AdGuard Home install did not provide a working executable"
   rm -rf "$tmp"
+}
+
+install_xray_release() {
+  local asset tmp pattern
+  tmp=$(mktemp -d)
+  pattern=$(xray_asset_pattern)
+  asset=$(github_latest_asset_url "XTLS/Xray-core" "$pattern")
+  curl -fsSL -o "$tmp/xray.zip" "$asset"
+  unzip -q "$tmp/xray.zip" -d "$tmp/xray"
+  install -m 0755 "$tmp/xray/xray" /usr/local/bin/xray
+  install -d -m 0755 /usr/local/share/xray
+  [[ -f "$tmp/xray/geoip.dat" ]] && install -m 0644 "$tmp/xray/geoip.dat" /usr/local/share/xray/geoip.dat
+  [[ -f "$tmp/xray/geosite.dat" ]] && install -m 0644 "$tmp/xray/geosite.dat" /usr/local/share/xray/geosite.dat
+  command -v xray >/dev/null || die "Xray install did not provide xray binary"
+  rm -rf "$tmp"
+}
+
+render_xray_support() {
+  write_file /usr/local/lib/dnscomplex-xray/render.py <<'PY'
+#!/usr/bin/env python3
+import argparse
+import base64
+import json
+import os
+import shlex
+import sys
+import urllib.parse
+
+
+def parse_env(path):
+    data = {}
+    if not os.path.exists(path):
+        return data
+    with open(path, "r", encoding="utf-8") as fh:
+        pending_key = None
+        pending_value = []
+        for raw in fh:
+            line = raw.rstrip("\n")
+            if pending_key:
+                pending_value.append(line)
+                if line.endswith("'") and not line.endswith("\\'"):
+                    data[pending_key] = "\n".join(pending_value)[:-1]
+                    pending_key = None
+                    pending_value = []
+                continue
+            if not line or line.lstrip().startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if value.startswith("'") and not value.endswith("'"):
+                pending_key = key
+                pending_value = [value[1:]]
+                continue
+            try:
+                parts = shlex.split(value, posix=True)
+                data[key] = parts[0] if parts else ""
+            except ValueError:
+                data[key] = value.strip("'\"")
+    return data
+
+
+def b64decode_text(value):
+    value = value.strip()
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode((value + padding).encode()).decode("utf-8")
+
+
+def first(qs, key, default=""):
+    values = qs.get(key, [])
+    return values[0] if values else default
+
+
+def stream_settings(qs, host):
+    network = first(qs, "type", first(qs, "net", "tcp")) or "tcp"
+    security = first(qs, "security", first(qs, "tls", ""))
+    sni = first(qs, "sni", first(qs, "peer", host))
+    settings = {"network": network}
+    if security and security not in {"none", "false"}:
+        settings["security"] = security
+        tls_key = "realitySettings" if security == "reality" else "tlsSettings"
+        tls_settings = {}
+        if sni:
+            tls_settings["serverName"] = sni
+        fp = first(qs, "fp", first(qs, "fingerprint", ""))
+        if fp:
+            tls_settings["fingerprint"] = fp
+        alpn = first(qs, "alpn", "")
+        if alpn:
+            tls_settings["alpn"] = [item for item in alpn.split(",") if item]
+        pbk = first(qs, "pbk", first(qs, "publicKey", ""))
+        if pbk:
+            tls_settings["publicKey"] = pbk
+        sid = first(qs, "sid", first(qs, "shortId", ""))
+        if sid:
+            tls_settings["shortId"] = sid
+        spider = first(qs, "spx", first(qs, "spiderX", ""))
+        if spider:
+            tls_settings["spiderX"] = spider
+        settings[tls_key] = tls_settings
+    if network == "ws":
+        ws = {"path": first(qs, "path", "/")}
+        ws_host = first(qs, "host", "")
+        if ws_host:
+            ws["headers"] = {"Host": ws_host}
+        settings["wsSettings"] = ws
+    elif network == "grpc":
+        service = first(qs, "serviceName", first(qs, "service", ""))
+        if service:
+            settings["grpcSettings"] = {"serviceName": service}
+    elif network == "xhttp":
+        path = first(qs, "path", "")
+        xhttp = {}
+        if path:
+            xhttp["path"] = path
+        host_header = first(qs, "host", "")
+        if host_header:
+            xhttp["host"] = host_header
+        if xhttp:
+            settings["xhttpSettings"] = xhttp
+    return settings
+
+
+def parse_vless(uri, tag):
+    parsed = urllib.parse.urlparse(uri)
+    qs = urllib.parse.parse_qs(parsed.query)
+    if not parsed.username or not parsed.hostname or not parsed.port:
+        raise ValueError("vless URI must include uuid@host:port")
+    user = {"id": urllib.parse.unquote(parsed.username), "encryption": first(qs, "encryption", "none")}
+    flow = first(qs, "flow", "")
+    if flow:
+        user["flow"] = flow
+    return {
+        "tag": tag,
+        "protocol": "vless",
+        "settings": {"vnext": [{"address": parsed.hostname, "port": parsed.port, "users": [user]}]},
+        "streamSettings": stream_settings(qs, parsed.hostname),
+    }
+
+
+def parse_trojan(uri, tag):
+    parsed = urllib.parse.urlparse(uri)
+    qs = urllib.parse.parse_qs(parsed.query)
+    if not parsed.username or not parsed.hostname or not parsed.port:
+        raise ValueError("trojan URI must include password@host:port")
+    return {
+        "tag": tag,
+        "protocol": "trojan",
+        "settings": {"servers": [{"address": parsed.hostname, "port": parsed.port, "password": urllib.parse.unquote(parsed.username)}]},
+        "streamSettings": stream_settings(qs, parsed.hostname),
+    }
+
+
+def parse_vmess(uri, tag):
+    raw = uri[len("vmess://"):]
+    payload = json.loads(b64decode_text(raw))
+    host = payload.get("add") or payload.get("address")
+    port = int(payload.get("port") or 443)
+    user_id = payload.get("id")
+    if not host or not user_id:
+        raise ValueError("vmess URI must include add/id")
+    qs = {
+        "type": [payload.get("net", "tcp")],
+        "security": [payload.get("tls", "")],
+        "sni": [payload.get("sni") or payload.get("host") or host],
+        "path": [payload.get("path", "")],
+        "host": [payload.get("host", "")],
+    }
+    user = {"id": user_id, "alterId": int(payload.get("aid") or 0), "security": payload.get("scy") or "auto"}
+    return {
+        "tag": tag,
+        "protocol": "vmess",
+        "settings": {"vnext": [{"address": host, "port": port, "users": [user]}]},
+        "streamSettings": stream_settings(qs, host),
+    }
+
+
+def parse_ss(uri, tag):
+    raw = uri[len("ss://"):]
+    if "@" not in raw:
+        decoded = b64decode_text(raw.split("#", 1)[0])
+        raw = decoded
+    parsed = urllib.parse.urlparse("ss://" + raw)
+    if not parsed.hostname or not parsed.port:
+        raise ValueError("ss URI must include method:password@host:port")
+    userinfo = urllib.parse.unquote(parsed.netloc.rsplit("@", 1)[0])
+    if ":" not in userinfo:
+        userinfo = b64decode_text(userinfo)
+    method, password = userinfo.split(":", 1)
+    return {
+        "tag": tag,
+        "protocol": "shadowsocks",
+        "settings": {"servers": [{"address": parsed.hostname, "port": parsed.port, "method": method, "password": password}]},
+    }
+
+
+def parse_uri(uri, tag):
+    if uri.startswith("vless://"):
+        return parse_vless(uri, tag)
+    if uri.startswith("vmess://"):
+        return parse_vmess(uri, tag)
+    if uri.startswith("trojan://"):
+        return parse_trojan(uri, tag)
+    if uri.startswith("ss://"):
+        return parse_ss(uri, tag)
+    raise ValueError("supported URI schemes: vless, vmess, trojan, ss")
+
+
+def outbound_for(cfg, profile):
+    upper = profile.upper()
+    tag = f"xray-{profile}-out"
+    raw_json = cfg.get(f"{upper}_XRAY_OUTBOUND_JSON", "").strip()
+    uri = cfg.get(f"{upper}_XRAY_URI", "").strip()
+    if raw_json:
+        outbound = json.loads(raw_json)
+        if not isinstance(outbound, dict):
+            raise ValueError(f"{upper}_XRAY_OUTBOUND_JSON must be a JSON object")
+        outbound["tag"] = tag
+        return outbound
+    if uri:
+        return parse_uri(uri, tag)
+    return {"tag": tag, "protocol": "freedom", "settings": {}}
+
+
+def render(cfg):
+    listen = cfg.get("XRAY_LISTEN_HOST", "127.0.0.1")
+    ai_port = int(cfg.get("XRAY_AI_SOCKS_PORT", "16054"))
+    cn_port = int(cfg.get("XRAY_CN_SOCKS_PORT", "16055"))
+    return {
+        "log": {"loglevel": "warning"},
+        "inbounds": [
+            {
+                "tag": "xray-ai-in",
+                "listen": listen,
+                "port": ai_port,
+                "protocol": "socks",
+                "settings": {"auth": "noauth", "udp": True},
+            },
+            {
+                "tag": "xray-cn-in",
+                "listen": listen,
+                "port": cn_port,
+                "protocol": "socks",
+                "settings": {"auth": "noauth", "udp": True},
+            },
+        ],
+        "outbounds": [outbound_for(cfg, "ai"), outbound_for(cfg, "cn")],
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {"type": "field", "inboundTag": ["xray-ai-in"], "outboundTag": "xray-ai-out"},
+                {"type": "field", "inboundTag": ["xray-cn-in"], "outboundTag": "xray-cn-out"},
+            ],
+        },
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="/etc/dnscomplex/config.env")
+    parser.add_argument("--output", default="-")
+    parser.add_argument("--profile", choices=["ai", "cn"])
+    parser.add_argument("--uri")
+    parser.add_argument("--json")
+    args = parser.parse_args()
+    cfg = parse_env(args.config)
+    if args.profile and args.uri is not None:
+        cfg[f"{args.profile.upper()}_XRAY_URI"] = args.uri
+        cfg[f"{args.profile.upper()}_XRAY_OUTBOUND_JSON"] = ""
+    if args.profile and args.json is not None:
+        cfg[f"{args.profile.upper()}_XRAY_OUTBOUND_JSON"] = args.json
+        cfg[f"{args.profile.upper()}_XRAY_URI"] = ""
+    data = render(cfg)
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    if args.output == "-":
+        sys.stdout.write(text)
+    else:
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        tmp = args.output + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, args.output)
+
+
+if __name__ == "__main__":
+    main()
+PY
+  chmod_target 0755 /usr/local/lib/dnscomplex-xray/render.py
+  python3 "$(target_path /usr/local/lib/dnscomplex-xray/render.py)" \
+    --config "$(target_path /etc/dnscomplex/config.env)" \
+    --output "$(target_path /usr/local/etc/xray/config.json)"
+  chmod_target 0600 /usr/local/etc/xray/config.json
+
+  write_file /etc/systemd/system/xray-dnscomplex.service <<'EOF'
+[Unit]
+Description=dnscomplex Xray sidecar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=1048576
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 render_network() {
@@ -1243,7 +1602,8 @@ EOF
 }
 
 render_singbox_ai_route_rules() {
-  local source safe
+  local source safe outbound
+  outbound=$(profile_outbound_tag ai)
   while IFS= read -r source; do
     [[ -n "$source" ]] || continue
     safe=$(rule_set_safe_name "$source")
@@ -1251,15 +1611,15 @@ render_singbox_ai_route_rules() {
       {
         "rule_set": "geosite-ai-$safe",
         "action": "route",
-        "outbound": "ai-ipsec"
+        "outbound": "$outbound"
       },
 EOF
   done < <(split_words "$AI_GEOSITE_SOURCES")
-  cat <<'EOF'
+  cat <<EOF
       {
         "rule_set": "geosite-ai-support",
         "action": "route",
-        "outbound": "ai-ipsec"
+        "outbound": "$outbound"
       },
 EOF
 }
@@ -1313,12 +1673,28 @@ EOF
 EOF
 }
 
+profile_outbound_tag() {
+  case "$1" in
+    ai)
+      [[ "${AI_EGRESS_MODE:-ipsec}" == "xray" ]] && printf 'ai-xray\n' || printf 'ai-ipsec\n'
+      ;;
+    cn)
+      [[ "${CN_EGRESS_MODE:-ipsec}" == "xray" ]] && printf 'cn-xray\n' || printf 'cn-ipsec\n'
+      ;;
+    *)
+      die "profile must be ai or cn"
+      ;;
+  esac
+}
+
 render_singbox() {
   local lan_if="${WAN_IFACE}.${LAN_VLAN_ID:-}"
   local exclude4="${LAN_IPV4_CIDR:-}"
   local exclude_transit4="${TRANSIT_IPV4_CIDR:-}"
   local exclude6="${LAN_IPV6_PREFIX:-}"
   local exclude_transit6="${TRANSIT_IPV6_CIDR:-}"
+  local cn_outbound
+  cn_outbound=$(profile_outbound_tag cn)
   if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
     lan_if="$WAN_IFACE"
     exclude4="$LAN_CLIENT_IPV4_CIDR"
@@ -1411,6 +1787,20 @@ render_singbox() {
         "server": "smartdns-cn",
         "strategy": "ipv4_only"
       }
+    },
+    {
+      "type": "socks",
+      "tag": "ai-xray",
+      "server": "$XRAY_LISTEN_HOST",
+      "server_port": $XRAY_AI_SOCKS_PORT,
+      "version": "5"
+    },
+    {
+      "type": "socks",
+      "tag": "cn-xray",
+      "server": "$XRAY_LISTEN_HOST",
+      "server_port": $XRAY_CN_SOCKS_PORT,
+      "version": "5"
     }
   ],
   "route": {
@@ -1435,7 +1825,7 @@ $(render_singbox_ai_route_rules)
       {
         "rule_set": "geosite-cn-video",
         "action": "route",
-        "outbound": "cn-ipsec"
+        "outbound": "$cn_outbound"
       },
       {
         "ip_is_private": true,
@@ -1491,6 +1881,46 @@ $(render_singbox_ai_dns_rules)
 EOF
 }
 
+render_nft_profile_prerouting_rules() {
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+EOF
+  else
+    cat <<EOF
+    iifname "$lan_if" ip daddr 255.255.255.255 meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+    iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } ct mark set $SINGBOX_AUTO_REDIRECT_OUTPUT_MARK meta mark set $mark counter comment "dnscomplex-${profile}-preroute"
+EOF
+  fi
+}
+
+render_nft_profile_restore_rules() {
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-restore"
+EOF
+  else
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark counter comment "dnscomplex-${profile}-policy-restore"
+EOF
+  fi
+}
+
+render_nft_profile_output_rules() {
+  local profile=$1 set_name=$2 mark=$3 mode=$4
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-output"
+EOF
+  else
+    cat <<EOF
+    ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark
+EOF
+  fi
+}
+
 render_nftables() {
   local lan_if="${WAN_IFACE}.${LAN_VLAN_ID:-}"
   if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
@@ -1528,15 +1958,15 @@ table inet dnscomplex {
     iifname "$lan_if" udp dport { 784, 853, 8853 } drop
     iifname "$lan_if" tcp dport 853 drop
     iifname "$lan_if" ip daddr @known_doh4 tcp dport 443 drop
-    iifname "$lan_if" ip daddr @ai4 meta l4proto { icmp, tcp, udp } ct mark set $SINGBOX_AUTO_REDIRECT_OUTPUT_MARK meta mark set $AI_MARK counter comment "dnscomplex-ai-preroute"
-    iifname "$lan_if" ip daddr @cn4 meta l4proto { icmp, tcp, udp } ct mark set $SINGBOX_AUTO_REDIRECT_OUTPUT_MARK meta mark set $CN_MARK counter comment "dnscomplex-cn-preroute"
+$(render_nft_profile_prerouting_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(render_nft_profile_prerouting_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
   }
 
   chain prerouting_policy_restore {
     type filter hook prerouting priority filter; policy accept;
     iifname "$lan_if" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
-    iifname "$lan_if" ip daddr @ai4 meta l4proto { icmp, tcp, udp } meta mark set $AI_MARK counter comment "dnscomplex-ai-policy-restore"
-    iifname "$lan_if" ip daddr @cn4 meta l4proto { icmp, tcp, udp } meta mark set $CN_MARK counter comment "dnscomplex-cn-policy-restore"
+$(render_nft_profile_restore_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(render_nft_profile_restore_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
   }
 
   chain forward {
@@ -1547,8 +1977,8 @@ table inet dnscomplex {
   chain output {
     type route hook output priority mangle; policy accept;
     ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
-    ip daddr @ai4 meta l4proto { icmp, tcp, udp } meta mark set $AI_MARK
-    ip daddr @cn4 meta l4proto { icmp, tcp, udp } meta mark set $CN_MARK
+$(render_nft_profile_output_rules ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(render_nft_profile_output_rules cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
   }
 
   chain postrouting {
@@ -1848,6 +2278,16 @@ load_config() {
   : "${SINGBOX_DNS_PORT:=1053}"
   : "${SINGBOX_HTTP_LISTEN:=0.0.0.0}"
   : "${SINGBOX_HTTP_PORT:=1081}"
+  : "${XRAY_ENABLED:=1}"
+  : "${XRAY_LISTEN_HOST:=127.0.0.1}"
+  : "${XRAY_AI_SOCKS_PORT:=16054}"
+  : "${XRAY_CN_SOCKS_PORT:=16055}"
+  : "${AI_EGRESS_MODE:=ipsec}"
+  : "${CN_EGRESS_MODE:=ipsec}"
+  : "${AI_XRAY_URI:=}"
+  : "${CN_XRAY_URI:=}"
+  : "${AI_XRAY_OUTBOUND_JSON:=}"
+  : "${CN_XRAY_OUTBOUND_JSON:=}"
   : "${DNSCOMPLEX_WEB_LISTEN:=127.0.0.1}"
   : "${DNSCOMPLEX_WEB_PORT:=8088}"
   : "${DNSCOMPLEX_WEB_PASSWORD:=dnscomplex}"
@@ -1945,6 +2385,16 @@ SINGBOX_SOCKS_LISTEN
 SINGBOX_SOCKS_PORT
 SINGBOX_HTTP_LISTEN
 SINGBOX_HTTP_PORT
+XRAY_ENABLED
+XRAY_LISTEN_HOST
+XRAY_AI_SOCKS_PORT
+XRAY_CN_SOCKS_PORT
+AI_EGRESS_MODE
+CN_EGRESS_MODE
+AI_XRAY_URI
+CN_XRAY_URI
+AI_XRAY_OUTBOUND_JSON
+CN_XRAY_OUTBOUND_JSON
 DNSCOMPLEX_WEB_LISTEN
 DNSCOMPLEX_WEB_PORT
 DNSCOMPLEX_WEB_PASSWORD
@@ -2334,6 +2784,15 @@ smartdns_arch() {
   esac
 }
 
+xray_asset_pattern() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'Xray-linux-64\\.zip$\n' ;;
+    aarch64|arm64) printf 'Xray-linux-arm64-v8a\\.zip$\n' ;;
+    armv7l) printf 'Xray-linux-arm32-v7a\\.zip$\n' ;;
+    *) die "unsupported Xray architecture: $(uname -m)" ;;
+  esac
+}
+
 github_latest_asset_url() {
   local repo=$1
   local pattern=$2
@@ -2361,6 +2820,9 @@ component_current_tag() {
       ;;
     AdGuardHome)
       /opt/AdGuardHome/AdGuardHome --version 2>/dev/null | grep -Eo 'v[0-9]+(\.[0-9]+)+' | head -n1
+      ;;
+    xray)
+      xray version 2>/dev/null | awk '/^Xray / {print "v" $2; exit}'
       ;;
     *)
       return 1
@@ -2450,6 +2912,16 @@ write_config_cmd() {
     write_env_var SINGBOX_SOCKS_PORT "$SINGBOX_SOCKS_PORT"
     write_env_var SINGBOX_HTTP_LISTEN "$SINGBOX_HTTP_LISTEN"
     write_env_var SINGBOX_HTTP_PORT "$SINGBOX_HTTP_PORT"
+    write_env_var XRAY_ENABLED "$XRAY_ENABLED"
+    write_env_var XRAY_LISTEN_HOST "$XRAY_LISTEN_HOST"
+    write_env_var XRAY_AI_SOCKS_PORT "$XRAY_AI_SOCKS_PORT"
+    write_env_var XRAY_CN_SOCKS_PORT "$XRAY_CN_SOCKS_PORT"
+    write_env_var AI_EGRESS_MODE "$AI_EGRESS_MODE"
+    write_env_var CN_EGRESS_MODE "$CN_EGRESS_MODE"
+    write_env_var AI_XRAY_URI "$AI_XRAY_URI"
+    write_env_var CN_XRAY_URI "$CN_XRAY_URI"
+    write_env_var AI_XRAY_OUTBOUND_JSON "$AI_XRAY_OUTBOUND_JSON"
+    write_env_var CN_XRAY_OUTBOUND_JSON "$CN_XRAY_OUTBOUND_JSON"
     write_env_var DNSCOMPLEX_WEB_LISTEN "$DNSCOMPLEX_WEB_LISTEN"
     write_env_var DNSCOMPLEX_WEB_PORT "$DNSCOMPLEX_WEB_PORT"
 	    write_env_var DNSCOMPLEX_WEB_PASSWORD "$DNSCOMPLEX_WEB_PASSWORD"
@@ -2500,6 +2972,12 @@ Commands:
   remove-domain ai|cn DOMAIN_OR_GEOSITE
   set-socks LISTEN PORT
   set-ipsec ai|cn USER PASSWORD
+  set-egress ai|cn ipsec|xray
+  set-xray-uri ai|cn URI
+  set-xray-json ai|cn JSON_FILE
+  test-xray [ai|cn]
+  xray-status
+  render-xray
   set-update-time HH:MM
   refresh-nftsets
   refresh-cn-overrides [DOMAIN ...]
@@ -2538,8 +3016,8 @@ status_cmd() {
   if [[ "${1:-}" == "--verbose" || "${1:-}" == "verbose" ]]; then
     verbose=1
   fi
-  printf 'deploy_mode=%s default_ipv6_mode=%s default_dns_strategy=%s adguard_cache=%s ha_mode=%s primary=%s secondary=%s\n' \
-    "$DEPLOY_MODE" "$DEFAULT_IPV6_MODE" "$DEFAULT_DNS_STRATEGY" "$ADGUARD_DNS_CACHE_MODE" "$HA_MODE" "${HA_PRIMARY_IP:-}" "${HA_SECONDARY_IP:-}"
+  printf 'deploy_mode=%s default_ipv6_mode=%s default_dns_strategy=%s adguard_cache=%s ha_mode=%s primary=%s secondary=%s ai_egress=%s cn_egress=%s\n' \
+    "$DEPLOY_MODE" "$DEFAULT_IPV6_MODE" "$DEFAULT_DNS_STRATEGY" "$ADGUARD_DNS_CACHE_MODE" "$HA_MODE" "${HA_PRIMARY_IP:-}" "${HA_SECONDARY_IP:-}" "$AI_EGRESS_MODE" "$CN_EGRESS_MODE"
   missing=$(config_missing_keys || true)
   if [[ -n "$missing" ]]; then
     printf 'config_missing_keys=%s\n' "$(tr '\n' ',' <<<"$missing" | sed 's/,$//')"
@@ -2557,6 +3035,7 @@ status_cmd() {
     strongswan.service \
     ipsec.service \
     nftables.service \
+    xray-dnscomplex.service \
     dnscomplex-web.service \
     dnscomplex-metrics.service \
     dnscomplex-health.timer \
@@ -3118,9 +3597,23 @@ test_dns_cmd() {
 }
 
 test_ipsec_cmd() {
-  swanctl --list-sas 2>/dev/null | grep -Eq 'ai|cn' || die "no AI/CN IPsec SA found"
-  ip link show ipsec-ai >/dev/null
-  ip link show ipsec-cn >/dev/null
+  local sas required=0 failed=0
+  sas=$(swanctl --list-sas 2>/dev/null || true)
+  if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
+    required=1
+    grep -Eq '^ai:' <<<"$sas" || { warn "AI IPsec SA not found"; failed=1; }
+    ip link show ipsec-ai >/dev/null || { warn "ipsec-ai interface not found"; failed=1; }
+  fi
+  if [[ "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
+    required=1
+    grep -Eq '^cn:' <<<"$sas" || { warn "CN IPsec SA not found"; failed=1; }
+    ip link show ipsec-cn >/dev/null || { warn "ipsec-cn interface not found"; failed=1; }
+  fi
+  if [[ "$required" == "0" ]]; then
+    log "AI/CN egress are not using IPsec; skipping IPsec test"
+    return 0
+  fi
+  [[ "$failed" == "0" ]]
 }
 
 mss_calibrate_cmd() {
@@ -3300,7 +3793,9 @@ fix_cmd() {
   restart_ipsec_service || true
   systemctl restart dnscomplex-ipsec-ifaces dnscomplex-routing || true
   systemctl enable --now dnscomplex-metrics dnscomplex-metrics-sample.timer 2>/dev/null || true
+  systemctl enable --now xray-dnscomplex 2>/dev/null || true
   systemctl restart dnscomplex-metrics || true
+  apply_egress_stack_cmd || true
   write_update_timer_cmd || true
   systemctl reset-failed dnscomplex-update.service dnscomplex-update.timer 2>/dev/null || true
   swanctl --load-all >/tmp/dnscomplex-swanctl-load.log 2>&1 || cat /tmp/dnscomplex-swanctl-load.log >&2
@@ -3321,7 +3816,7 @@ doctor_cmd() {
     printf '[config] ok\n'
   fi
 
-  failed_units=$(systemctl --failed --plain --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^(dnscomplex|sing-box|smartdns|AdGuardHome|strongswan|nftables)' || true)
+  failed_units=$(systemctl --failed --plain --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^(dnscomplex|sing-box|smartdns|AdGuardHome|strongswan|nftables|xray)' || true)
   if [[ -n "$failed_units" ]]; then
     failed=1
     printf '[systemd] failed units:\n%s\n' "$failed_units"
@@ -3359,6 +3854,10 @@ doctor_cmd() {
     failed=1
     printf '[sing-box] config check failed\n'
   }
+  xray run -test -format=json -config /usr/local/etc/xray/config.json >/dev/null 2>&1 || {
+    failed=1
+    printf '[xray] config check failed\n'
+  }
   nft -c -f /etc/nftables.conf >/dev/null 2>&1 || {
     failed=1
     printf '[nft] config check failed\n'
@@ -3369,7 +3868,7 @@ doctor_cmd() {
 
 trace_domain_cmd() {
   [[ $# -eq 1 ]] || die "usage: dnscomplex trace-domain DOMAIN"
-  local domain=$1 profile=default source=default ips_v4 ips_v6 ip hit
+  local domain=$1 profile=default source=default ips_v4 ips_v6 ip hit outbound=default
   if grep -Rhs -F "$domain" "$GEO_DIR"/ai.sources "$GEO_DIR"/ai.custom "$GEO_DIR"/ai-support.sources /etc/dnscomplex/ai.domains 2>/dev/null | grep -Fxq "$domain"; then
     profile=AI
     source=ai-domain-list
@@ -3395,6 +3894,12 @@ trace_domain_cmd() {
     printf 'nftset[%s]=%s\n' "$ip" "$hit"
   done <<<"$ips_v4"
   printf 'profile=%s\nprofile_source=%s\n' "$profile" "$source"
+  case "$profile" in
+    AI) outbound=$(profile_outbound_tag ai) ;;
+    CN) outbound=$(profile_outbound_tag cn) ;;
+    *) outbound=default ;;
+  esac
+  printf 'expected_outbound=%s\n' "$outbound"
   if [[ "$profile" =~ ^(AI|CN)$ && -n "$ips_v6" ]]; then
     printf 'warning=%s\n' "$profile domain returned AAAA; AI/CN should remain IPv4-only"
     return 1
@@ -3439,7 +3944,7 @@ adguard_cache_diagnostics() {
 health_json_cmd() {
   local failed=0 dns_ms ct_pct service services_json cache_ok ipsec_ok
   services_json=""
-  for service in sing-box.service smartdns.service AdGuardHome.service nftables.service; do
+  for service in sing-box.service smartdns.service AdGuardHome.service nftables.service xray-dnscomplex.service; do
     if service_ok "$service"; then
       services_json+="{\"name\":\"$service\",\"ok\":true},"
     else
@@ -3453,7 +3958,13 @@ health_json_cmd() {
   cache_ok=true
   adguard_cache_diagnostics >/dev/null || { cache_ok=false; failed=1; }
   ipsec_ok=true
-  if ! swanctl --list-sas 2>/dev/null | grep -Eq 'ai:|cn:'; then
+  local sas
+  sas=$(swanctl --list-sas 2>/dev/null || true)
+  if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" ]] && ! grep -Eq '^ai:' <<<"$sas"; then
+    ipsec_ok=false
+    failed=1
+  fi
+  if [[ "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]] && ! grep -Eq '^cn:' <<<"$sas"; then
     ipsec_ok=false
     failed=1
   fi
@@ -3494,12 +4005,21 @@ health_cmd() {
   systemctl is-active --quiet smartdns || systemctl restart smartdns || true
   systemctl is-active --quiet AdGuardHome || systemctl restart AdGuardHome || true
   systemctl is-active --quiet sing-box || systemctl restart sing-box || true
-  systemctl is-active --quiet strongswan-starter || systemctl is-active --quiet strongswan-swanctl || restart_ipsec_service || true
+  systemctl is-active --quiet xray-dnscomplex || systemctl restart xray-dnscomplex || true
+  if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" || "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
+    systemctl is-active --quiet strongswan-starter || systemctl is-active --quiet strongswan-swanctl || restart_ipsec_service || true
+  fi
   "$0" ipsec-ifaces up || true
   "$0" routes up || true
   timeout 8 swanctl --load-all --noprompt >/dev/null 2>&1 || true
   local child
   for child in ai cn; do
+    if [[ "$child" == "ai" && "${AI_EGRESS_MODE:-ipsec}" != "ipsec" ]]; then
+      continue
+    fi
+    if [[ "$child" == "cn" && "${CN_EGRESS_MODE:-ipsec}" != "ipsec" ]]; then
+      continue
+    fi
     if ! timeout 5 swanctl --list-sas 2>/dev/null | grep -Eq "^${child}: #[0-9]+, ESTABLISHED"; then
       timeout 15 swanctl --initiate --child "$child" >/dev/null 2>&1 || true
     fi
@@ -3565,6 +4085,261 @@ set_socks_cmd() {
   SINGBOX_SOCKS_PORT=$port
   write_config_cmd
   systemctl restart sing-box
+}
+
+profile_outbound_tag() {
+  case "$1" in
+    ai) [[ "${AI_EGRESS_MODE:-ipsec}" == "xray" ]] && printf 'ai-xray\n' || printf 'ai-ipsec\n' ;;
+    cn) [[ "${CN_EGRESS_MODE:-ipsec}" == "xray" ]] && printf 'cn-xray\n' || printf 'cn-ipsec\n' ;;
+    *) die "profile must be ai or cn" ;;
+  esac
+}
+
+xray_test_config_file() {
+  local file=$1
+  if command -v xray >/dev/null 2>&1; then
+    xray run -test -format=json -config "$file"
+  else
+    python3 -m json.tool "$file" >/dev/null
+    warn "xray binary is not installed; only JSON syntax was validated"
+  fi
+}
+
+render_xray_config_cmd() {
+  need_root
+  [[ -x /usr/local/lib/dnscomplex-xray/render.py ]] || die "Xray renderer is missing"
+  local tmp
+  tmp=$(mktemp)
+  /usr/local/lib/dnscomplex-xray/render.py --config "$CONFIG" --output "$tmp"
+  xray_test_config_file "$tmp"
+  install -m 0600 "$tmp" /usr/local/etc/xray/config.json
+  rm -f "$tmp"
+}
+
+write_singbox_egress_cmd() {
+  need_root
+  command -v jq >/dev/null 2>&1 || die "jq is required"
+  [[ -f /etc/sing-box/config.json ]] || die "/etc/sing-box/config.json is missing"
+  local ai_out cn_out tmp
+  ai_out=$(profile_outbound_tag ai)
+  cn_out=$(profile_outbound_tag cn)
+  tmp=$(mktemp)
+  jq --arg ai "$ai_out" --arg cn "$cn_out" '
+    (.route.rules[]? | select(.action == "route" and (.rule_set? | type == "string") and ((.rule_set | startswith("geosite-ai-")) or .rule_set == "geosite-ai-support")).outbound) = $ai |
+    (.route.rules[]? | select(.action == "route" and .rule_set? == "geosite-cn-video").outbound) = $cn
+  ' /etc/sing-box/config.json >"$tmp"
+  sing-box check -c "$tmp"
+  install -m 0644 "$tmp" /etc/sing-box/config.json
+  rm -f "$tmp"
+}
+
+runtime_nft_prerouting_rules() {
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+EOF
+  else
+    cat <<EOF
+    iifname "$lan_if" ip daddr 255.255.255.255 meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+    iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } ct mark set $SINGBOX_AUTO_REDIRECT_OUTPUT_MARK meta mark set $mark counter comment "dnscomplex-${profile}-preroute"
+EOF
+  fi
+}
+
+runtime_nft_restore_rules() {
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-restore"
+EOF
+  else
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark counter comment "dnscomplex-${profile}-policy-restore"
+EOF
+  fi
+}
+
+runtime_nft_output_rules() {
+  local profile=$1 set_name=$2 mark=$3 mode=$4
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-output"
+EOF
+  else
+    cat <<EOF
+    ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark
+EOF
+  fi
+}
+
+write_nftables_runtime_cmd() {
+  need_root
+  local lan_if="${WAN_IFACE}.${LAN_VLAN_ID:-}"
+  [[ "$DEPLOY_MODE" == "routeros-policy" ]] && lan_if="$WAN_IFACE"
+  mkdir -p /etc/nftables.d
+  cat >/etc/nftables.d/dnscomplex.nft <<EOF
+table inet dnscomplex {
+  set ai4 {
+    type ipv4_addr
+    flags interval,timeout
+    size 262144
+  }
+
+  set cn4 {
+    type ipv4_addr
+    flags interval,timeout
+    size 262144
+  }
+
+  set known_doh4 {
+    type ipv4_addr
+    flags interval
+    elements = { 1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 9.9.9.9, 149.112.112.112, 223.5.5.5, 223.6.6.6, 119.29.29.29 }
+  }
+
+  chain dns_redirect {
+    type nat hook prerouting priority dstnat; policy accept;
+    iifname "$lan_if" udp dport 53 redirect to :53
+    iifname "$lan_if" tcp dport 53 redirect to :53
+  }
+
+  chain prerouting {
+    type filter hook prerouting priority mangle; policy accept;
+    iifname "$lan_if" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
+    iifname "$lan_if" udp dport { 784, 853, 8853 } drop
+    iifname "$lan_if" tcp dport 853 drop
+    iifname "$lan_if" ip daddr @known_doh4 tcp dport 443 drop
+$(runtime_nft_prerouting_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(runtime_nft_prerouting_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+  }
+
+  chain prerouting_policy_restore {
+    type filter hook prerouting priority filter; policy accept;
+    iifname "$lan_if" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
+$(runtime_nft_restore_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(runtime_nft_restore_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    tcp flags syn tcp option maxseg size set $IPSEC_TCP_MSS
+  }
+
+  chain output {
+    type route hook output priority mangle; policy accept;
+    ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
+$(runtime_nft_output_rules ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(runtime_nft_output_rules cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+  }
+
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+  }
+}
+EOF
+  cat >/etc/nftables.conf <<'EOF'
+#!/usr/sbin/nft -f
+flush ruleset
+include "/etc/nftables.d/*.nft"
+EOF
+  nft -c -f /etc/nftables.conf
+  systemctl restart nftables || true
+}
+
+apply_egress_stack_cmd() {
+  need_root
+  render_xray_config_cmd
+  write_singbox_egress_cmd
+  write_nftables_runtime_cmd
+  systemctl daemon-reload
+  systemctl enable --now xray-dnscomplex 2>/dev/null || true
+  systemctl restart xray-dnscomplex sing-box || true
+  "$0" routes up || true
+}
+
+set_egress_cmd() {
+  need_root
+  [[ $# -eq 2 ]] || die "usage: dnscomplex set-egress ai|cn ipsec|xray"
+  local profile=$1 mode=$2
+  [[ "$mode" == "ipsec" || "$mode" == "xray" ]] || die "mode must be ipsec or xray"
+  if [[ "$mode" == "xray" ]]; then
+    case "$profile" in
+      ai) [[ -n "${AI_XRAY_URI:-}" || -n "${AI_XRAY_OUTBOUND_JSON:-}" ]] || die "set Xray URI/JSON before switching AI to xray" ;;
+      cn) [[ -n "${CN_XRAY_URI:-}" || -n "${CN_XRAY_OUTBOUND_JSON:-}" ]] || die "set Xray URI/JSON before switching CN to xray" ;;
+      *) ;;
+    esac
+  fi
+  case "$profile" in
+    ai) AI_EGRESS_MODE=$mode ;;
+    cn) CN_EGRESS_MODE=$mode ;;
+    *) die "profile must be ai or cn" ;;
+  esac
+  write_config_cmd
+  apply_egress_stack_cmd
+}
+
+set_xray_uri_cmd() {
+  need_root
+  [[ $# -eq 2 ]] || die "usage: dnscomplex set-xray-uri ai|cn URI"
+  local profile=$1 uri=$2 tmp
+  [[ "$profile" == "ai" || "$profile" == "cn" ]] || die "profile must be ai or cn"
+  tmp=$(mktemp)
+  /usr/local/lib/dnscomplex-xray/render.py --config "$CONFIG" --profile "$profile" --uri "$uri" --output "$tmp"
+  xray_test_config_file "$tmp"
+  rm -f "$tmp"
+  case "$profile" in
+    ai) AI_XRAY_URI=$uri; AI_XRAY_OUTBOUND_JSON="" ;;
+    cn) CN_XRAY_URI=$uri; CN_XRAY_OUTBOUND_JSON="" ;;
+  esac
+  write_config_cmd
+  apply_egress_stack_cmd
+}
+
+set_xray_json_cmd() {
+  need_root
+  [[ $# -eq 2 ]] || die "usage: dnscomplex set-xray-json ai|cn JSON_FILE"
+  local profile=$1 file=$2 json tmp
+  [[ "$profile" == "ai" || "$profile" == "cn" ]] || die "profile must be ai or cn"
+  [[ -r "$file" ]] || die "JSON file not readable: $file"
+  json=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' "$file")
+  tmp=$(mktemp)
+  /usr/local/lib/dnscomplex-xray/render.py --config "$CONFIG" --profile "$profile" --json "$json" --output "$tmp"
+  xray_test_config_file "$tmp"
+  rm -f "$tmp"
+  case "$profile" in
+    ai) AI_XRAY_OUTBOUND_JSON=$json; AI_XRAY_URI="" ;;
+    cn) CN_XRAY_OUTBOUND_JSON=$json; CN_XRAY_URI="" ;;
+  esac
+  write_config_cmd
+  apply_egress_stack_cmd
+}
+
+test_xray_cmd() {
+  local profile=${1:-}
+  case "$profile" in
+    ""|ai|cn) ;;
+    *) die "usage: dnscomplex test-xray [ai|cn]" ;;
+  esac
+  render_xray_config_cmd
+  systemctl is-active --quiet xray-dnscomplex 2>/dev/null || warn "xray-dnscomplex.service is not active"
+  if [[ -n "$profile" ]]; then
+    local port
+    [[ "$profile" == "ai" ]] && port=$XRAY_AI_SOCKS_PORT || port=$XRAY_CN_SOCKS_PORT
+    if command -v curl >/dev/null 2>&1; then
+      curl --socks5-hostname "$XRAY_LISTEN_HOST:$port" -4 -fsS --connect-timeout 6 -o /dev/null https://www.cloudflare.com/cdn-cgi/trace || \
+        warn "Xray $profile local SOCKS connectivity probe failed"
+    fi
+  fi
+}
+
+xray_status_cmd() {
+  printf 'xray_enabled=%s ai_egress=%s cn_egress=%s listen=%s ai_port=%s cn_port=%s\n' \
+    "$XRAY_ENABLED" "$AI_EGRESS_MODE" "$CN_EGRESS_MODE" "$XRAY_LISTEN_HOST" "$XRAY_AI_SOCKS_PORT" "$XRAY_CN_SOCKS_PORT"
+  print_unit_state xray-dnscomplex.service
+  if command -v xray >/dev/null 2>&1; then
+    xray version | head -n1
+  fi
 }
 
 write_swanctl_cmd() {
@@ -3734,10 +4509,25 @@ install_adguardhome_release() {
   rm -rf "$tmp"
 }
 
+install_xray_release() {
+  local asset tmp pattern
+  tmp=$(mktemp -d)
+  pattern=$(xray_asset_pattern)
+  asset=$(github_latest_asset_url "XTLS/Xray-core" "$pattern")
+  curl -fsSL -o "$tmp/xray.zip" "$asset"
+  unzip -q "$tmp/xray.zip" -d "$tmp/xray"
+  install -m 0755 "$tmp/xray/xray" /usr/local/bin/xray
+  install -d -m 0755 /usr/local/share/xray
+  [[ -f "$tmp/xray/geoip.dat" ]] && install -m 0644 "$tmp/xray/geoip.dat" /usr/local/share/xray/geoip.dat
+  [[ -f "$tmp/xray/geosite.dat" ]] && install -m 0644 "$tmp/xray/geosite.dat" /usr/local/share/xray/geosite.dat
+  command -v xray >/dev/null || die "Xray install did not provide xray binary"
+  rm -rf "$tmp"
+}
+
 backup_release_binaries() {
   local dir=$1
   mkdir -p "$dir"
-  for bin in sing-box smartdns; do
+  for bin in sing-box smartdns xray; do
     if command -v "$bin" >/dev/null 2>&1; then
       cp -a "$(command -v "$bin")" "$dir/$bin"
     fi
@@ -3752,6 +4542,7 @@ restore_release_binaries() {
   [[ -d "$dir" ]] || return 0
   [[ -f "$dir/sing-box" && -n "$(command -v sing-box 2>/dev/null || true)" ]] && install -m 0755 "$dir/sing-box" "$(command -v sing-box)"
   [[ -f "$dir/smartdns" && -n "$(command -v smartdns 2>/dev/null || true)" ]] && install -m 0755 "$dir/smartdns" "$(command -v smartdns)"
+  [[ -f "$dir/xray" && -n "$(command -v xray 2>/dev/null || true)" ]] && install -m 0755 "$dir/xray" "$(command -v xray)"
   [[ -f "$dir/AdGuardHome" ]] && install -m 0755 "$dir/AdGuardHome" /opt/AdGuardHome/AdGuardHome
 }
 
@@ -3771,8 +4562,9 @@ update_software_impl() {
   update_release_if_needed sing-box SagerNet/sing-box sing-box install_singbox_release
   update_release_if_needed smartdns pymumu/smartdns smartdns install_smartdns_release
   update_release_if_needed AdGuardHome AdguardTeam/AdGuardHome AdGuardHome install_adguardhome_release
+  update_release_if_needed xray XTLS/Xray-core xray-dnscomplex install_xray_release
   log "stage: config validation"
-  if sing-box check -c /etc/sing-box/config.json && nft -c -f /etc/nftables.conf; then
+  if sing-box check -c /etc/sing-box/config.json && xray run -test -format=json -config /usr/local/etc/xray/config.json && nft -c -f /etc/nftables.conf; then
     if ((${#UPDATED_SERVICES[@]} > 0)); then
       log "stage: restart changed services: ${UPDATED_SERVICES[*]}"
       systemctl restart "${UPDATED_SERVICES[@]}"
@@ -3918,6 +4710,7 @@ test_cmd() {
   test_dns_cmd
   test_ipsec_cmd
   sing-box check -c /etc/sing-box/config.json
+  xray run -test -format=json -config /usr/local/etc/xray/config.json
   nft -c -f /etc/nftables.conf
   if ! swanctl --load-all --noprompt >"$swan_log" 2>&1; then
     cat "$swan_log" >&2
@@ -3943,6 +4736,12 @@ main() {
     remove-domain) remove_domain_cmd "$@" ;;
     set-socks) set_socks_cmd "$@" ;;
     set-ipsec) set_ipsec_cmd "$@" ;;
+    set-egress) set_egress_cmd "$@" ;;
+    set-xray-uri) set_xray_uri_cmd "$@" ;;
+    set-xray-json) set_xray_json_cmd "$@" ;;
+    test-xray) test_xray_cmd "$@" ;;
+    xray-status) xray_status_cmd "$@" ;;
+    render-xray) render_xray_config_cmd "$@" ;;
     set-update-time) set_update_time_cmd "$@" ;;
     refresh-nftsets) refresh_nftsets_cmd "$@" ;;
     refresh-cn-overrides) refresh_cn_overrides_cmd "$@" ;;
@@ -4253,7 +5052,9 @@ import shlex
 import socket
 import sqlite3
 import subprocess
+import tempfile
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONFIG = "/etc/dnscomplex/config.env"
@@ -4265,6 +5066,7 @@ SERVICES = [
     "AdGuardHome.service",
     "strongswan-starter.service",
     "nftables.service",
+    "xray-dnscomplex.service",
     "dnscomplex-health.timer",
     "dnscomplex-update.timer",
     "dnscomplex-cn-overrides.timer",
@@ -4294,6 +5096,16 @@ CONFIG_KEYS = [
     "SINGBOX_SOCKS_PORT",
     "SINGBOX_HTTP_LISTEN",
     "SINGBOX_HTTP_PORT",
+    "XRAY_ENABLED",
+    "XRAY_LISTEN_HOST",
+    "XRAY_AI_SOCKS_PORT",
+    "XRAY_CN_SOCKS_PORT",
+    "AI_EGRESS_MODE",
+    "CN_EGRESS_MODE",
+    "AI_XRAY_URI",
+    "CN_XRAY_URI",
+    "AI_XRAY_OUTBOUND_JSON",
+    "CN_XRAY_OUTBOUND_JSON",
     "DNSCOMPLEX_WEB_LISTEN",
     "DNSCOMPLEX_WEB_PORT",
     "DNSCOMPLEX_METRICS_LISTEN",
@@ -4312,6 +5124,9 @@ CONFIG_KEYS = [
     "IPSEC_TCP_MSS",
     "APPLE_PRIVATE_RELAY_BLOCK",
 ]
+
+SECRET_KEYS = {"AI_XRAY_URI", "CN_XRAY_URI", "AI_XRAY_OUTBOUND_JSON", "CN_XRAY_OUTBOUND_JSON"}
+MASKED_SECRET = "********"
 
 HTML = r"""<!doctype html>
 <html lang="zh-Hant">
@@ -4395,14 +5210,33 @@ HTML = r"""<!doctype html>
     </div>
     <div id="split" class="view">
       <section>
-        <h2>新增 / 移除 AI 或 CN 分流</h2>
+        <h2>分流出口</h2>
+        <div class="grid">
+          <div>
+            <h2>AI</h2>
+            <div class="field"><label>出口模式</label><select id="aiEgressMode"><option value="ipsec">IPsec</option><option value="xray">Xray</option></select></div>
+            <div class="field"><label>Xray URI</label><textarea id="aiXrayUri" placeholder="vless:// / vmess:// / trojan:// / ss://"></textarea></div>
+            <div class="field"><label>Raw Xray outbound JSON</label><textarea id="aiXrayJson" placeholder='{"protocol":"vless",...}'></textarea></div>
+            <div class="row"><button onclick="testEgress('ai')">測試 AI Xray</button><button class="primary" onclick="applyEgress('ai')">套用 AI 出口</button></div>
+          </div>
+          <div>
+            <h2>CN</h2>
+            <div class="field"><label>出口模式</label><select id="cnEgressMode"><option value="ipsec">IPsec</option><option value="xray">Xray</option></select></div>
+            <div class="field"><label>Xray URI</label><textarea id="cnXrayUri" placeholder="vless:// / vmess:// / trojan:// / ss://"></textarea></div>
+            <div class="field"><label>Raw Xray outbound JSON</label><textarea id="cnXrayJson" placeholder='{"protocol":"trojan",...}'></textarea></div>
+            <div class="row"><button onclick="testEgress('cn')">測試 CN Xray</button><button class="primary" onclick="applyEgress('cn')">套用 CN 出口</button></div>
+          </div>
+        </div>
+      </section>
+      <section>
+        <h2>Domain / Geosite</h2>
         <div class="grid">
           <div class="field"><label>分類</label><select id="domainProfile"><option value="ai">AI</option><option value="cn">CN</option></select></div>
-          <div class="field"><label>SRS source 或 domain</label><input id="domainValue" placeholder="例如 openai 或 example.com"></div>
+          <div class="field"><label>SRS source / geosite / domain</label><textarea id="domainValue" placeholder="例如 openai、claude、meta、bilibili.com；可逐行批量貼上"></textarea></div>
         </div>
-        <div class="row"><button class="primary" onclick="domainAction('add-domain')">新增</button><button class="danger" onclick="domainAction('remove-domain')">移除</button><button onclick="runAction('update-geosite')">更新 geosite/SRS</button></div>
+        <div class="row"><button class="primary" onclick="rulesDomain('add')">新增 Domain/Geosite</button><button class="danger" onclick="rulesDomain('remove')">移除 Domain/Geosite</button><button onclick="rulesRebuild()">重建並套用 SRS</button></div>
       </section>
-      <section><h2>目前分流清單</h2><pre id="domainsText"></pre></section>
+      <section><h2>目前分流清單 / 生效預覽</h2><pre id="domainsText"></pre></section>
     </div>
     <div id="config" class="view">
       <section>
@@ -4539,6 +5373,12 @@ async function loadConfig() {
   document.getElementById('socksListen').value = data.SINGBOX_SOCKS_LISTEN || '';
   document.getElementById('socksPort').value = data.SINGBOX_SOCKS_PORT || '';
   document.getElementById('updateTime').value = data.DNSCOMPLEX_UPDATE_TIME || '';
+  aiEgressMode.value = data.AI_EGRESS_MODE || 'ipsec';
+  cnEgressMode.value = data.CN_EGRESS_MODE || 'ipsec';
+  aiXrayUri.value = data.AI_XRAY_URI || '';
+  cnXrayUri.value = data.CN_XRAY_URI || '';
+  aiXrayJson.value = data.AI_XRAY_OUTBOUND_JSON || '';
+  cnXrayJson.value = data.CN_XRAY_OUTBOUND_JSON || '';
 }
 async function loadDomains() {
   const data = await api('/api/domains');
@@ -4556,6 +5396,32 @@ async function runAction(action) {
 }
 async function domainAction(action) {
   showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action, profile:domainProfile.value, value:domainValue.value})}));
+  await refreshAll();
+}
+async function rulesDomain(action) {
+  showOutput(await api('/api/rules/domain', {method:'POST', body: JSON.stringify({action, profile:domainProfile.value, value:domainValue.value})}));
+  await refreshAll();
+}
+async function rulesRebuild() {
+  showOutput(await api('/api/rules/rebuild', {method:'POST', body: JSON.stringify({})}));
+  await refreshAll();
+}
+async function testEgress(profile) {
+  const upper = profile === 'ai' ? 'ai' : 'cn';
+  showOutput(await api('/api/egress/test', {method:'POST', body: JSON.stringify({
+    profile,
+    uri: document.getElementById(upper + 'XrayUri').value,
+    outbound_json: document.getElementById(upper + 'XrayJson').value
+  })}));
+}
+async function applyEgress(profile) {
+  const upper = profile === 'ai' ? 'ai' : 'cn';
+  showOutput(await api('/api/egress/apply', {method:'POST', body: JSON.stringify({
+    profile,
+    mode: document.getElementById(upper + 'EgressMode').value,
+    uri: document.getElementById(upper + 'XrayUri').value,
+    outbound_json: document.getElementById(upper + 'XrayJson').value
+  })}));
   await refreshAll();
 }
 async function setSocks() {
@@ -4599,7 +5465,13 @@ def quote_value(value):
 
 def write_config(updated):
     current = parse_config()
-    current.update({k: str(v) for k, v in updated.items() if k in CONFIG_KEYS})
+    for k, v in updated.items():
+        if k not in CONFIG_KEYS:
+            continue
+        value = str(v)
+        if k in SECRET_KEYS and value == MASKED_SECRET:
+            continue
+        current[k] = value
     lines = []
     seen = set()
     if os.path.exists(CONFIG):
@@ -4620,6 +5492,17 @@ def write_config(updated):
         fh.writelines(lines)
     os.chmod(tmp, 0o600)
     os.replace(tmp, CONFIG)
+
+def safe_config():
+    cfg = parse_config()
+    safe = {}
+    for key in CONFIG_KEYS:
+        value = cfg.get(key, "")
+        if key in SECRET_KEYS and value:
+            safe[key] = MASKED_SECRET
+        else:
+            safe[key] = value
+    return safe
 
 def run(args, timeout=120):
     proc = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
@@ -4694,6 +5577,55 @@ def domains_text():
         else:
             parts.append("(missing)")
     return "\n\n".join(parts)
+
+def egress_test(payload):
+    profile = payload.get("profile", "")
+    if profile not in {"ai", "cn"}:
+        return {"ok": False, "code": 2, "output": "invalid profile"}
+    uri = payload.get("uri", "")
+    outbound_json = payload.get("outbound_json", "")
+    with tempfile.NamedTemporaryFile("w+", delete=False) as fh:
+        out = fh.name
+    try:
+        args = ["/usr/local/lib/dnscomplex-xray/render.py", "--config", CONFIG, "--profile", profile, "--output", out]
+        if outbound_json and outbound_json != MASKED_SECRET:
+            args.extend(["--json", outbound_json])
+        elif uri and uri != MASKED_SECRET:
+            args.extend(["--uri", uri])
+        rendered = run(args, 30)
+        if not rendered["ok"]:
+            return rendered
+        return run(["xray", "run", "-test", "-format=json", "-config", out], 30)
+    finally:
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
+
+def egress_apply(payload):
+    profile = payload.get("profile", "")
+    mode = payload.get("mode", "")
+    if profile not in {"ai", "cn"} or mode not in {"ipsec", "xray"}:
+        return {"ok": False, "code": 2, "output": "invalid profile or mode"}
+    outputs = []
+    outbound_json = payload.get("outbound_json", "")
+    uri = payload.get("uri", "")
+    if outbound_json and outbound_json != MASKED_SECRET:
+        with tempfile.NamedTemporaryFile("w+", delete=False) as fh:
+            fh.write(outbound_json)
+            json_path = fh.name
+        try:
+            outputs.append(run([DNSCOMPLEX, "set-xray-json", profile, json_path], 180))
+        finally:
+            try:
+                os.unlink(json_path)
+            except OSError:
+                pass
+    elif uri and uri != MASKED_SECRET:
+        outputs.append(run([DNSCOMPLEX, "set-xray-uri", profile, uri], 180))
+    outputs.append(run([DNSCOMPLEX, "set-egress", profile, mode], 180))
+    ok = all(item.get("ok") for item in outputs)
+    return {"ok": ok, "code": 0 if ok else 1, "output": "\n".join(item.get("output", "") for item in outputs)}
 
 def read_dns_name(buf, offset, depth=0):
     labels = []
@@ -4941,8 +5873,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"services": [service_state(s) for s in SERVICES], "summary": summary})
             return
         if self.path == "/api/config":
-            cfg = parse_config()
-            self.send_json({k: cfg.get(k, "") for k in CONFIG_KEYS})
+            self.send_json(safe_config())
+            return
+        if self.path.startswith("/api/trace-domain"):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            domain = (query.get("domain") or [""])[0]
+            if not domain:
+                self.send_json({"ok": False, "output": "missing domain"}, 400)
+                return
+            self.send_json(run([DNSCOMPLEX, "trace-domain", domain], 120))
             return
         if self.path == "/api/domains":
             self.send_json({"text": domains_text()})
@@ -4985,6 +5924,14 @@ class Handler(BaseHTTPRequestHandler):
                 if action in {"test", "fix", "doctor", "test-dns", "test-ipsec", "refresh-nftsets", "refresh-cn-overrides", "update-geosite", "update-software", "backup", "mss-calibrate"}:
                     self.send_json(run([DNSCOMPLEX, action], 600))
                     return
+                if action == "test-xray":
+                    profile = payload.get("profile", "")
+                    args = [DNSCOMPLEX, "test-xray"] + ([profile] if profile else [])
+                    self.send_json(run(args, 180))
+                    return
+                if action == "set-egress":
+                    self.send_json(run([DNSCOMPLEX, "set-egress", payload.get("profile", ""), payload.get("mode", "")], 180))
+                    return
                 if action == "trace-domain":
                     value = payload.get("value", "")
                     if not value:
@@ -5017,6 +5964,29 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     self.send_json(run([DNSCOMPLEX, "set-update-time", value], 120))
                     return
+            if self.path == "/api/egress/test":
+                self.send_json(egress_test(payload))
+                return
+            if self.path == "/api/egress/apply":
+                self.send_json(egress_apply(payload))
+                return
+            if self.path in {"/api/rules/domain", "/api/rules/geosite"}:
+                action = payload.get("action", "add")
+                profile = payload.get("profile", "")
+                values = [v.strip() for v in re.split(r"[\r\n]+", payload.get("value", "")) if v.strip()]
+                if action not in {"add", "remove"} or profile not in {"ai", "cn"} or not values:
+                    self.send_json({"ok": False, "output": "invalid action/profile/value"}, 400)
+                    return
+                outputs = []
+                cmd = "add-domain" if action == "add" else "remove-domain"
+                for value in values:
+                    outputs.append(run([DNSCOMPLEX, cmd, profile, value], 180))
+                ok = all(item.get("ok") for item in outputs)
+                self.send_json({"ok": ok, "code": 0 if ok else 1, "output": "\n".join(item.get("output", "") for item in outputs)})
+                return
+            if self.path == "/api/rules/rebuild":
+                self.send_json(run([DNSCOMPLEX, "update-geosite"], 600))
+                return
             self.send_json({"error": "not found"}, 404)
         except Exception as exc:
             self.send_json({"ok": False, "output": str(exc)}, 500)
@@ -5070,10 +6040,10 @@ enable_services() {
     fi
   done
   [[ "$ipsec_enabled" == "1" ]] || warn "no strongSwan systemd unit found; IPsec may need manual service setup"
-  systemctl enable --now smartdns AdGuardHome sing-box
+  systemctl enable --now smartdns AdGuardHome sing-box xray-dnscomplex
   systemctl enable --now dnscomplex-web
   systemctl enable --now dnscomplex-metrics
-  systemctl restart smartdns AdGuardHome sing-box || true
+  systemctl restart smartdns AdGuardHome sing-box xray-dnscomplex || true
   systemctl restart dnscomplex-web dnscomplex-metrics || true
 }
 
@@ -5088,6 +6058,7 @@ render_all() {
   render_adguard_service
   render_swanctl
   render_ipsec_ca_store
+  render_xray_support
   render_singbox
   render_nftables
   render_ipsec_services
