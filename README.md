@@ -4,11 +4,12 @@
 
 ## What It Does
 
-- Installs and manages `sing-box`, `SmartDNS`, `AdGuard Home`, `strongSwan`, `nftables`, and the dnscomplex web/metrics services.
-- Supports IPv4 and IPv6 default traffic, with AI/CN profiles forced to IPv4 over IPsec.
+- Installs and manages `sing-box`, `Xray-core`, `SmartDNS`, `AdGuard Home`, `strongSwan`, `nftables`, and the dnscomplex web/metrics services.
+- Supports IPv4 and IPv6 default traffic, with AI/CN profiles forced to IPv4 over either IPsec or an Xray sidecar.
 - Uses `sing-geosite` AI rule sets and curated CN video sources for policy splitting.
+- Supports AI/CN egress switching between `ipsec` and `xray`; Xray URI import supports `vless://`, `vmess://`, `trojan://`, and `ss://`.
 - Keeps `SmartDNS` as the single DNS cache authority while `AdGuard Home` handles ad filtering, query logging, and statistics.
-- Exposes a management web UI and Prometheus-style metrics endpoint.
+- Exposes a management web UI for service state, traffic, AI/CN domains/geosite/SRS, SOCKS, IPsec, Xray egress, and Prometheus-style metrics.
 - Generates RouterOS 7 policy-routing and Netwatch templates for fail-open deployment.
 
 ## Current Scope
@@ -52,6 +53,9 @@ dnscomplex doctor
 dnscomplex health --json
 dnscomplex test
 dnscomplex trace-domain chatgpt.com
+dnscomplex set-egress ai xray
+dnscomplex set-xray-uri ai '<redacted-xray-uri>'
+dnscomplex test-xray ai
 dnscomplex refresh-nftsets
 dnscomplex routeros-print
 dnscomplex metrics-sample
@@ -64,6 +68,8 @@ Default service endpoints:
 - Metrics and RouterOS health probe: `http://<vm-ip>:9108/metrics`
 - Health probe JSON: `http://<vm-ip>:9108/healthz`
 - SOCKS: `<vm-ip>:1080`
+
+AI/CN Xray mode carries TCP/UDP through local Xray SOCKS inbounds. ICMP for AI/CN nftset destinations is blocked in Xray mode instead of falling back to default routing, so `ping` may fail by design.
 
 ## Open Source Notes
 
