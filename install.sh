@@ -32,6 +32,9 @@ CN_XRAY_OUTBOUND_JSON=""
 APPLE_PRIVATE_RELAY_BLOCK=1
 DNSCOMPLEX_WEB_PORT=8088
 DNSCOMPLEX_UPDATE_TIME="04:20"
+DNSCOMPLEX_UPDATE_CHANNEL="stable"
+DNSCOMPLEX_PINNED_VERSION=""
+GITHUB_RELEASE_POLICY="latest"
 DNSCOMPLEX_NFTSET_REFRESH_INTERVAL="5m"
 DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT="2h"
 IPSEC_TCP_MSS=1200
@@ -162,6 +165,9 @@ load_config() {
   : "${SMARTDNS_DEFAULT_PORT:=6053}"
   : "${SMARTDNS_AI_PORT:=6054}"
   : "${SMARTDNS_CN_PORT:=6055}"
+  : "${SMARTDNS_DEFAULT_PORT:=6053}"
+  : "${SMARTDNS_AI_PORT:=6054}"
+  : "${SMARTDNS_CN_PORT:=6055}"
   : "${AI_GEOSITE_SOURCES:=$AI_GEOSITE_SOURCES_DEFAULT}"
   : "${AI_SUPPORT_DOMAINS:=$AI_SUPPORT_DOMAINS_DEFAULT}"
   : "${AI_NFTSET_REFRESH_DOMAINS:=$AI_NFTSET_REFRESH_DOMAINS_DEFAULT}"
@@ -199,6 +205,9 @@ load_config() {
   : "${DNSCOMPLEX_METRICS_PORT:=9108}"
   : "${DNSCOMPLEX_UPDATE_TIME:=04:20}"
   : "${DNSCOMPLEX_UPDATE_LAST_LOG:=/var/log/dnscomplex/update-latest.log}"
+  : "${DNSCOMPLEX_UPDATE_CHANNEL:=stable}"
+  : "${DNSCOMPLEX_PINNED_VERSION:=}"
+  : "${GITHUB_RELEASE_POLICY:=latest}"
   : "${DNSCOMPLEX_NFTSET_REFRESH_INTERVAL:=5m}"
   : "${DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT:=2h}"
   : "${ADGUARD_DNS_CACHE_MODE:=off}"
@@ -318,6 +327,11 @@ validate_config() {
   ((DNSCOMPLEX_METRICS_PORT >= 1 && DNSCOMPLEX_METRICS_PORT <= 65535)) || die "DNSCOMPLEX_METRICS_PORT must be 1-65535"
   ((IPSEC_TCP_MSS >= 536 && IPSEC_TCP_MSS <= 1460)) || die "IPSEC_TCP_MSS must be 536-1460"
   [[ "$DNSCOMPLEX_UPDATE_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "DNSCOMPLEX_UPDATE_TIME must be HH:MM"
+  case "$DNSCOMPLEX_UPDATE_CHANNEL" in stable|beta|pinned) ;; *) die "DNSCOMPLEX_UPDATE_CHANNEL must be stable, beta, or pinned" ;; esac
+  case "$GITHUB_RELEASE_POLICY" in latest|pinned) ;; *) die "GITHUB_RELEASE_POLICY must be latest or pinned" ;; esac
+  if [[ "$DNSCOMPLEX_UPDATE_CHANNEL" == "pinned" || "$GITHUB_RELEASE_POLICY" == "pinned" ]]; then
+    [[ -n "$DNSCOMPLEX_PINNED_VERSION" ]] || die "DNSCOMPLEX_PINNED_VERSION is required when update channel or GitHub policy is pinned"
+  fi
   case "$ADGUARD_DNS_CACHE_MODE" in off|small|large) ;; *) die "ADGUARD_DNS_CACHE_MODE must be off, small, or large" ;; esac
   case "$HA_MODE" in single|primary|secondary) ;; *) die "HA_MODE must be single, primary, or secondary" ;; esac
   case "$PROMETHEUS_MODE" in exporter-only|local) ;; *) die "PROMETHEUS_MODE must be exporter-only or local" ;; esac
@@ -599,6 +613,9 @@ DNSCOMPLEX_METRICS_LISTEN='$DNSCOMPLEX_METRICS_LISTEN'
 DNSCOMPLEX_METRICS_PORT='$DNSCOMPLEX_METRICS_PORT'
 DNSCOMPLEX_UPDATE_TIME='$DNSCOMPLEX_UPDATE_TIME'
 DNSCOMPLEX_UPDATE_LAST_LOG='$DNSCOMPLEX_UPDATE_LAST_LOG'
+DNSCOMPLEX_UPDATE_CHANNEL='$DNSCOMPLEX_UPDATE_CHANNEL'
+DNSCOMPLEX_PINNED_VERSION='$DNSCOMPLEX_PINNED_VERSION'
+GITHUB_RELEASE_POLICY='$GITHUB_RELEASE_POLICY'
 DNSCOMPLEX_NFTSET_REFRESH_INTERVAL='$DNSCOMPLEX_NFTSET_REFRESH_INTERVAL'
 DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT='$DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT'
 ADGUARD_DNS_CACHE_MODE='$ADGUARD_DNS_CACHE_MODE'
@@ -2295,6 +2312,9 @@ load_config() {
   : "${DNSCOMPLEX_METRICS_PORT:=9108}"
   : "${DNSCOMPLEX_UPDATE_TIME:=04:20}"
   : "${DNSCOMPLEX_UPDATE_LAST_LOG:=/var/log/dnscomplex/update-latest.log}"
+  : "${DNSCOMPLEX_UPDATE_CHANNEL:=stable}"
+  : "${DNSCOMPLEX_PINNED_VERSION:=}"
+  : "${GITHUB_RELEASE_POLICY:=latest}"
   : "${DNSCOMPLEX_NFTSET_REFRESH_INTERVAL:=5m}"
   : "${DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT:=2h}"
   : "${ADGUARD_DNS_CACHE_MODE:=off}"
@@ -2402,6 +2422,9 @@ DNSCOMPLEX_METRICS_LISTEN
 DNSCOMPLEX_METRICS_PORT
 DNSCOMPLEX_UPDATE_TIME
 DNSCOMPLEX_UPDATE_LAST_LOG
+DNSCOMPLEX_UPDATE_CHANNEL
+DNSCOMPLEX_PINNED_VERSION
+GITHUB_RELEASE_POLICY
 DNSCOMPLEX_NFTSET_REFRESH_INTERVAL
 DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT
 ADGUARD_DNS_CACHE_MODE
@@ -2793,20 +2816,53 @@ xray_asset_pattern() {
   esac
 }
 
+github_release_api_url() {
+  local repo=$1
+  local channel=${DNSCOMPLEX_UPDATE_CHANNEL:-stable}
+  local version=${DNSCOMPLEX_PINNED_VERSION:-}
+  if [[ "${GITHUB_RELEASE_POLICY:-latest}" == "pinned" || "$channel" == "pinned" ]]; then
+    [[ -n "$version" ]] || die "DNSCOMPLEX_PINNED_VERSION is required for pinned GitHub releases"
+    printf 'https://api.github.com/repos/%s/releases/tags/%s\n' "$repo" "$version"
+    return 0
+  fi
+  case "$channel" in
+    stable)
+      printf 'https://api.github.com/repos/%s/releases/latest\n' "$repo"
+      ;;
+    beta)
+      printf 'https://api.github.com/repos/%s/releases\n' "$repo"
+      ;;
+    *)
+      die "unsupported DNSCOMPLEX_UPDATE_CHANNEL=$channel"
+      ;;
+  esac
+}
+
+github_release_json() {
+  local repo=$1
+  local url
+  url=$(github_release_api_url "$repo")
+  if [[ "${DNSCOMPLEX_UPDATE_CHANNEL:-stable}" == "beta" && "${GITHUB_RELEASE_POLICY:-latest}" != "pinned" ]]; then
+    curl -fsSL "$url" | jq 'map(select(.draft == false)) | .[0]'
+  else
+    curl -fsSL "$url"
+  fi
+}
+
 github_latest_asset_url() {
   local repo=$1
   local pattern=$2
   local asset
-  asset=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" |
+  asset=$(github_release_json "$repo" |
     jq -r --arg pattern "$pattern" '.assets[].browser_download_url | select(test($pattern))' |
     head -n1)
-  [[ -n "$asset" ]] || die "could not locate latest GitHub release asset for $repo matching $pattern"
+  [[ -n "$asset" ]] || die "could not locate GitHub release asset for $repo matching $pattern"
   printf '%s\n' "$asset"
 }
 
 github_latest_release_tag() {
   local repo=$1
-  curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | jq -r '.tag_name'
+  github_release_json "$repo" | jq -r '.tag_name'
 }
 
 component_current_tag() {
@@ -2929,6 +2985,9 @@ write_config_cmd() {
 	    write_env_var DNSCOMPLEX_METRICS_PORT "$DNSCOMPLEX_METRICS_PORT"
 	    write_env_var DNSCOMPLEX_UPDATE_TIME "$DNSCOMPLEX_UPDATE_TIME"
 	    write_env_var DNSCOMPLEX_UPDATE_LAST_LOG "$DNSCOMPLEX_UPDATE_LAST_LOG"
+	    write_env_var DNSCOMPLEX_UPDATE_CHANNEL "$DNSCOMPLEX_UPDATE_CHANNEL"
+	    write_env_var DNSCOMPLEX_PINNED_VERSION "$DNSCOMPLEX_PINNED_VERSION"
+	    write_env_var GITHUB_RELEASE_POLICY "$GITHUB_RELEASE_POLICY"
 	    write_env_var DNSCOMPLEX_NFTSET_REFRESH_INTERVAL "$DNSCOMPLEX_NFTSET_REFRESH_INTERVAL"
     write_env_var DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT "$DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT"
     write_env_var ADGUARD_DNS_CACHE_MODE "$ADGUARD_DNS_CACHE_MODE"
@@ -2986,9 +3045,13 @@ Commands:
   test-ipsec
   mss-calibrate
   routeros-print
-  update-software
+  update-software [--channel stable|beta|pinned] [--version VERSION]
   metrics-sample
   soak [--duration 30m] [--clients 1000] [--dns-qps 50] [--profiles ai,cn,default] [--idle-resume]
+  wizard
+  validate-config [--json] ENV_FILE
+  render-config [--redacted]
+  support-bundle [--output PATH] [--include-logs minimal|standard|full]
   backup [OUTPUT_TAR_GZ]
   restore INPUT_TAR_GZ
   ipsec-ifaces up|down
@@ -3016,8 +3079,8 @@ status_cmd() {
   if [[ "${1:-}" == "--verbose" || "${1:-}" == "verbose" ]]; then
     verbose=1
   fi
-  printf 'deploy_mode=%s default_ipv6_mode=%s default_dns_strategy=%s adguard_cache=%s ha_mode=%s primary=%s secondary=%s ai_egress=%s cn_egress=%s\n' \
-    "$DEPLOY_MODE" "$DEFAULT_IPV6_MODE" "$DEFAULT_DNS_STRATEGY" "$ADGUARD_DNS_CACHE_MODE" "$HA_MODE" "${HA_PRIMARY_IP:-}" "${HA_SECONDARY_IP:-}" "$AI_EGRESS_MODE" "$CN_EGRESS_MODE"
+  printf 'deploy_mode=%s default_ipv6_mode=%s default_dns_strategy=%s adguard_cache=%s ha_mode=%s primary=%s secondary=%s ai_egress=%s cn_egress=%s update_channel=%s pinned_version=%s github_policy=%s\n' \
+    "$DEPLOY_MODE" "$DEFAULT_IPV6_MODE" "$DEFAULT_DNS_STRATEGY" "$ADGUARD_DNS_CACHE_MODE" "$HA_MODE" "${HA_PRIMARY_IP:-}" "${HA_SECONDARY_IP:-}" "$AI_EGRESS_MODE" "$CN_EGRESS_MODE" "$DNSCOMPLEX_UPDATE_CHANNEL" "${DNSCOMPLEX_PINNED_VERSION:-}" "$GITHUB_RELEASE_POLICY"
   missing=$(config_missing_keys || true)
   if [[ -n "$missing" ]]; then
     printf 'config_missing_keys=%s\n' "$(tr '\n' ',' <<<"$missing" | sed 's/,$//')"
@@ -4462,6 +4525,202 @@ set_ipsec_cmd() {
   "$0" routes up || true
 }
 
+json_escape() {
+  jq -Rs . <<<"${1:-}" | sed 's/^"//; s/"$//'
+}
+
+validate_loaded_config() {
+  local errors=0 ports port_seen="" port name cidr
+  case "${DEPLOY_MODE:-}" in vlan-gateway|routeros-policy) ;; *) printf 'error: DEPLOY_MODE must be vlan-gateway or routeros-policy\n'; errors=$((errors + 1)) ;; esac
+  case "${DEFAULT_DNS_STRATEGY:-prefer_ipv6}" in prefer_ipv4|prefer_ipv6) ;; *) printf 'error: DEFAULT_DNS_STRATEGY must be prefer_ipv4 or prefer_ipv6\n'; errors=$((errors + 1)) ;; esac
+  case "${DEFAULT_IPV6_MODE:-auto}" in auto|on|off) ;; *) printf 'error: DEFAULT_IPV6_MODE must be auto, on, or off\n'; errors=$((errors + 1)) ;; esac
+  case "${ADGUARD_DNS_CACHE_MODE:-off}" in off|small|large) ;; *) printf 'error: ADGUARD_DNS_CACHE_MODE must be off, small, or large\n'; errors=$((errors + 1)) ;; esac
+  case "${DNSCOMPLEX_UPDATE_CHANNEL:-stable}" in stable|beta|pinned) ;; *) printf 'error: DNSCOMPLEX_UPDATE_CHANNEL must be stable, beta, or pinned\n'; errors=$((errors + 1)) ;; esac
+  case "${GITHUB_RELEASE_POLICY:-latest}" in latest|pinned) ;; *) printf 'error: GITHUB_RELEASE_POLICY must be latest or pinned\n'; errors=$((errors + 1)) ;; esac
+  if [[ "${DNSCOMPLEX_UPDATE_CHANNEL:-stable}" == "pinned" || "${GITHUB_RELEASE_POLICY:-latest}" == "pinned" ]]; then
+    [[ -n "${DNSCOMPLEX_PINNED_VERSION:-}" ]] || { printf 'error: DNSCOMPLEX_PINNED_VERSION is required for pinned update policy\n'; errors=$((errors + 1)); }
+  fi
+  for name in SINGBOX_SOCKS_PORT SINGBOX_HTTP_PORT SINGBOX_DNS_PORT SMARTDNS_DEFAULT_PORT SMARTDNS_AI_PORT SMARTDNS_CN_PORT DNSCOMPLEX_WEB_PORT DNSCOMPLEX_METRICS_PORT XRAY_AI_SOCKS_PORT XRAY_CN_SOCKS_PORT; do
+    port=${!name:-}
+    [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]] || { printf 'error: %s must be port 1-65535\n' "$name"; errors=$((errors + 1)); continue; }
+    if grep -Eq "(^| )${port}( |$)" <<<"$port_seen"; then
+      printf 'error: duplicate listen port %s around %s\n' "$port" "$name"
+      errors=$((errors + 1))
+    fi
+    port_seen="$port_seen $port"
+  done
+  case "${AI_EGRESS_MODE:-ipsec}" in ipsec|xray) ;; *) printf 'error: AI_EGRESS_MODE must be ipsec or xray\n'; errors=$((errors + 1)) ;; esac
+  case "${CN_EGRESS_MODE:-ipsec}" in ipsec|xray) ;; *) printf 'error: CN_EGRESS_MODE must be ipsec or xray\n'; errors=$((errors + 1)) ;; esac
+  if [[ "${AI_EGRESS_MODE:-ipsec}" == "xray" ]]; then
+    [[ -n "${AI_XRAY_URI:-}" || -n "${AI_XRAY_OUTBOUND_JSON:-}" ]] || { printf 'error: AI xray mode requires AI_XRAY_URI or AI_XRAY_OUTBOUND_JSON\n'; errors=$((errors + 1)); }
+  fi
+  if [[ "${CN_EGRESS_MODE:-ipsec}" == "xray" ]]; then
+    [[ -n "${CN_XRAY_URI:-}" || -n "${CN_XRAY_OUTBOUND_JSON:-}" ]] || { printf 'error: CN xray mode requires CN_XRAY_URI or CN_XRAY_OUTBOUND_JSON\n'; errors=$((errors + 1)); }
+  fi
+  for cidr in "${LAN_IPV4_CIDR:-}" "${TRANSIT_IPV4_CIDR:-}" "${LAN_CLIENT_IPV4_CIDR:-}"; do
+    [[ -z "$cidr" ]] && continue
+    python3 - "$cidr" <<'PY' >/dev/null 2>&1 || { printf 'error: invalid IPv4 CIDR %s\n' "$cidr"; errors=$((errors + 1)); }
+import ipaddress, sys
+ipaddress.ip_interface(sys.argv[1])
+PY
+  done
+  for cidr in "${LAN_IPV6_PREFIX:-}" "${TRANSIT_IPV6_CIDR:-}"; do
+    [[ -z "$cidr" ]] && continue
+    python3 - "$cidr" <<'PY' >/dev/null 2>&1 || { printf 'error: invalid IPv6 CIDR/prefix %s\n' "$cidr"; errors=$((errors + 1)); }
+import ipaddress, sys
+ipaddress.ip_network(sys.argv[1], strict=False)
+PY
+  done
+  if [[ "${SMARTDNS_AI_PORT:-6054}" == "${SMARTDNS_CN_PORT:-6055}" ]]; then
+    printf 'error: AI/CN SmartDNS ports must be different to preserve A-only nftset policy\n'
+    errors=$((errors + 1))
+  fi
+  return "$errors"
+}
+
+validate_config_file_cmd() {
+  local json=0 file output rc
+  if [[ "${1:-}" == "--json" ]]; then
+    json=1
+    shift
+  fi
+  [[ $# -eq 1 ]] || die "usage: dnscomplex validate-config [--json] ENV_FILE"
+  file=$1
+  [[ -r "$file" ]] || die "config file not readable: $file"
+  output=$(
+    set +e
+    # shellcheck source=/dev/null
+    CONFIG="$file"
+    load_config >/dev/null 2>&1
+    validate_loaded_config
+    printf '__RC__=%s\n' "$?"
+  )
+  rc=$(awk -F= '/^__RC__/ {print $2}' <<<"$output")
+  output=$(sed '/^__RC__=/d' <<<"$output")
+  rc=${rc:-1}
+  if [[ "$json" == "1" ]]; then
+    jq -n --argjson ok "$([[ "$rc" == "0" ]] && printf true || printf false)" --arg output "$output" '{ok:$ok, output:$output}'
+  else
+    if [[ "$rc" == "0" ]]; then
+      printf 'config valid: %s\n' "$file"
+    else
+      printf '%s\n' "$output"
+    fi
+  fi
+  return "$rc"
+}
+
+redact_stream() {
+  python3 -c '
+import re
+import sys
+
+text = sys.stdin.read()
+patterns = [
+    (r"(AI_IPSEC_USERNAME|CN_IPSEC_USERNAME|AI_IPSEC_PASSWORD|CN_IPSEC_PASSWORD|DNSCOMPLEX_WEB_PASSWORD|AI_XRAY_URI|CN_XRAY_URI|AI_XRAY_OUTBOUND_JSON|CN_XRAY_OUTBOUND_JSON|GITHUB_TOKEN|GH_TOKEN|TOKEN|USERNAME|PASSWORD|SECRET|PSK|COOKIE|SESSION)=([^\s]+)", r"\1=[REDACTED_SECRET]"),
+    (r"(vless|vmess|trojan|ss)://[^\s]+", r"\1://[REDACTED_XRAY_URI]"),
+    (r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "[REDACTED_UUID]"),
+    (r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", "[REDACTED_IPV4]"),
+    (r"\bfd[0-9a-fA-F:]*:[0-9a-fA-F:]*\b", "[REDACTED_IPV6]"),
+    (r"\b[\w.-]+\.local\b", "[REDACTED_HOSTNAME]"),
+]
+for pattern, repl in patterns:
+    text = re.sub(pattern, repl, text)
+sys.stdout.write(text)
+'
+}
+
+render_config_cmd() {
+  local redacted=0
+  if [[ "${1:-}" == "--redacted" ]]; then
+    redacted=1
+    shift
+  fi
+  [[ $# -eq 0 ]] || die "usage: dnscomplex render-config [--redacted]"
+  if [[ "$redacted" == "1" ]]; then
+    cat "$CONFIG" | redact_stream
+  else
+    cat "$CONFIG"
+  fi
+}
+
+wizard_cmd() {
+  cat <<'EOF'
+# dnscomplex wizard template
+# Save this as config.env, fill the blanks, then run:
+#   dnscomplex validate-config config.env
+#   sudo bash install.sh --config config.env --yes
+DNSCOMPLEX_NONINTERACTIVE=1
+DEPLOY_MODE=routeros-policy
+WAN_IFACE=eth0
+ROUTEROS_LAN_IPV4=192.168.8.253
+LINUX_LAN_IPV4=192.168.8.200
+LAN_CLIENT_IPV4_CIDR=192.168.8.0/24
+SINGBOX_SOCKS_LISTEN=192.168.8.200
+SINGBOX_SOCKS_PORT=1080
+DNSCOMPLEX_WEB_LISTEN=192.168.8.200
+DNSCOMPLEX_WEB_PORT=8088
+DNSCOMPLEX_UPDATE_CHANNEL=stable
+GITHUB_RELEASE_POLICY=latest
+AI_EGRESS_MODE=ipsec
+CN_EGRESS_MODE=ipsec
+AI_IPSEC_USERNAME=
+AI_IPSEC_PASSWORD=
+CN_IPSEC_USERNAME=
+CN_IPSEC_PASSWORD=
+EOF
+}
+
+support_bundle_cmd() {
+  need_root
+  local output="" include_logs=standard tmp
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --output) output=${2:-}; shift 2 ;;
+      --include-logs) include_logs=${2:-}; shift 2 ;;
+      *) die "usage: dnscomplex support-bundle [--output PATH] [--include-logs minimal|standard|full]" ;;
+    esac
+  done
+  case "$include_logs" in minimal|standard|full) ;; *) die "--include-logs must be minimal, standard, or full" ;; esac
+  output=${output:-"/var/log/dnscomplex/support-bundle-$(date +%Y%m%d-%H%M%S).tar.gz"}
+  tmp=$(mktemp -d)
+  mkdir -p "$tmp/raw" "$tmp/redacted"
+  {
+    printf 'dnscomplex_version=%s\n' "${DNSCOMPLEX_VERSION:-unknown}"
+    printf 'created_at=%s\n' "$(date -Is)"
+    printf 'include_logs=%s\n' "$include_logs"
+  } >"$tmp/raw/summary.txt"
+  "$0" status --verbose >"$tmp/raw/status.txt" 2>&1 || true
+  "$0" doctor >"$tmp/raw/doctor.txt" 2>&1 || true
+  "$0" health --json >"$tmp/raw/health.json" 2>&1 || true
+  for domain in openai.com claude.ai youku.com youtube.com example.com; do
+    "$0" trace-domain "$domain" >"$tmp/raw/trace-$domain.txt" 2>&1 || true
+  done
+  systemctl --no-pager --plain status sing-box smartdns AdGuardHome xray-dnscomplex dnscomplex-web dnscomplex-metrics >"$tmp/raw/systemctl-status.txt" 2>&1 || true
+  systemctl list-timers 'dnscomplex-*.timer' --no-pager >"$tmp/raw/timers.txt" 2>&1 || true
+  nft list table inet dnscomplex >"$tmp/raw/nft-dnscomplex.txt" 2>&1 || true
+  conntrack -S >"$tmp/raw/conntrack-stats.txt" 2>&1 || true
+  "$0" metrics-sample >"$tmp/raw/metrics-sample.json" 2>&1 || true
+  [[ -r "$BASE/routeros.rsc" ]] && cp "$BASE/routeros.rsc" "$tmp/raw/routeros.rsc"
+  render_config_cmd --redacted >"$tmp/raw/config.env.redacted" 2>&1 || true
+  if [[ "$include_logs" != "minimal" ]]; then
+    journalctl -u dnscomplex-web -u dnscomplex-metrics -u sing-box -u smartdns -u AdGuardHome --since "24 hours ago" --no-pager >"$tmp/raw/journal.txt" 2>&1 || true
+    [[ -r "${DNSCOMPLEX_UPDATE_LAST_LOG:-}" ]] && cp "$DNSCOMPLEX_UPDATE_LAST_LOG" "$tmp/raw/update-latest.log"
+  fi
+  if [[ "$include_logs" == "full" ]]; then
+    ls -la /var/log/dnscomplex >"$tmp/raw/dnscomplex-log-list.txt" 2>&1 || true
+  fi
+  while IFS= read -r -d '' file; do
+    rel=${file#"$tmp/raw/"}
+    mkdir -p "$tmp/redacted/$(dirname "$rel")"
+    redact_stream <"$file" >"$tmp/redacted/$rel"
+  done < <(find "$tmp/raw" -type f -print0)
+  mkdir -p "$(dirname "$output")"
+  tar -czf "$output" -C "$tmp/redacted" .
+  rm -rf "$tmp"
+  log "support bundle written: $output"
+}
+
 install_smartdns_release() {
   local arch asset tmp
   arch=$(smartdns_arch)
@@ -4551,27 +4810,30 @@ update_software_impl() {
   local before
   UPDATED_SERVICES=()
   before=$(mktemp -d)
-  log "stage: backup current config and release binaries"
+  update_software_stage "backup current config and release binaries"
   backup_cmd "$before/dnscomplex-pre-update.tar.gz"
   backup_release_binaries "$before/bin"
   export DEBIAN_FRONTEND=noninteractive
-  log "stage: Debian apt update"
+  update_software_stage "Debian apt update"
   apt-get update
-  log "stage: Debian apt upgrade"
+  update_software_stage "Debian apt upgrade"
   apt-get upgrade -y
+  update_software_stage "GitHub release metadata and asset verification channel=${DNSCOMPLEX_UPDATE_CHANNEL:-stable} policy=${GITHUB_RELEASE_POLICY:-latest} pinned=${DNSCOMPLEX_PINNED_VERSION:-}"
   update_release_if_needed sing-box SagerNet/sing-box sing-box install_singbox_release
   update_release_if_needed smartdns pymumu/smartdns smartdns install_smartdns_release
   update_release_if_needed AdGuardHome AdguardTeam/AdGuardHome AdGuardHome install_adguardhome_release
   update_release_if_needed xray XTLS/Xray-core xray-dnscomplex install_xray_release
-  log "stage: config validation"
+  update_software_stage "dnscomplex installer/schema validation"
+  "$0" validate-config "$CONFIG"
+  update_software_stage "config validation"
   if sing-box check -c /etc/sing-box/config.json && xray run -test -format=json -config /usr/local/etc/xray/config.json && nft -c -f /etc/nftables.conf; then
     if ((${#UPDATED_SERVICES[@]} > 0)); then
-      log "stage: restart changed services: ${UPDATED_SERVICES[*]}"
+      update_software_stage "restart changed services: ${UPDATED_SERVICES[*]}"
       systemctl restart "${UPDATED_SERVICES[@]}"
     else
-      log "stage: no GitHub component changed; no service restart needed"
+      update_software_stage "no GitHub component changed; no service restart needed"
     fi
-    log "stage: post-update health validation"
+    update_software_stage "post-update health validation"
     if "$0" test; then
       :
     else
@@ -4593,6 +4855,36 @@ update_software_impl() {
 
 update_software_cmd() {
   need_root
+  local requested_channel="" requested_version=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --channel)
+        requested_channel=${2:-}
+        shift 2
+        ;;
+      --version)
+        requested_version=${2:-}
+        shift 2
+        ;;
+      *)
+        die "usage: dnscomplex update-software [--channel stable|beta|pinned] [--version VERSION]"
+        ;;
+    esac
+  done
+  if [[ -n "$requested_channel" ]]; then
+    case "$requested_channel" in stable|beta|pinned) ;; *) die "--channel must be stable, beta, or pinned" ;; esac
+    DNSCOMPLEX_UPDATE_CHANNEL=$requested_channel
+    [[ "$requested_channel" == "pinned" ]] && GITHUB_RELEASE_POLICY=pinned || GITHUB_RELEASE_POLICY=latest
+  fi
+  if [[ -n "$requested_version" ]]; then
+    DNSCOMPLEX_PINNED_VERSION=$requested_version
+    DNSCOMPLEX_UPDATE_CHANNEL=pinned
+    GITHUB_RELEASE_POLICY=pinned
+  fi
+  if [[ "$DNSCOMPLEX_UPDATE_CHANNEL" == "pinned" || "$GITHUB_RELEASE_POLICY" == "pinned" ]]; then
+    [[ -n "$DNSCOMPLEX_PINNED_VERSION" ]] || die "--version VERSION is required for pinned updates"
+  fi
+  write_config_cmd
   mkdir -p /var/log/dnscomplex
   local stamp_log log_file rc
   stamp_log="/var/log/dnscomplex/update-$(date +%Y%m%d-%H%M%S).log"
@@ -4611,6 +4903,10 @@ update_software_cmd() {
     log "software update failed; see $stamp_log"
     return "$rc"
   fi
+}
+
+update_software_stage() {
+  log "stage: $*"
 }
 
 routeros_print_cmd() {
@@ -4753,6 +5049,10 @@ main() {
     update-software) update_software_cmd "$@" ;;
     metrics-sample) metrics_sample_cmd "$@" ;;
     soak) soak_cmd "$@" ;;
+    wizard) wizard_cmd "$@" ;;
+    validate-config) validate_config_file_cmd "$@" ;;
+    render-config) render_config_cmd "$@" ;;
+    support-bundle) support_bundle_cmd "$@" ;;
     backup) backup_cmd "$@" ;;
     restore) restore_cmd "$@" ;;
     ipsec-ifaces) ipsec_ifaces_cmd "$@" ;;
@@ -4762,7 +5062,9 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
 MANAGER
   chmod_target 0755 /usr/local/sbin/dnscomplex
 }
@@ -5044,6 +5346,7 @@ render_web_interface() {
 #!/usr/bin/env python3
 import base64
 import binascii
+import hashlib
 import ipaddress
 import json
 import os
@@ -5112,6 +5415,9 @@ CONFIG_KEYS = [
     "DNSCOMPLEX_METRICS_PORT",
     "DNSCOMPLEX_UPDATE_TIME",
     "DNSCOMPLEX_UPDATE_LAST_LOG",
+    "DNSCOMPLEX_UPDATE_CHANNEL",
+    "DNSCOMPLEX_PINNED_VERSION",
+    "GITHUB_RELEASE_POLICY",
     "DNSCOMPLEX_NFTSET_REFRESH_INTERVAL",
     "DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT",
     "ADGUARD_DNS_CACHE_MODE",
@@ -5138,10 +5444,13 @@ HTML = r"""<!doctype html>
     :root { color-scheme: light; --bg:#f6f7f9; --panel:#fff; --text:#17202a; --muted:#687385; --line:#d7dde6; --ok:#137a3a; --bad:#b42318; --warn:#9a6700; --accent:#0b5cad; }
     * { box-sizing: border-box; }
     body { margin:0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); }
-    header { height:56px; display:flex; align-items:center; justify-content:space-between; padding:0 20px; background:#ffffff; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:2; }
+    header { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:12px 20px; background:#ffffff; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:2; }
     h1 { font-size:18px; margin:0; font-weight:700; }
     main { max-width:1380px; margin:0 auto; padding:18px; display:grid; gap:16px; }
-    nav { display:flex; flex-wrap:wrap; gap:8px; }
+    nav { display:flex; flex-wrap:wrap; gap:12px; justify-content:flex-end; }
+    .nav-group { display:flex; align-items:center; gap:6px; border-left:1px solid var(--line); padding-left:12px; }
+    .nav-group:first-child { border-left:0; padding-left:0; }
+    .nav-label { color:var(--muted); font-size:12px; font-weight:700; }
     button, input, textarea, select { font:inherit; }
     button { border:1px solid var(--line); background:#fff; color:var(--text); border-radius:6px; padding:8px 11px; cursor:pointer; }
     button.primary { background:var(--accent); color:white; border-color:var(--accent); }
@@ -5167,27 +5476,87 @@ HTML = r"""<!doctype html>
     .tabs button[aria-selected="true"] { background:#e9f2ff; border-color:#b7d4fa; color:#073b75; }
     .view { display:none; }
     .view.active { display:grid; gap:16px; }
+    .summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; }
+    .summary-card, .task-card, .profile-card { border:1px solid var(--line); border-radius:8px; background:#fff; padding:14px; }
+    .summary-card strong { display:block; font-size:22px; margin-top:4px; }
+    .summary-card small, .profile-card small { color:var(--muted); }
+    .summary-card.ok { border-color:#b7e0c4; background:#f4fbf6; }
+    .summary-card.warn { border-color:#f2d18b; background:#fff9e8; }
+    .summary-card.bad { border-color:#efb4ad; background:#fff4f3; }
+    .task-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+    .task-card { text-align:left; min-height:92px; }
+    .task-card b { display:block; margin-bottom:5px; }
+    .task-card span { color:var(--muted); font-size:13px; }
+    .profile-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }
+    .profile-card h3 { margin:0 0 8px; font-size:16px; }
+    .badge { display:inline-flex; align-items:center; border-radius:999px; padding:3px 8px; font-size:12px; border:1px solid var(--line); background:#f8fafc; }
+    .badge.ok { color:var(--ok); border-color:#b7e0c4; background:#f4fbf6; }
+    .badge.warn { color:var(--warn); border-color:#f2d18b; background:#fff9e8; }
+    .badge.bad { color:var(--bad); border-color:#efb4ad; background:#fff4f3; }
+    .warning-list { display:grid; gap:8px; }
+    .warning-item { border-left:4px solid var(--warn); background:#fff9e8; padding:10px 12px; border-radius:6px; }
+    .empty-state { color:var(--muted); border:1px dashed var(--line); border-radius:8px; padding:14px; }
+    .section-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    @media (max-width: 760px) {
+      header { position:static; display:grid; }
+      nav { justify-content:flex-start; }
+      .nav-group { width:100%; border-left:0; padding-left:0; flex-wrap:wrap; }
+      button { min-height:38px; }
+    }
   </style>
 </head>
 <body>
   <header>
     <h1>dnscomplex</h1>
     <nav class="tabs">
-      <button data-tab="overview" aria-selected="true">狀態</button>
-      <button data-tab="traffic">流量</button>
-      <button data-tab="connections">連線</button>
-      <button data-tab="split">分流</button>
-      <button data-tab="config">參數</button>
-      <button data-tab="maintenance">維護</button>
+      <div class="nav-group"><span class="nav-label">日常</span><button data-tab="overview" aria-selected="true">總覽</button><button data-tab="daily-test">上網測試</button><button data-tab="connections">活躍連線</button><button data-tab="traffic">流量趨勢</button></div>
+      <div class="nav-group"><span class="nav-label">設定</span><button data-tab="dns">DNS 去廣告</button><button data-tab="split">AI/CN 分流</button><button data-tab="config">常用設定</button><button data-tab="wizard">精靈</button></div>
+      <div class="nav-group"><span class="nav-label">進階</span><button data-tab="services">服務狀態</button><button data-tab="update">更新</button><button data-tab="diagnostics">診斷</button><button data-tab="maintenance">進階維護</button></div>
     </nav>
   </header>
   <main>
     <div id="overview" class="view active">
       <section>
-        <div class="row" style="justify-content:space-between"><h2>程序狀態</h2><button onclick="refreshAll()">刷新</button></div>
-        <div id="services"></div>
+        <div class="section-head"><h2>而家是否正常</h2><button onclick="refreshAll()">刷新</button></div>
+        <div id="summaryCards" class="summary-grid"></div>
       </section>
-      <section><h2>IPsec / 路由摘要</h2><pre id="statusText"></pre></section>
+      <section>
+        <div class="section-head"><h2>需要處理</h2><button onclick="runAction('doctor')">執行 Doctor</button></div>
+        <div id="warningList" class="warning-list"></div>
+      </section>
+      <section>
+        <h2>我想做...</h2>
+        <div id="taskGrid" class="task-grid">
+          <button class="task-card" onclick="openTab('daily-test')"><b>測試手機上網</b><span>檢查 DNS、AI/CN、IPv6 同常見網站。</span></button>
+          <button class="task-card" onclick="openTab('split')"><b>設定 AI / CN 出口</b><span>切換 IPsec 或 Xray，測試後先套用。</span></button>
+          <button class="task-card" onclick="openTab('split')"><b>新增要分流的網站</b><span>加入 AI/CN domain 或 geosite/SRS。</span></button>
+          <button class="task-card" onclick="openTab('config')"><b>修改 SOCKS / IPsec</b><span>管理接入地址、端口及帳密。</span></button>
+          <button class="task-card" onclick="openTab('update')"><b>檢查更新</b><span>查看 stable/beta/pinned channel 和更新紀錄。</span></button>
+          <button class="task-card" onclick="openTab('diagnostics')"><b>生成診斷包</b><span>一鍵產生已消㾗 support bundle。</span></button>
+        </div>
+      </section>
+      <section>
+        <h2>分流摘要</h2>
+        <div id="profileCards" class="profile-grid"></div>
+      </section>
+    </div>
+    <div id="daily-test" class="view">
+      <section>
+        <div class="section-head"><h2>上網測試</h2><button onclick="runAction('test')">完整測試</button></div>
+        <div class="task-grid">
+          <button class="task-card" onclick="runAction('test-dns')"><b>測試 DNS</b><span>確認 AdGuard + SmartDNS 回應正常。</span></button>
+          <button class="task-card" onclick="runAction('test-ipsec')"><b>測試 AI/CN IPsec</b><span>確認分流隧道連線狀態。</span></button>
+          <button class="task-card" onclick="runAction('refresh-nftsets')"><b>刷新分流 IP</b><span>修正手機閒置後 nftset 過期問題。</span></button>
+          <button class="task-card" onclick="traceDomainValue('chatgpt.com')"><b>Trace ChatGPT</b><span>檢查 AI 分流路徑。</span></button>
+          <button class="task-card" onclick="traceDomainValue('youku.com')"><b>Trace Youku</b><span>檢查 CN 分流路徑。</span></button>
+          <button class="task-card" onclick="traceDomainValue('youtube.com')"><b>Trace YouTube</b><span>檢查 default / IPv6 路徑。</span></button>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <input id="quickTraceDomain" placeholder="輸入 domain，例如 claude.ai">
+          <button onclick="traceDomainValue(quickTraceDomain.value)">Trace domain</button>
+        </div>
+      </section>
+      <section><h2>測試輸出</h2><pre id="dailyOutput"></pre></section>
     </div>
     <div id="traffic" class="view">
       <section>
@@ -5208,9 +5577,27 @@ HTML = r"""<!doctype html>
         <p class="muted">Domain 由 AdGuard DNS 查詢紀錄對應目的 IP；直接連 IP、外部 DoH、或不經 200VM 的流量會標示為 unknown/bypass。</p>
       </section>
     </div>
+    <div id="dns" class="view">
+      <section>
+        <div class="section-head"><h2>DNS 去廣告</h2><button onclick="runAction('test-dns')">測試 DNS</button></div>
+        <div id="dnsSummary" class="summary-grid"></div>
+      </section>
+      <section>
+        <h2>常用操作</h2>
+        <div class="task-grid">
+          <button class="task-card" onclick="runAction('refresh-nftsets')"><b>刷新 AI/CN IP 快取</b><span>讓 SmartDNS 重新寫入 nftset。</span></button>
+          <button class="task-card" onclick="runAction('refresh-cn-overrides')"><b>刷新 CN Override</b><span>重新探測 Youku 等 CN 特例 IP。</span></button>
+          <button class="task-card" onclick="openTab('services')"><b>查看 SmartDNS / AdGuard</b><span>到進階頁檢查 service 狀態。</span></button>
+        </div>
+      </section>
+    </div>
     <div id="split" class="view">
       <section>
-        <h2>分流出口</h2>
+        <div class="section-head"><h2>AI/CN 分流</h2><button onclick="loadUiSummary()">刷新摘要</button></div>
+        <div id="splitProfileCards" class="profile-grid"></div>
+      </section>
+      <section>
+        <h2>出口模式</h2>
         <div class="grid">
           <div>
             <h2>AI</h2>
@@ -5267,6 +5654,42 @@ HTML = r"""<!doctype html>
         </div>
       </section>
     </div>
+    <div id="services" class="view">
+      <section>
+        <div class="section-head"><h2>服務狀態</h2><button onclick="loadStatus()">刷新</button></div>
+        <div id="servicesTable"></div>
+      </section>
+      <section><h2>IPsec / 路由摘要</h2><pre id="statusText"></pre></section>
+    </div>
+    <div id="wizard" class="view">
+      <section>
+        <div class="row" style="justify-content:space-between"><h2>安裝精靈 / 設定驗證器</h2><button onclick="loadWizardSchema()">載入 schema</button></div>
+        <div class="field"><label>config.env</label><textarea id="wizardConfig" placeholder="貼上 config.env，或按載入 schema 參考欄位"></textarea></div>
+        <div class="row"><button onclick="validateWizard()">驗證</button><button class="primary" onclick="applyWizard()">套用</button></div>
+        <pre id="wizardOutput"></pre>
+      </section>
+    </div>
+    <div id="update" class="view">
+      <section>
+        <div class="row" style="justify-content:space-between"><h2>Release / Update Channel</h2><button onclick="loadUpdateStatus()">刷新</button></div>
+        <div class="grid">
+          <div class="field"><label>Channel</label><select id="updateChannel"><option value="stable">stable</option><option value="beta">beta</option><option value="pinned">pinned</option></select></div>
+          <div class="field"><label>Pinned version</label><input id="updateVersion" placeholder="例如 v1.2.3"></div>
+        </div>
+        <div class="row"><button class="primary" onclick="runUpdate()">執行更新</button></div>
+        <pre id="updateOutput"></pre>
+      </section>
+    </div>
+    <div id="diagnostics" class="view">
+      <section>
+        <h2>已消㾗診斷工單 / Support Bundle</h2>
+        <div class="grid">
+          <div class="field"><label>Log 範圍</label><select id="bundleLogs"><option value="standard">standard</option><option value="minimal">minimal</option><option value="full">full</option></select></div>
+        </div>
+        <div class="row"><button class="primary" onclick="supportBundle()">生成診斷包</button></div>
+        <pre id="diagnosticsOutput"></pre>
+      </section>
+    </div>
     <div id="maintenance" class="view">
       <section>
         <h2>維護動作</h2>
@@ -5293,11 +5716,16 @@ HTML = r"""<!doctype html>
   </main>
 <script>
 const configKeys = CONFIG_KEYS_PLACEHOLDER;
-document.querySelectorAll('.tabs button').forEach(btn => btn.addEventListener('click', () => {
+function openTab(tab) {
   document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-selected','false'));
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  btn.setAttribute('aria-selected','true');
-  document.getElementById(btn.dataset.tab).classList.add('active');
+  const btn = document.querySelector(`.tabs button[data-tab="${tab}"]`);
+  if (btn) btn.setAttribute('aria-selected','true');
+  const view = document.getElementById(tab);
+  if (view) view.classList.add('active');
+}
+document.querySelectorAll('.tabs button').forEach(btn => btn.addEventListener('click', () => {
+  openTab(btn.dataset.tab);
 }));
 async function api(path, opts={}) {
   const res = await fetch(path, Object.assign({headers:{'content-type':'application/json'}}, opts));
@@ -5305,9 +5733,56 @@ async function api(path, opts={}) {
   return res.json();
 }
 function showOutput(data) { document.getElementById('output').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2); }
+function setPanelOutput(data) {
+  const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+  document.getElementById('output').textContent = text;
+  const daily = document.getElementById('dailyOutput');
+  if (daily) daily.textContent = text;
+}
+function badgeClass(state) {
+  if (state === 'ok' || state === true || state === '正常' || state === 'active') return 'ok';
+  if (state === 'bad' || state === false || state === '異常' || state === 'failed') return 'bad';
+  return 'warn';
+}
+function renderSummaryCards(cards) {
+  const host = document.getElementById('summaryCards');
+  host.innerHTML = (cards || []).map(card => `<div class="summary-card ${badgeClass(card.state)}"><small>${card.label}</small><strong>${card.value}</strong><small>${card.detail || ''}</small></div>`).join('');
+}
+function renderWarnings(warnings) {
+  const host = document.getElementById('warningList');
+  if (!warnings || !warnings.length) {
+    host.innerHTML = '<div class="empty-state">暫時無需要處理的問題。</div>';
+    return;
+  }
+  host.innerHTML = warnings.map(w => `<div class="warning-item"><b>${w.title}</b><br><span>${w.detail}</span></div>`).join('');
+}
+function renderProfiles(profiles, target='profileCards') {
+  const host = document.getElementById(target);
+  if (!host) return;
+  host.innerHTML = (profiles || []).map(p => `<div class="profile-card"><h3>${p.name}</h3><div class="row"><span class="badge ${badgeClass(p.state)}">${p.status}</span><span class="badge">${p.egress}</span><span class="badge">${p.ip_policy}</span></div><p class="muted">${p.dns_policy}</p><small>${p.detail || ''}</small></div>`).join('');
+}
+function renderDnsSummary(data) {
+  const host = document.getElementById('dnsSummary');
+  if (!host) return;
+  const cards = [
+    {label:'DNS 去廣告', value:data.adguard || '未知', detail:'AdGuard Home 負責過濾同 querylog', state:data.adguard_state || 'warn'},
+    {label:'DNS Cache', value:data.cache || 'SmartDNS', detail:'SmartDNS 作唯一 cache 權威', state:data.cache_state || 'ok'},
+    {label:'AI/CN DNS', value:'只回 IPv4', detail:'避免 AI/CN AAAA 外洩', state:'ok'},
+    {label:'Default DNS', value:'IPv4 + IPv6', detail:'default 才同時支援 A/AAAA', state:'ok'}
+  ];
+  host.innerHTML = cards.map(card => `<div class="summary-card ${badgeClass(card.state)}"><small>${card.label}</small><strong>${card.value}</strong><small>${card.detail}</small></div>`).join('');
+}
+async function loadUiSummary() {
+  const data = await api('/api/ui/summary');
+  renderSummaryCards(data.cards);
+  renderWarnings(data.warnings);
+  renderProfiles(data.profiles, 'profileCards');
+  renderProfiles(data.profiles, 'splitProfileCards');
+  renderDnsSummary(data.dns || {});
+}
 async function loadStatus() {
   const data = await api('/api/status');
-  document.getElementById('services').innerHTML = '<table><thead><tr><th>服務</th><th>狀態</th><th>啟用</th></tr></thead><tbody>' + data.services.map(s => `<tr><td>${s.name}</td><td><span class="status ${s.active}"><span class="dot"></span>${s.active}</span></td><td>${s.enabled}</td></tr>`).join('') + '</tbody></table>';
+  document.getElementById('servicesTable').innerHTML = '<table><thead><tr><th>服務</th><th>狀態</th><th>啟用</th></tr></thead><tbody>' + data.services.map(s => `<tr><td>${s.name}</td><td><span class="status ${s.active}"><span class="dot"></span>${s.active}</span></td><td>${s.enabled}</td></tr>`).join('') + '</tbody></table>';
   document.getElementById('statusText').textContent = data.summary;
 }
 async function loadTraffic() {
@@ -5391,7 +5866,7 @@ async function saveConfig() {
   await refreshAll();
 }
 async function runAction(action) {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action})}));
+  setPanelOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action})}));
   await refreshAll();
 }
 async function domainAction(action) {
@@ -5436,9 +5911,42 @@ async function setUpdateTime() {
   await refreshAll();
 }
 async function traceDomainAction() {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'trace-domain', value:traceDomain.value})}));
+  setPanelOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'trace-domain', value:traceDomain.value})}));
 }
-async function refreshAll() { await Promise.all([loadStatus(), loadTraffic(), loadConnections(), loadConfig(), loadDomains(), loadMetrics()]); }
+async function traceDomainValue(value) {
+  if (!value) return;
+  setPanelOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'trace-domain', value})}));
+}
+async function loadWizardSchema() {
+  const data = await api('/api/wizard/schema');
+  wizardOutput.textContent = JSON.stringify(data, null, 2);
+  if (!wizardConfig.value) wizardConfig.value = data.template || '';
+}
+async function validateWizard() {
+  const data = await api('/api/wizard/validate', {method:'POST', body: JSON.stringify({config:wizardConfig.value})});
+  wizardOutput.textContent = JSON.stringify(data, null, 2);
+}
+async function applyWizard() {
+  const data = await api('/api/wizard/apply', {method:'POST', body: JSON.stringify({config:wizardConfig.value})});
+  wizardOutput.textContent = JSON.stringify(data, null, 2);
+  await refreshAll();
+}
+async function loadUpdateStatus() {
+  const data = await api('/api/update/status');
+  updateOutput.textContent = JSON.stringify(data, null, 2);
+  updateChannel.value = data.channel || 'stable';
+  updateVersion.value = data.pinned_version || '';
+}
+async function runUpdate() {
+  const data = await api('/api/update/run', {method:'POST', body: JSON.stringify({channel:updateChannel.value, version:updateVersion.value})});
+  updateOutput.textContent = JSON.stringify(data, null, 2);
+  await refreshAll();
+}
+async function supportBundle() {
+  const data = await api('/api/support-bundle', {method:'POST', body: JSON.stringify({include_logs:bundleLogs.value})});
+  diagnosticsOutput.textContent = JSON.stringify(data, null, 2);
+}
+async function refreshAll() { await Promise.all([loadUiSummary(), loadStatus(), loadTraffic(), loadConnections(), loadConfig(), loadDomains(), loadMetrics()]); }
 refreshAll().catch(err => showOutput(String(err)));
 </script>
 </body>
@@ -5503,6 +6011,89 @@ def safe_config():
         else:
             safe[key] = value
     return safe
+
+def redact_text(text):
+    patterns = [
+        (r"(AI_IPSEC_USERNAME|CN_IPSEC_USERNAME|AI_IPSEC_PASSWORD|CN_IPSEC_PASSWORD|DNSCOMPLEX_WEB_PASSWORD|AI_XRAY_URI|CN_XRAY_URI|AI_XRAY_OUTBOUND_JSON|CN_XRAY_OUTBOUND_JSON|GITHUB_TOKEN|GH_TOKEN|TOKEN|USERNAME|PASSWORD|SECRET|PSK|COOKIE|SESSION)=([^\s]+)", r"\1=[REDACTED_SECRET]"),
+        (r"(vless|vmess|trojan|ss)://[^\s]+", r"\1://[REDACTED_XRAY_URI]"),
+        (r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "[REDACTED_UUID]"),
+        (r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", "[REDACTED_IPV4]"),
+        (r"\b(?:10|127)\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}\b", "[REDACTED_IPV4]"),
+        (r"\b172\.(?:1[6-9]|2[0-9]|3[0-1])\.[0-9]{1,3}\.[0-9]{1,3}\b", "[REDACTED_IPV4]"),
+        (r"\b192\.168\.[0-9]{1,3}\.[0-9]{1,3}\b", "[REDACTED_IPV4]"),
+        (r"\bfd[0-9a-fA-F:]*:[0-9a-fA-F:]*\b", "[REDACTED_IPV6]"),
+        (r"\b[\w.-]+\.local\b", "[REDACTED_HOSTNAME]"),
+    ]
+    redacted = text
+    for pattern, repl in patterns:
+        redacted = re.sub(pattern, repl, redacted)
+    return redacted
+
+def wizard_template():
+    return shell_output([DNSCOMPLEX, "wizard"], 10)
+
+def wizard_schema():
+    return {
+        "profiles": ["ai", "cn", "default"],
+        "deploy_modes": ["routeros-policy", "vlan-gateway"],
+        "egress_modes": ["ipsec", "xray"],
+        "update_channels": ["stable", "beta", "pinned"],
+        "required_routeros_policy": ["WAN_IFACE", "ROUTEROS_LAN_IPV4", "LINUX_LAN_IPV4", "LAN_CLIENT_IPV4_CIDR"],
+        "required_ipsec": ["AI_IPSEC_USERNAME", "AI_IPSEC_PASSWORD", "CN_IPSEC_USERNAME", "CN_IPSEC_PASSWORD"],
+        "template": wizard_template(),
+    }
+
+def validate_config_text(text):
+    with tempfile.NamedTemporaryFile("w+", delete=False) as fh:
+        fh.write(text)
+        path = fh.name
+    try:
+        return run([DNSCOMPLEX, "validate-config", "--json", path], 60)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+def apply_config_text(text):
+    validation = validate_config_text(text)
+    if not validation.get("ok"):
+        return {"ok": False, "code": validation.get("code", 1), "output": validation.get("output", "")}
+    tmp = CONFIG + ".wizardtmp"
+    backup = CONFIG + ".wizardbak"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+        if not text.endswith("\n"):
+            fh.write("\n")
+    os.chmod(tmp, 0o600)
+    if os.path.exists(CONFIG):
+        with open(CONFIG, "r", encoding="utf-8", errors="replace") as src, open(backup, "w", encoding="utf-8") as dst:
+            dst.write(src.read())
+        os.chmod(backup, 0o600)
+    os.replace(tmp, CONFIG)
+    result = run([DNSCOMPLEX, "fix"], 180)
+    if not result.get("ok") and os.path.exists(backup):
+        os.replace(backup, CONFIG)
+        rollback = run([DNSCOMPLEX, "fix"], 180)
+        result["output"] += "\nrollback:\n" + rollback.get("output", "")
+    elif os.path.exists(backup):
+        os.unlink(backup)
+    return result
+
+def update_status():
+    cfg = parse_config()
+    log_path = cfg.get("DNSCOMPLEX_UPDATE_LAST_LOG", "/var/log/dnscomplex/update-latest.log")
+    log_text = ""
+    if os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            log_text = "".join(fh.readlines()[-80:])
+    return {
+        "channel": cfg.get("DNSCOMPLEX_UPDATE_CHANNEL", "stable"),
+        "pinned_version": cfg.get("DNSCOMPLEX_PINNED_VERSION", ""),
+        "github_release_policy": cfg.get("GITHUB_RELEASE_POLICY", "latest"),
+        "last_update_log": log_path,
+        "last_update_output": redact_text(log_text),
+    }
 
 def run(args, timeout=120):
     proc = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
@@ -5807,16 +6398,85 @@ def metrics_history(limit=720):
     except Exception as exc:
         return [{"error": str(exc)}]
 
+def service_active(name):
+    return shell_output(["systemctl", "is-active", name], 5).strip() == "active"
+
+def ui_summary():
+    cfg = parse_config()
+    health_raw = shell_output([DNSCOMPLEX, "health", "--json"], 15)
+    try:
+        health = json.loads(health_raw)
+    except json.JSONDecodeError:
+        health = {"status": "degraded", "error": health_raw}
+
+    adguard_ok = service_active("AdGuardHome.service")
+    smartdns_ok = service_active("smartdns.service")
+    singbox_ok = service_active("sing-box.service")
+    nft_ok = service_active("nftables.service")
+    xray_ok = service_active("xray-dnscomplex.service")
+    ai_mode = cfg.get("AI_EGRESS_MODE", "ipsec")
+    cn_mode = cfg.get("CN_EGRESS_MODE", "ipsec")
+    ipsec_ok = bool(health.get("ipsec_ok", False))
+    conntrack = float(health.get("conntrack_usage_percent", 0) or 0)
+    dns_latency = health.get("dns_latency_ms", "-")
+    default_ipv6 = cfg.get("DEFAULT_IPV6_MODE", "auto")
+
+    cards = [
+        {"label": "上網狀態", "value": "正常" if health.get("status") == "healthy" else "需檢查", "detail": f"DNS {dns_latency}ms / conntrack {conntrack:.2f}%", "state": "ok" if health.get("status") == "healthy" else "bad"},
+        {"label": "DNS 去廣告", "value": "啟用" if adguard_ok and smartdns_ok else "異常", "detail": "AdGuard 過濾，SmartDNS cache", "state": "ok" if adguard_ok and smartdns_ok else "bad"},
+        {"label": "AI 分流", "value": ai_mode.upper(), "detail": "只走 IPv4，避免 AAAA 外洩", "state": "ok" if (ai_mode == "xray" and xray_ok) or (ai_mode == "ipsec" and ipsec_ok) else "warn"},
+        {"label": "CN 分流", "value": cn_mode.upper(), "detail": "只走 IPv4，SmartDNS 寫 nftset", "state": "ok" if (cn_mode == "xray" and xray_ok) or (cn_mode == "ipsec" and ipsec_ok) else "warn"},
+        {"label": "IPv6 / Default", "value": default_ipv6, "detail": "default 可用 IPv4 + IPv6", "state": "ok" if default_ipv6 in {"auto", "on"} else "warn"},
+    ]
+
+    warnings = []
+    if not singbox_ok:
+        warnings.append({"title": "sing-box 未正常運行", "detail": "TUN / SOCKS / 分流會受影響，先到進階維護執行 fix。"})
+    if not adguard_ok or not smartdns_ok:
+        warnings.append({"title": "DNS 服務異常", "detail": "AdGuard 或 SmartDNS 未 active，手機可能會解析失敗。"})
+    if not nft_ok:
+        warnings.append({"title": "nftables 異常", "detail": "AI/CN 目的 IP policy 可能不生效。"})
+    if (ai_mode == "ipsec" or cn_mode == "ipsec") and not ipsec_ok:
+        warnings.append({"title": "IPsec 未完全連線", "detail": "使用 IPsec 的 AI/CN profile 可能未能分流。"})
+    if conntrack >= 70:
+        warnings.append({"title": "Conntrack 使用率偏高", "detail": f"目前 {conntrack:.2f}%，大量設備使用時需要處理容量。"})
+    if cfg.get("ADGUARD_DNS_CACHE_MODE", "off") != "off":
+        warnings.append({"title": "AdGuard cache 被開啟", "detail": "建議由 SmartDNS 作唯一 DNS cache，避免 double-cache。"})
+
+    profiles = [
+        {"name": "AI", "status": "正常" if cards[2]["state"] == "ok" else "需檢查", "state": cards[2]["state"], "egress": ai_mode, "ip_policy": "只 IPv4", "dns_policy": "AI SmartDNS 只回 A 記錄並寫入 ai4 nftset", "detail": "OpenAI / Claude / Meta 等 domain 使用此 profile。"},
+        {"name": "CN", "status": "正常" if cards[3]["state"] == "ok" else "需檢查", "state": cards[3]["state"], "egress": cn_mode, "ip_policy": "只 IPv4", "dns_policy": "CN SmartDNS 只回 A 記錄並寫入 cn4 nftset", "detail": "Youku / Bilibili / iQiyi 等視頻站使用此 profile。"},
+        {"name": "Default", "status": "正常" if health.get("status") == "healthy" else "需檢查", "state": "ok" if health.get("status") == "healthy" else "warn", "egress": "RouterOS", "ip_policy": "IPv4 + IPv6", "dns_policy": "Default SmartDNS 可回 A/AAAA", "detail": "不在 AI/CN 清單的網站走 default。"},
+    ]
+
+    dns = {
+        "adguard": "啟用" if adguard_ok else "異常",
+        "adguard_state": "ok" if adguard_ok else "bad",
+        "cache": "SmartDNS",
+        "cache_state": "ok" if cfg.get("ADGUARD_DNS_CACHE_MODE", "off") == "off" else "warn",
+    }
+    return {"cards": cards, "warnings": warnings, "profiles": profiles, "dns": dns}
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
 
-    def authed(self):
-        cfg = parse_config()
-        password = cfg.get("DNSCOMPLEX_WEB_PASSWORD", "")
+    def session_token(self, password):
+        return hashlib.sha256(("dnscomplex-web:" + password).encode("utf-8")).hexdigest()
+
+    def cookie_ok(self, password):
+        cookie = self.headers.get("Cookie", "")
+        expected = self.session_token(password)
+        for item in cookie.split(";"):
+            if "=" not in item:
+                continue
+            key, value = item.strip().split("=", 1)
+            if key == "dnscomplex_session" and value == expected:
+                return True
+        return False
+
+    def basic_ok(self, password):
         auth = self.headers.get("Authorization", "")
-        if not password:
-            return False
         if not auth.startswith("Basic "):
             return False
         try:
@@ -5826,19 +6486,111 @@ class Handler(BaseHTTPRequestHandler):
         supplied = decoded.split(":", 1)[1] if ":" in decoded else ""
         return supplied == password
 
+    def authed(self):
+        cfg = parse_config()
+        password = cfg.get("DNSCOMPLEX_WEB_PASSWORD", "")
+        if not password:
+            return False
+        if self.cookie_ok(password):
+            self._set_session_cookie = False
+            return True
+        if self.basic_ok(password):
+            self._set_session_cookie = True
+            self._session_password = password
+            return True
+        return False
+
+    def maybe_set_session_cookie(self):
+        if getattr(self, "_set_session_cookie", False):
+            token = self.session_token(getattr(self, "_session_password", ""))
+            self.send_header("Set-Cookie", f"dnscomplex_session={token}; Path=/; SameSite=Strict; HttpOnly")
+
     def require_auth(self):
         if self.authed():
             return True
+        if self.path.startswith("/api/"):
+            self.send_json({"error": "unauthorized"}, 401)
+            return False
+        self.send_login_page()
+        return False
+
+    def send_auth_challenge(self):
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="dnscomplex"')
         self.end_headers()
-        return False
+
+    def send_html(self, html, code=200):
+        body = html.encode("utf-8")
+        self.send_response(code)
+        self.send_header("content-type", "text/html; charset=utf-8")
+        self.send_header("content-length", str(len(body)))
+        self.maybe_set_session_cookie()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_login_page(self, error=""):
+        error_html = f'<div class="login-error">{html.escape(error)}</div>' if error else ""
+        self.send_html(f'''<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dnscomplex 登入</title>
+  <style>
+    body {{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f6f8fb; color:#111827; }}
+    form {{ width:min(360px, calc(100vw - 32px)); background:white; border:1px solid #d8dee8; border-radius:8px; padding:24px; box-shadow:0 12px 32px rgba(15,23,42,.12); }}
+    h1 {{ margin:0 0 6px; font-size:24px; }}
+    p {{ margin:0 0 20px; color:#64748b; }}
+    label {{ display:block; font-size:13px; font-weight:700; margin:14px 0 6px; }}
+    input {{ width:100%; box-sizing:border-box; border:1px solid #cbd5e1; border-radius:6px; padding:10px 12px; font-size:15px; }}
+    button {{ width:100%; margin-top:18px; border:0; border-radius:6px; padding:11px 14px; background:#2563eb; color:white; font-weight:700; font-size:15px; cursor:pointer; }}
+    .login-error {{ margin:14px 0 0; padding:10px 12px; border:1px solid #fecaca; border-radius:6px; background:#fef2f2; color:#991b1b; }}
+  </style>
+</head>
+<body>
+  <form method="post" action="/login">
+    <h1>dnscomplex</h1>
+    <p>登入管理介面</p>
+    <label for="username">用戶名稱</label>
+    <input id="username" name="username" value="admin" autocomplete="username">
+    <label for="password">密碼</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" autofocus>
+    {error_html}
+    <button type="submit">登入</button>
+  </form>
+</body>
+</html>''')
+
+    def handle_login(self):
+        cfg = parse_config()
+        password = cfg.get("DNSCOMPLEX_WEB_PASSWORD", "")
+        length = int(self.headers.get("content-length", "0"))
+        raw = self.rfile.read(length).decode("utf-8") if length > 0 else ""
+        content_type = self.headers.get("content-type", "")
+        if "application/json" in content_type:
+            try:
+                payload = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                payload = {}
+        else:
+            parsed = urllib.parse.parse_qs(raw)
+            payload = {key: values[0] if values else "" for key, values in parsed.items()}
+        if payload.get("username", "admin") == "admin" and payload.get("password", "") == password and password:
+            self._set_session_cookie = True
+            self._session_password = password
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.maybe_set_session_cookie()
+            self.end_headers()
+            return
+        self.send_login_page("登入資料不正確", 401)
 
     def send_json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("content-type", "application/json; charset=utf-8")
         self.send_header("content-length", str(len(body)))
+        self.maybe_set_session_cookie()
         self.end_headers()
         self.wfile.write(body)
 
@@ -5849,16 +6601,14 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
     def do_GET(self):
+        if self.path == "/login":
+            self.send_login_page()
+            return
         if not self.require_auth():
             return
         if self.path == "/":
             html = HTML.replace("CONFIG_KEYS_PLACEHOLDER", json.dumps(CONFIG_KEYS))
-            body = html.encode("utf-8")
-            self.send_response(200)
-            self.send_header("content-type", "text/html; charset=utf-8")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self.send_html(html)
             return
         if self.path == "/api/status":
             summary = "\n".join([
@@ -5874,6 +6624,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/config":
             self.send_json(safe_config())
+            return
+        if self.path == "/api/ui/summary":
+            self.send_json(ui_summary())
+            return
+        if self.path == "/api/wizard/schema":
+            self.send_json(wizard_schema())
+            return
+        if self.path == "/api/update/status":
+            self.send_json(update_status())
             return
         if self.path.startswith("/api/trace-domain"):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -5910,6 +6669,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if self.path == "/login":
+            self.handle_login()
+            return
         if not self.require_auth():
             return
         try:
@@ -5917,6 +6679,34 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/config":
                 write_config(payload)
                 result = run([DNSCOMPLEX, "fix"], 180)
+                self.send_json(result)
+                return
+            if self.path == "/api/wizard/validate":
+                result = validate_config_text(payload.get("config", ""))
+                result["output"] = redact_text(result.get("output", ""))
+                self.send_json(result)
+                return
+            if self.path == "/api/wizard/apply":
+                result = apply_config_text(payload.get("config", ""))
+                result["output"] = redact_text(result.get("output", ""))
+                self.send_json(result)
+                return
+            if self.path == "/api/update/run":
+                args = [DNSCOMPLEX, "update-software"]
+                channel = payload.get("channel", "")
+                version = payload.get("version", "")
+                if channel:
+                    args.extend(["--channel", channel])
+                if version:
+                    args.extend(["--version", version])
+                result = run(args, 900)
+                result["output"] = redact_text(result.get("output", ""))
+                self.send_json(result)
+                return
+            if self.path == "/api/support-bundle":
+                include_logs = payload.get("include_logs", "standard")
+                result = run([DNSCOMPLEX, "support-bundle", "--include-logs", include_logs], 300)
+                result["output"] = redact_text(result.get("output", ""))
                 self.send_json(result)
                 return
             if self.path == "/api/action":
