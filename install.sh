@@ -2604,11 +2604,13 @@ normalize_adguard_cache_config() {
       }
       close(cache)
     }
-    /^  cache_(enabled|size|optimistic|ttl_min|ttl_max):/ { next }
-    /^  blocked_response_ttl:/ {
-      print
+    /^  cache_/ { next }
+    /^  (bogus_nxdomain|blocked_response_ttl):/ && !inserted {
       printf "%s", block
       inserted = 1
+    }
+    /^  blocked_response_ttl:/ {
+      print
       next
     }
     { print }
@@ -3349,25 +3351,76 @@ profile_file() {
   esac
 }
 
+add_list_item() {
+  local list=$1
+  local item=$2
+  {
+    split_words "$list"
+    printf '%s\n' "$item"
+  } | awk 'NF && !seen[$0]++'
+}
+
+remove_list_item() {
+  local list=$1
+  local item=$2
+  split_words "$list" | awk -v item="$item" 'NF && $0 != item && !seen[$0]++'
+}
+
 add_domain_cmd() {
   need_root
   [[ $# -eq 2 ]] || die "usage: dnscomplex add-domain ai|cn DOMAIN_OR_GEOSITE"
+  local profile=$1
+  local value=$2
   local file
-  file=$(profile_file "$1")
+  file=$(profile_file "$profile")
   mkdir -p "$(dirname "$file")"
-  grep -Fxq "$2" "$file" 2>/dev/null || printf '%s\n' "$2" >>"$file"
+  if [[ "$value" != *.* ]]; then
+    case "$profile" in
+      ai)
+        AI_GEOSITE_SOURCES=$(add_list_item "$AI_GEOSITE_SOURCES" "$value" | xargs)
+        write_config_cmd
+        ;;
+      cn)
+        CN_VIDEO_SOURCES=$(add_list_item "$CN_VIDEO_SOURCES" "$value" | xargs)
+        write_config_cmd
+        ;;
+    esac
+  else
+    grep -Fxq "$value" "$file" 2>/dev/null || printf '%s\n' "$value" >>"$file"
+  fi
   update_geosite_cmd
 }
 
 remove_domain_cmd() {
   need_root
   [[ $# -eq 2 ]] || die "usage: dnscomplex remove-domain ai|cn DOMAIN_OR_GEOSITE"
-  local file tmp
-  file=$(profile_file "$1")
+  local profile=$1
+  local value=$2
+  local file tmp changed=0
+  file=$(profile_file "$profile")
   tmp=$(mktemp)
-  grep -Fxv "$2" "$file" >"$tmp" || true
+  grep -Fxv "$value" "$file" >"$tmp" || true
   install -m 0644 "$tmp" "$file"
   rm -f "$tmp"
+  case "$profile" in
+    ai)
+      if split_words "$AI_GEOSITE_SOURCES" | grep -Fxq "$value"; then
+        AI_GEOSITE_SOURCES=$(remove_list_item "$AI_GEOSITE_SOURCES" "$value" | xargs)
+        changed=1
+      fi
+      if split_words "$AI_SUPPORT_DOMAINS" | grep -Fxq "$value"; then
+        AI_SUPPORT_DOMAINS=$(remove_list_item "$AI_SUPPORT_DOMAINS" "$value" | xargs)
+        changed=1
+      fi
+      ;;
+    cn)
+      if split_words "$CN_VIDEO_SOURCES" | grep -Fxq "$value"; then
+        CN_VIDEO_SOURCES=$(remove_list_item "$CN_VIDEO_SOURCES" "$value" | xargs)
+        changed=1
+      fi
+      ;;
+  esac
+  ((changed == 0)) || write_config_cmd
   update_geosite_cmd
 }
 
@@ -3865,6 +3918,7 @@ fix_cmd() {
   swanctl --initiate --child ai || true
   swanctl --initiate --child cn || true
   "$0" routes up || true
+  render_adguard_runtime || true
   restart_dns_stack || true
   "$0" refresh-nftsets || true
 }
@@ -5471,7 +5525,7 @@ HTML = r"""<!doctype html>
     .active .dot { background:var(--ok); }
     .failed .dot, .inactive .dot { background:var(--bad); }
     .muted { color:var(--muted); }
-    pre { margin:0; background:#0f1720; color:#dbe7ff; border-radius:8px; padding:12px; overflow:auto; max-height:420px; font-size:12px; }
+    pre { margin:0; background:#0f1720; color:#dbe7ff; border-radius:8px; padding:12px; overflow:auto; max-height:420px; max-width:100%; font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; }
     .tabs { display:flex; gap:8px; flex-wrap:wrap; }
     .tabs button[aria-selected="true"] { background:#e9f2ff; border-color:#b7d4fa; color:#073b75; }
     .view { display:none; }
@@ -5497,6 +5551,18 @@ HTML = r"""<!doctype html>
     .warning-item { border-left:4px solid var(--warn); background:#fff9e8; padding:10px 12px; border-radius:6px; }
     .empty-state { color:var(--muted); border:1px dashed var(--line); border-radius:8px; padding:14px; }
     .section-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    .help-card { background:#f8fafc; border:1px solid var(--line); border-radius:8px; padding:12px; color:#334155; }
+    .help-card h3 { margin:0 0 6px; font-size:14px; }
+    .help-card p { margin:0; color:var(--muted); font-size:13px; line-height:1.45; }
+    .mini-list { margin:8px 0 0; padding-left:18px; color:var(--muted); font-size:13px; line-height:1.55; }
+    .domain-sections { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }
+    .domain-box { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; }
+    .domain-box h3 { margin:0 0 8px; font-size:14px; }
+    .pill-list { display:flex; gap:6px; flex-wrap:wrap; }
+    .pill { border:1px solid var(--line); border-radius:999px; padding:3px 8px; background:#f8fafc; font-size:12px; }
+    .form-hint { color:var(--muted); font-size:12px; line-height:1.45; }
+    .output-note { margin-top:10px; color:var(--muted); font-size:12px; }
+    .config-advanced summary { cursor:pointer; color:var(--accent); font-weight:700; margin-bottom:10px; }
     @media (max-width: 760px) {
       header { position:static; display:grid; }
       nav { justify-content:flex-start; }
@@ -5617,30 +5683,45 @@ HTML = r"""<!doctype html>
       </section>
       <section>
         <h2>Domain / Geosite</h2>
+        <div class="help-card">
+          <h3>點樣用</h3>
+          <p>輸入 <b>domain</b> 例如 <code>example.com</code> 會加入自訂分流；輸入 <b>geosite source</b> 例如 <code>openai</code>、<code>anthropic</code>、<code>meta</code>、<code>bilibili</code> 會加入或移除內建來源。移除後會自動重建 SRS 並刷新 IP 快取。</p>
+          <ul class="mini-list">
+            <li>AI：OpenAI / Claude / Meta 等，只回 IPv4，按出口模式走 IPsec 或 Xray。</li>
+            <li>CN：Youku / Bilibili / iQiyi 等，只回 IPv4，按出口模式走 IPsec 或 Xray。</li>
+            <li>唔確定生效未：輸入 domain 後按「Trace 生效路徑」。</li>
+          </ul>
+        </div>
         <div class="grid">
           <div class="field"><label>分類</label><select id="domainProfile"><option value="ai">AI</option><option value="cn">CN</option></select></div>
-          <div class="field"><label>SRS source / geosite / domain</label><textarea id="domainValue" placeholder="例如 openai、claude、meta、bilibili.com；可逐行批量貼上"></textarea></div>
+          <div class="field"><label>SRS source / geosite / domain</label><textarea id="domainValue" placeholder="例如 meta 或 example.com；可逐行批量貼上"></textarea><div class="form-hint">想移除 Meta：分類揀 AI，輸入 meta，按「移除」。</div></div>
         </div>
-        <div class="row"><button class="primary" onclick="rulesDomain('add')">新增 Domain/Geosite</button><button class="danger" onclick="rulesDomain('remove')">移除 Domain/Geosite</button><button onclick="rulesRebuild()">重建並套用 SRS</button></div>
+        <div class="row"><button class="primary" onclick="rulesDomain('add')">新增</button><button class="danger" onclick="rulesDomain('remove')">移除</button><button onclick="rulesRebuild()">只重建並套用 SRS</button><button onclick="traceDomainValue(domainValue.value.split(/\\s+/)[0])">Trace 生效路徑</button></div>
+        <div class="output-note">操作結果會顯示在下方；成功後會自動刷新「目前清單」。</div>
       </section>
-      <section><h2>目前分流清單 / 生效預覽</h2><pre id="domainsText"></pre></section>
+      <section><h2>目前清單</h2><div id="domainsStructured" class="domain-sections"></div><details style="margin-top:12px"><summary>查看原始檔案內容</summary><pre id="domainsText"></pre></details></section>
+      <section><h2>操作結果</h2><pre id="splitOutput"></pre></section>
     </div>
     <div id="config" class="view">
       <section>
-        <div class="row" style="justify-content:space-between"><h2>主要參數</h2><button class="primary" onclick="saveConfig()">儲存並修正設定</button></div>
-        <div id="configForm" class="grid"></div>
+        <div class="section-head"><h2>常用設定</h2><button class="primary" onclick="saveConfig()">儲存進階 config 並修正設定</button></div>
+        <div class="help-card">
+          <h3>常用設定只放日常會改的項目</h3>
+          <p>一般只需要改 SOCKS、IPsec 帳密、自動更新時間。完整 config.env 放在下方「進階原始 config」，未清楚用途前不要改。</p>
+        </div>
       </section>
       <section>
-        <h2>快速修改</h2>
         <div class="grid">
           <div>
-            <h2>SOCKS</h2>
+            <h2>SOCKS 接入</h2>
+            <p class="muted">供手機、Xray VM 或其他設備用 SOCKS 代理接入。</p>
             <div class="field"><label>Listen</label><input id="socksListen"></div>
             <div class="field"><label>Port</label><input id="socksPort"></div>
             <button onclick="setSocks()">更新 SOCKS</button>
           </div>
           <div>
             <h2>IPsec 帳密</h2>
+            <p class="muted">只影響使用 IPsec 出口模式的 AI/CN profile。</p>
             <div class="field"><label>分類</label><select id="ipsecProfile"><option value="ai">AI</option><option value="cn">CN</option></select></div>
             <div class="field"><label>Username</label><input id="ipsecUser"></div>
             <div class="field"><label>Password</label><input id="ipsecPass" type="password"></div>
@@ -5648,10 +5729,18 @@ HTML = r"""<!doctype html>
           </div>
           <div>
             <h2>自動更新</h2>
+            <p class="muted">每日保守更新 Debian 套件、GitHub release 同 geosite/SRS。</p>
             <div class="field"><label>每日時間 HH:MM</label><input id="updateTime"></div>
             <button onclick="setUpdateTime()">更新時間</button>
           </div>
         </div>
+      </section>
+      <section><h2>操作結果</h2><pre id="configOutput"></pre></section>
+      <section class="config-advanced">
+        <details>
+          <summary>進階原始 config.env</summary>
+          <div id="configForm" class="grid"></div>
+        </details>
       </section>
     </div>
     <div id="services" class="view">
@@ -5664,6 +5753,10 @@ HTML = r"""<!doctype html>
     <div id="wizard" class="view">
       <section>
         <div class="row" style="justify-content:space-between"><h2>安裝精靈 / 設定驗證器</h2><button onclick="loadWizardSchema()">載入 schema</button></div>
+        <div class="help-card">
+          <h3>用途</h3>
+          <p>精靈會先驗證，不會直接覆蓋 production。新安裝或想整理 config 時，先貼上 config.env，按「驗證」，通過後才按「套用」。</p>
+        </div>
         <div class="field"><label>config.env</label><textarea id="wizardConfig" placeholder="貼上 config.env，或按載入 schema 參考欄位"></textarea></div>
         <div class="row"><button onclick="validateWizard()">驗證</button><button class="primary" onclick="applyWizard()">套用</button></div>
         <pre id="wizardOutput"></pre>
@@ -5672,6 +5765,14 @@ HTML = r"""<!doctype html>
     <div id="update" class="view">
       <section>
         <div class="row" style="justify-content:space-between"><h2>Release / Update Channel</h2><button onclick="loadUpdateStatus()">刷新</button></div>
+        <div class="help-card">
+          <h3>點樣揀</h3>
+          <ul class="mini-list">
+            <li><b>stable：一般使用</b>，只追最新穩定 release。</li>
+            <li><b>beta</b>：追 prerelease，適合測試新功能。</li>
+            <li><b>pinned</b>：固定版本，例如上一版最穩時使用；要填 Pinned version。</li>
+          </ul>
+        </div>
         <div class="grid">
           <div class="field"><label>Channel</label><select id="updateChannel"><option value="stable">stable</option><option value="beta">beta</option><option value="pinned">pinned</option></select></div>
           <div class="field"><label>Pinned version</label><input id="updateVersion" placeholder="例如 v1.2.3"></div>
@@ -5732,12 +5833,44 @@ async function api(path, opts={}) {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
-function showOutput(data) { document.getElementById('output').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2); }
-function setPanelOutput(data) {
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function outputText(data) {
+  return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+}
+function writeOutput(target, data) {
+  const node = typeof target === 'string' ? document.getElementById(target) : target;
+  if (node) node.textContent = outputText(data);
+}
+function activeOutputTarget() {
+  if (document.getElementById('daily-test')?.classList.contains('active')) return 'dailyOutput';
+  if (document.getElementById('split')?.classList.contains('active')) return 'splitOutput';
+  if (document.getElementById('config')?.classList.contains('active')) return 'configOutput';
+  if (document.getElementById('wizard')?.classList.contains('active')) return 'wizardOutput';
+  if (document.getElementById('update')?.classList.contains('active')) return 'updateOutput';
+  if (document.getElementById('diagnostics')?.classList.contains('active')) return 'diagnosticsOutput';
+  return 'output';
+}
+function showOutput(data) { writeOutput('output', data); }
+function setPanelOutput(data, target='output') {
   const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
-  document.getElementById('output').textContent = text;
+  writeOutput(target, text);
+  writeOutput('output', text);
   const daily = document.getElementById('dailyOutput');
   if (daily) daily.textContent = text;
+}
+async function runWithOutput(target, task) {
+  writeOutput(target, '處理中...');
+  try {
+    const data = await task();
+    writeOutput(target, data);
+    return data;
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    writeOutput(target, '操作失敗：\n' + message);
+    return {ok:false, output:message};
+  }
 }
 function badgeClass(state) {
   if (state === 'ok' || state === true || state === '正常' || state === 'active') return 'ok';
@@ -5754,7 +5887,7 @@ function renderWarnings(warnings) {
     host.innerHTML = '<div class="empty-state">暫時無需要處理的問題。</div>';
     return;
   }
-  host.innerHTML = warnings.map(w => `<div class="warning-item"><b>${w.title}</b><br><span>${w.detail}</span></div>`).join('');
+  host.innerHTML = warnings.map(w => `<div class="warning-item"><b>${escapeHtml(w.title)}</b><br><span>${escapeHtml(w.detail)}</span>${w.next ? `<br><small><b>建議下一步：</b>${escapeHtml(w.next)}</small>` : ''}</div>`).join('');
 }
 function renderProfiles(profiles, target='profileCards') {
   const host = document.getElementById(target);
@@ -5858,32 +5991,41 @@ async function loadConfig() {
 async function loadDomains() {
   const data = await api('/api/domains');
   document.getElementById('domainsText').textContent = data.text;
+  renderDomainSections(data.sections || []);
+}
+function renderDomainSections(sections) {
+  const host = document.getElementById('domainsStructured');
+  if (!host) return;
+  host.innerHTML = (sections || []).map(section => {
+    const items = (section.items || []).length ? section.items.map(item => `<span class="pill">${escapeHtml(item)}</span>`).join('') : '<span class="muted">(空)</span>';
+    return `<div class="domain-box"><h3>${escapeHtml(section.title)}</h3><p class="muted">${escapeHtml(section.help || '')}</p><div class="pill-list">${items}</div></div>`;
+  }).join('');
 }
 async function saveConfig() {
   const payload = {};
   configKeys.forEach(k => payload[k] = document.getElementById('cfg_' + k).value);
-  showOutput(await api('/api/config', {method:'POST', body: JSON.stringify(payload)}));
+  await runWithOutput('configOutput', () => api('/api/config', {method:'POST', body: JSON.stringify(payload)}));
   await refreshAll();
 }
 async function runAction(action) {
-  setPanelOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action})}));
+  await runWithOutput(activeOutputTarget(), () => api('/api/action', {method:'POST', body: JSON.stringify({action})}));
   await refreshAll();
 }
 async function domainAction(action) {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action, profile:domainProfile.value, value:domainValue.value})}));
+  await runWithOutput('splitOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action, profile:domainProfile.value, value:domainValue.value})}));
   await refreshAll();
 }
 async function rulesDomain(action) {
-  showOutput(await api('/api/rules/domain', {method:'POST', body: JSON.stringify({action, profile:domainProfile.value, value:domainValue.value})}));
+  await runWithOutput('splitOutput', () => api('/api/rules/domain', {method:'POST', body: JSON.stringify({action, profile:domainProfile.value, value:domainValue.value})}));
   await refreshAll();
 }
 async function rulesRebuild() {
-  showOutput(await api('/api/rules/rebuild', {method:'POST', body: JSON.stringify({})}));
+  await runWithOutput('splitOutput', () => api('/api/rules/rebuild', {method:'POST', body: JSON.stringify({})}));
   await refreshAll();
 }
 async function testEgress(profile) {
   const upper = profile === 'ai' ? 'ai' : 'cn';
-  showOutput(await api('/api/egress/test', {method:'POST', body: JSON.stringify({
+  await runWithOutput('splitOutput', () => api('/api/egress/test', {method:'POST', body: JSON.stringify({
     profile,
     uri: document.getElementById(upper + 'XrayUri').value,
     outbound_json: document.getElementById(upper + 'XrayJson').value
@@ -5891,7 +6033,7 @@ async function testEgress(profile) {
 }
 async function applyEgress(profile) {
   const upper = profile === 'ai' ? 'ai' : 'cn';
-  showOutput(await api('/api/egress/apply', {method:'POST', body: JSON.stringify({
+  await runWithOutput('splitOutput', () => api('/api/egress/apply', {method:'POST', body: JSON.stringify({
     profile,
     mode: document.getElementById(upper + 'EgressMode').value,
     uri: document.getElementById(upper + 'XrayUri').value,
@@ -5900,51 +6042,46 @@ async function applyEgress(profile) {
   await refreshAll();
 }
 async function setSocks() {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'set-socks', listen:socksListen.value, port:socksPort.value})}));
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'set-socks', listen:socksListen.value, port:socksPort.value})}));
   await refreshAll();
 }
 async function setIpsec() {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'set-ipsec', profile:ipsecProfile.value, user:ipsecUser.value, password:ipsecPass.value})}));
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'set-ipsec', profile:ipsecProfile.value, user:ipsecUser.value, password:ipsecPass.value})}));
 }
 async function setUpdateTime() {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'set-update-time', value:updateTime.value})}));
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'set-update-time', value:updateTime.value})}));
   await refreshAll();
 }
 async function traceDomainAction() {
-  setPanelOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'trace-domain', value:traceDomain.value})}));
+  await runWithOutput('output', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'trace-domain', value:traceDomain.value})}));
 }
 async function traceDomainValue(value) {
   if (!value) return;
-  setPanelOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'trace-domain', value})}));
+  const target = document.getElementById('splitOutput') && document.getElementById('split').classList.contains('active') ? 'splitOutput' : 'dailyOutput';
+  await runWithOutput(target, () => api('/api/action', {method:'POST', body: JSON.stringify({action:'trace-domain', value})}));
 }
 async function loadWizardSchema() {
-  const data = await api('/api/wizard/schema');
-  wizardOutput.textContent = JSON.stringify(data, null, 2);
+  const data = await runWithOutput('wizardOutput', () => api('/api/wizard/schema'));
   if (!wizardConfig.value) wizardConfig.value = data.template || '';
 }
 async function validateWizard() {
-  const data = await api('/api/wizard/validate', {method:'POST', body: JSON.stringify({config:wizardConfig.value})});
-  wizardOutput.textContent = JSON.stringify(data, null, 2);
+  await runWithOutput('wizardOutput', () => api('/api/wizard/validate', {method:'POST', body: JSON.stringify({config:wizardConfig.value})}));
 }
 async function applyWizard() {
-  const data = await api('/api/wizard/apply', {method:'POST', body: JSON.stringify({config:wizardConfig.value})});
-  wizardOutput.textContent = JSON.stringify(data, null, 2);
+  await runWithOutput('wizardOutput', () => api('/api/wizard/apply', {method:'POST', body: JSON.stringify({config:wizardConfig.value})}));
   await refreshAll();
 }
 async function loadUpdateStatus() {
-  const data = await api('/api/update/status');
-  updateOutput.textContent = JSON.stringify(data, null, 2);
+  const data = await runWithOutput('updateOutput', () => api('/api/update/status'));
   updateChannel.value = data.channel || 'stable';
   updateVersion.value = data.pinned_version || '';
 }
 async function runUpdate() {
-  const data = await api('/api/update/run', {method:'POST', body: JSON.stringify({channel:updateChannel.value, version:updateVersion.value})});
-  updateOutput.textContent = JSON.stringify(data, null, 2);
+  await runWithOutput('updateOutput', () => api('/api/update/run', {method:'POST', body: JSON.stringify({channel:updateChannel.value, version:updateVersion.value})}));
   await refreshAll();
 }
 async function supportBundle() {
-  const data = await api('/api/support-bundle', {method:'POST', body: JSON.stringify({include_logs:bundleLogs.value})});
-  diagnosticsOutput.textContent = JSON.stringify(data, null, 2);
+  await runWithOutput('diagnosticsOutput', () => api('/api/support-bundle', {method:'POST', body: JSON.stringify({include_logs:bundleLogs.value})}));
 }
 async function refreshAll() { await Promise.all([loadUiSummary(), loadStatus(), loadTraffic(), loadConnections(), loadConfig(), loadDomains(), loadMetrics()]); }
 refreshAll().catch(err => showOutput(String(err)));
@@ -6168,6 +6305,49 @@ def domains_text():
         else:
             parts.append("(missing)")
     return "\n\n".join(parts)
+
+def read_list_file(path):
+    if not os.path.exists(path):
+        return []
+    items = []
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            value = line.strip()
+            if value and not value.startswith("#"):
+                items.append(value)
+    return items
+
+def domains_model():
+    return {
+        "sections": [
+            {
+                "title": "AI 內建來源",
+                "help": "例如 openai、anthropic、meta；輸入同名 source 後按移除會更新 config。",
+                "items": read_list_file("/var/lib/dnscomplex/geosite/ai.sources"),
+            },
+            {
+                "title": "AI 自訂項目",
+                "help": "手動加入的 AI domain 或額外 geosite source。",
+                "items": read_list_file("/var/lib/dnscomplex/geosite/ai.custom"),
+            },
+            {
+                "title": "AI 支援 domain",
+                "help": "只在確定 app 依賴需要同走 AI 出口時才加入。",
+                "items": read_list_file("/var/lib/dnscomplex/geosite/ai-support.sources"),
+            },
+            {
+                "title": "CN 內建來源",
+                "help": "中國大陸視頻/直播/OTT curated profile。",
+                "items": read_list_file("/var/lib/dnscomplex/geosite/cn-video.sources"),
+            },
+            {
+                "title": "CN 自訂項目",
+                "help": "手動加入的 CN domain 或額外 geosite source。",
+                "items": read_list_file("/var/lib/dnscomplex/geosite/cn-video.custom"),
+            },
+        ],
+        "text": domains_text(),
+    }
 
 def egress_test(payload):
     profile = payload.get("profile", "")
@@ -6431,17 +6611,17 @@ def ui_summary():
 
     warnings = []
     if not singbox_ok:
-        warnings.append({"title": "sing-box 未正常運行", "detail": "TUN / SOCKS / 分流會受影響，先到進階維護執行 fix。"})
+        warnings.append({"title": "sing-box 未正常運行", "detail": "TUN / SOCKS / 分流會受影響。", "next": "到「進階 > 進階維護」按 Doctor，再按修正設定。"})
     if not adguard_ok or not smartdns_ok:
-        warnings.append({"title": "DNS 服務異常", "detail": "AdGuard 或 SmartDNS 未 active，手機可能會解析失敗。"})
+        warnings.append({"title": "DNS 服務異常", "detail": "AdGuard 或 SmartDNS 未 active，手機可能會解析失敗。", "next": "到「日常 > 上網測試」按測試 DNS；失敗再到「進階維護」按修正設定。"})
     if not nft_ok:
-        warnings.append({"title": "nftables 異常", "detail": "AI/CN 目的 IP policy 可能不生效。"})
+        warnings.append({"title": "nftables 異常", "detail": "AI/CN 目的 IP policy 可能不生效。", "next": "到「進階 > 進階維護」按修正設定，然後刷新 AI/CN IP 快取。"})
     if (ai_mode == "ipsec" or cn_mode == "ipsec") and not ipsec_ok:
-        warnings.append({"title": "IPsec 未完全連線", "detail": "使用 IPsec 的 AI/CN profile 可能未能分流。"})
+        warnings.append({"title": "IPsec 未完全連線", "detail": "使用 IPsec 的 AI/CN profile 可能未能分流。", "next": "到「日常 > 上網測試」按測試 AI/CN IPsec；如帳密改過，到常用設定更新。"})
     if conntrack >= 70:
-        warnings.append({"title": "Conntrack 使用率偏高", "detail": f"目前 {conntrack:.2f}%，大量設備使用時需要處理容量。"})
+        warnings.append({"title": "Conntrack 使用率偏高", "detail": f"目前 {conntrack:.2f}%，大量設備使用時需要處理容量。", "next": "到「日常 > 流量趨勢」查看走勢，必要時擴容或調整 conntrack。"})
     if cfg.get("ADGUARD_DNS_CACHE_MODE", "off") != "off":
-        warnings.append({"title": "AdGuard cache 被開啟", "detail": "建議由 SmartDNS 作唯一 DNS cache，避免 double-cache。"})
+        warnings.append({"title": "AdGuard cache 被開啟", "detail": "建議由 SmartDNS 作唯一 DNS cache，避免 double-cache。", "next": "到常用設定的進階 config 將 ADGUARD_DNS_CACHE_MODE 設為 off。"})
 
     profiles = [
         {"name": "AI", "status": "正常" if cards[2]["state"] == "ok" else "需檢查", "state": cards[2]["state"], "egress": ai_mode, "ip_policy": "只 IPv4", "dns_policy": "AI SmartDNS 只回 A 記錄並寫入 ai4 nftset", "detail": "OpenAI / Claude / Meta 等 domain 使用此 profile。"},
@@ -6643,7 +6823,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(run([DNSCOMPLEX, "trace-domain", domain], 120))
             return
         if self.path == "/api/domains":
-            self.send_json({"text": domains_text()})
+            self.send_json(domains_model())
             return
         if self.path == "/api/traffic":
             text = "\n".join([
