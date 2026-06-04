@@ -9,7 +9,7 @@
 - Uses `sing-geosite` AI rule sets and curated CN video sources for policy splitting.
 - Supports AI/CN egress switching between `ipsec` and `xray`; Xray URI import supports `vless://`, `vmess://`, `trojan://`, and `ss://`.
 - Keeps `SmartDNS` as the single DNS cache authority while `AdGuard Home` handles ad filtering, query logging, and statistics.
-- Exposes a management web UI for service state, traffic, AI/CN domains/geosite/SRS, SOCKS, IPsec, Xray egress, and Prometheus-style metrics.
+- Exposes a management web UI for service state, traffic, AI/CN domains/geosite/SRS, SOCKS, IPsec, Xray egress, installation wizard, release/update channels, support bundles, and Prometheus-style metrics.
 - Generates RouterOS 7 policy-routing and Netwatch templates for fail-open deployment.
 
 ## Current Scope
@@ -31,13 +31,20 @@
 
 1. Review and copy the example config.
 2. Replace all placeholder secrets such as `AI_IPSEC_USERNAME`, `AI_IPSEC_PASSWORD`, `CN_IPSEC_USERNAME`, and `CN_IPSEC_PASSWORD`.
-3. Run a dry-run first:
+3. New users can generate a starter config with the runtime wizard after installation, or use the example file before installation:
+
+```bash
+dnscomplex wizard > config.env
+dnscomplex validate-config config.env
+```
+
+4. Run a dry-run first:
 
 ```bash
 bash install.sh --dry-run --config examples/routeros-policy.config.env
 ```
 
-4. Run the real install on the Debian 13 VM:
+5. Run the real install on the Debian 13 VM:
 
 ```bash
 sudo bash install.sh --yes --config /etc/dnscomplex/config.env
@@ -60,6 +67,11 @@ dnscomplex refresh-nftsets
 dnscomplex routeros-print
 dnscomplex metrics-sample
 dnscomplex soak --duration 30m --clients 1000 --dns-qps 50 --profiles ai,cn,default
+dnscomplex validate-config /etc/dnscomplex/config.env
+dnscomplex render-config --redacted
+dnscomplex update-software --channel stable
+dnscomplex update-software --channel pinned --version v1.2.3
+dnscomplex support-bundle --include-logs standard
 ```
 
 Default service endpoints:
@@ -70,6 +82,18 @@ Default service endpoints:
 - SOCKS: `<vm-ip>:1080`
 
 AI/CN Xray mode carries TCP/UDP through local Xray SOCKS inbounds. ICMP for AI/CN nftset destinations is blocked in Xray mode instead of falling back to default routing, so `ping` may fail by design.
+
+## Updates and Support Bundles
+
+`DNSCOMPLEX_UPDATE_CHANNEL` controls runtime updates:
+
+- `stable`: use latest non-prerelease GitHub releases.
+- `beta`: allow the newest non-draft GitHub release, including prereleases.
+- `pinned`: update GitHub-managed binaries only to `DNSCOMPLEX_PINNED_VERSION`.
+
+`update-software` still performs backup, package/release update, config checks, health checks, and rollback on failure. Logs are written under `/var/log/dnscomplex/update-*.log`.
+
+`support-bundle` creates a redacted `.tar.gz` for GitHub issues. It removes IPsec passwords, Xray URIs/UUIDs, GitHub tokens, private IPv4/IPv6 addresses, `.local` hostnames, cookies, and session-like secrets before packaging.
 
 ## Open Source Notes
 
