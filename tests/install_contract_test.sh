@@ -213,7 +213,7 @@ assert_contains "$repo_root/install.sh" 'resolve_default_ipv6_mode'
 assert_contains "$repo_root/install.sh" 'DEFAULT_IPV6_MODE'
 assert_contains "$repo_root/install.sh" 'sysctl -w net.ipv4.ip_forward=1'
 
-for cmd in status test health fix doctor update-geosite add-domain remove-domain set-socks set-ipsec set-update-time refresh-nftsets refresh-cn-overrides trace-domain test-dns test-ipsec mss-calibrate routeros-print update-software backup restore metrics-sample soak; do
+for cmd in status test health fix doctor update-geosite add-domain remove-domain set-socks set-ipsec set-update-time refresh-nftsets refresh-cn-overrides trace-domain test-dns test-ipsec mss-calibrate routeros-print update-software backup restore metrics-sample soak wizard validate-config render-config support-bundle; do
   assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" "$cmd"
 done
 for cmd in set-egress set-xray-uri set-xray-json test-xray xray-status render-xray; do
@@ -231,6 +231,18 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'doctor_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'health_json_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'metrics_sample_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'soak_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'wizard_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'validate_config_file_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'render_config_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'support_bundle_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'redact_stream'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'DNSCOMPLEX_UPDATE_CHANNEL'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'DNSCOMPLEX_PINNED_VERSION'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'GITHUB_RELEASE_POLICY'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'update_software_stage'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '--channel stable|beta|pinned'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '--version VERSION'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '--include-logs minimal|standard|full'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'adguard_cache_diagnostics'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'trace_domain_cmd'
 # shellcheck disable=SC2016
@@ -302,6 +314,9 @@ assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_WEB_LISTEN=
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_WEB_PORT='8088'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_UPDATE_TIME='04:20'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_UPDATE_LAST_LOG='/var/log/dnscomplex/update-latest.log'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_UPDATE_CHANNEL='stable'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_PINNED_VERSION=''"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "GITHUB_RELEASE_POLICY='latest'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_NFTSET_REFRESH_INTERVAL='5m'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT='2h'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "IPSEC_TCP_MSS='1200'"
@@ -399,6 +414,9 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'AI_NFTSET_RE
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'smartdns_diagnostics'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'ipv6_diagnostics'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'DEFAULT_DNS_STRATEGY'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'DNSCOMPLEX_UPDATE_CHANNEL'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'DNSCOMPLEX_PINNED_VERSION'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'GITHUB_RELEASE_POLICY'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'refresh-nftsets'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'refresh-cn-overrides'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'test-dns'
@@ -415,6 +433,37 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'trace-domain
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'doctor'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/metrics/current'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/metrics/history'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/ui/summary'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'ui_summary'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '我想做'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '需要處理'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '日常'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '設定'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '進階'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '上網測試'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'DNS 去廣告'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '服務狀態'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'summaryCards'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'taskGrid'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'profileCards'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/wizard/schema'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/wizard/validate'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/wizard/apply'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/update/status'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/update/run'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/support-bundle'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'redact_text'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'supportBundle'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'dnscomplex_session'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'Set-Cookie'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'cookie_ok'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'send_login_page'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'handle_login'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'if self.path == "/login"'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'method="post" action="/login"'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'dnscomplex 登入'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'self.send_header("Location", "/")'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'send_auth_challenge'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'drawChart'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '<canvas'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-web.service" 'ExecStart=/usr/bin/python3 /usr/local/lib/dnscomplex-web/app.py'
@@ -424,6 +473,27 @@ assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.timer
 assert_contains "$tmpdir/root/etc/systemd/system/xray-dnscomplex.service" 'ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json'
 assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexConntrackHigh'
 assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexAdGuardCacheEnabled'
+
+secret_probe="$tmpdir/secret-probe.txt"
+cat >"$secret_probe" <<'EOF'
+AI_IPSEC_PASSWORD=super-secret-pass
+AI_IPSEC_USERNAME=secret-user
+CN_IPSEC_PASSWORD=cn-super-secret
+AI_XRAY_OUTBOUND_JSON={"password":"json-secret","server":"203.0.113.8"}
+AI_XRAY_URI=vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls#ai
+GITHUB_TOKEN=ghp_1234567890abcdef1234567890abcdef123456
+LAN=192.168.88.1 203.0.113.8 fd00:88::1 hostname router.local
+EOF
+redacted_probe=$(bash -c '
+  source "$1"
+  redact_stream <"$2"
+' _ "$tmpdir/root/usr/local/sbin/dnscomplex" "$secret_probe")
+case "$redacted_probe" in
+  *super-secret-pass*|*secret-user*|*cn-super-secret*|*json-secret*|*123e4567-e89b-12d3-a456-426614174000*|*ghp_1234567890abcdef1234567890abcdef123456*|*192.168.88.1*|*203.0.113.8*|*fd00:88::1*|*router.local*)
+    fail "support redaction leaked sensitive probe: $redacted_probe"
+    ;;
+esac
+printf '%s\n' "$redacted_probe" | grep -Fq '[REDACTED' || fail "support redaction did not mark redacted values"
 
 policy_tmp=$(mktemp -d)
 cat >"$policy_tmp/config.env" <<'EOF'
