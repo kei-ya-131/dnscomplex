@@ -19,9 +19,22 @@ SINGBOX_SOCKS_LISTEN="0.0.0.0"
 SINGBOX_SOCKS_PORT=1080
 SINGBOX_HTTP_LISTEN="0.0.0.0"
 SINGBOX_HTTP_PORT=1081
+XRAY_ENABLED=1
+XRAY_LISTEN_HOST="127.0.0.1"
+XRAY_AI_SOCKS_PORT=16054
+XRAY_CN_SOCKS_PORT=16055
+AI_EGRESS_MODE="ipsec"
+CN_EGRESS_MODE="ipsec"
+AI_XRAY_URI=""
+CN_XRAY_URI=""
+AI_XRAY_OUTBOUND_JSON=""
+CN_XRAY_OUTBOUND_JSON=""
 APPLE_PRIVATE_RELAY_BLOCK=1
 DNSCOMPLEX_WEB_PORT=8088
 DNSCOMPLEX_UPDATE_TIME="04:20"
+DNSCOMPLEX_UPDATE_CHANNEL="stable"
+DNSCOMPLEX_PINNED_VERSION=""
+GITHUB_RELEASE_POLICY="latest"
 DNSCOMPLEX_NFTSET_REFRESH_INTERVAL="5m"
 DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT="2h"
 IPSEC_TCP_MSS=1200
@@ -39,12 +52,12 @@ AI_XFRM_ID="301"
 CN_XFRM_ID="351"
 DEPLOY_MODE="vlan-gateway"
 
-AI_GEOSITE_SOURCES_DEFAULT="openai anthropic meta"
-AI_SUPPORT_DOMAINS_DEFAULT=""
+AI_GEOSITE_SOURCES_DEFAULT="openai anthropic"
+AI_SUPPORT_DOMAINS_DEFAULT="meta.ai"
 AI_NFTSET_REFRESH_DOMAINS_DEFAULT="chatgpt.com ios.chat.openai.com openai.com api.openai.com oaistatic.com oaiusercontent.com files.oaiusercontent.com cdn.oaistatic.com persistent.oaistatic.com cdn.openai.com anthropic.com claude.ai claude.com meta.ai"
 SING_GEOSITE_RULESET_BASE_URL_DEFAULT="https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set"
 CN_VIDEO_SOURCES_DEFAULT="acfun bilibili douyin douyu gitv hunantv huya iqiyi kuaishou le pptv youku wasu v.qq.com video.qq.com tencentvideo.com cibntv.net"
-AI_SAMPLE_DOMAINS_DEFAULT="openai.com anthropic.com claude.ai meta.com facebook.com instagram.com whatsapp.com threads.net"
+AI_SAMPLE_DOMAINS_DEFAULT="openai.com anthropic.com claude.ai meta.ai"
 CN_SAMPLE_DOMAINS_DEFAULT="bilibili.com iqiyi.com youku.com douyin.com kuaishou.com acfun.cn mgtv.com v.qq.com qq.com tv.cctv.com"
 CN_NFTSET_REFRESH_DOMAINS_DEFAULT="$CN_SAMPLE_DOMAINS_DEFAULT"
 CN_STATIC_A_OVERRIDES_DEFAULT="youku.com=47.246.99.254"
@@ -79,6 +92,8 @@ Optional variables:
   DEPLOY_MODE AI_IPSEC_SERVER CN_IPSEC_SERVER
   SINGBOX_SOCKS_LISTEN SINGBOX_SOCKS_PORT
   SINGBOX_HTTP_LISTEN SINGBOX_HTTP_PORT APPLE_PRIVATE_RELAY_BLOCK
+  XRAY_ENABLED AI_EGRESS_MODE CN_EGRESS_MODE AI_XRAY_URI CN_XRAY_URI
+  AI_XRAY_OUTBOUND_JSON CN_XRAY_OUTBOUND_JSON XRAY_LISTEN_HOST XRAY_AI_SOCKS_PORT XRAY_CN_SOCKS_PORT
   SINGBOX_DNS_LISTEN SINGBOX_DNS_PORT
   DNSCOMPLEX_WEB_LISTEN DNSCOMPLEX_WEB_PORT DNSCOMPLEX_WEB_PASSWORD DNSCOMPLEX_UPDATE_TIME
   DNSCOMPLEX_NFTSET_REFRESH_INTERVAL DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT IPSEC_TCP_MSS
@@ -150,6 +165,9 @@ load_config() {
   : "${SMARTDNS_DEFAULT_PORT:=6053}"
   : "${SMARTDNS_AI_PORT:=6054}"
   : "${SMARTDNS_CN_PORT:=6055}"
+  : "${SMARTDNS_DEFAULT_PORT:=6053}"
+  : "${SMARTDNS_AI_PORT:=6054}"
+  : "${SMARTDNS_CN_PORT:=6055}"
   : "${AI_GEOSITE_SOURCES:=$AI_GEOSITE_SOURCES_DEFAULT}"
   : "${AI_SUPPORT_DOMAINS:=$AI_SUPPORT_DOMAINS_DEFAULT}"
   : "${AI_NFTSET_REFRESH_DOMAINS:=$AI_NFTSET_REFRESH_DOMAINS_DEFAULT}"
@@ -161,12 +179,23 @@ load_config() {
   : "${CN_STATIC_A_OVERRIDES:=$CN_STATIC_A_OVERRIDES_DEFAULT}"
   : "${CN_OVERRIDE_PROBE_DOMAINS:=$CN_OVERRIDE_PROBE_DOMAINS_DEFAULT}"
   : "${CN_OVERRIDE_PROBE_RESOLVERS:=$CN_OVERRIDE_PROBE_RESOLVERS_DEFAULT}"
+  migrate_ai_meta_sample_domains
   : "${DEPLOY_MODE:=vlan-gateway}"
   : "${LAN_IPV6_GATEWAY:=$(ipv6_gateway_from_prefix "${LAN_IPV6_PREFIX:-fd00:88::/64}")}"
   : "${SINGBOX_SOCKS_LISTEN:=0.0.0.0}"
   : "${SINGBOX_SOCKS_PORT:=1080}"
   : "${SINGBOX_HTTP_LISTEN:=0.0.0.0}"
   : "${SINGBOX_HTTP_PORT:=1081}"
+  : "${XRAY_ENABLED:=1}"
+  : "${XRAY_LISTEN_HOST:=127.0.0.1}"
+  : "${XRAY_AI_SOCKS_PORT:=16054}"
+  : "${XRAY_CN_SOCKS_PORT:=16055}"
+  : "${AI_EGRESS_MODE:=ipsec}"
+  : "${CN_EGRESS_MODE:=ipsec}"
+  : "${AI_XRAY_URI:=}"
+  : "${CN_XRAY_URI:=}"
+  : "${AI_XRAY_OUTBOUND_JSON:=}"
+  : "${CN_XRAY_OUTBOUND_JSON:=}"
   : "${APPLE_PRIVATE_RELAY_BLOCK:=1}"
   : "${SINGBOX_DNS_LISTEN:=127.0.0.1}"
   : "${SINGBOX_DNS_PORT:=1053}"
@@ -177,6 +206,9 @@ load_config() {
   : "${DNSCOMPLEX_METRICS_PORT:=9108}"
   : "${DNSCOMPLEX_UPDATE_TIME:=04:20}"
   : "${DNSCOMPLEX_UPDATE_LAST_LOG:=/var/log/dnscomplex/update-latest.log}"
+  : "${DNSCOMPLEX_UPDATE_CHANNEL:=stable}"
+  : "${DNSCOMPLEX_PINNED_VERSION:=}"
+  : "${GITHUB_RELEASE_POLICY:=latest}"
   : "${DNSCOMPLEX_NFTSET_REFRESH_INTERVAL:=5m}"
   : "${DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT:=2h}"
   : "${ADGUARD_DNS_CACHE_MODE:=off}"
@@ -285,16 +317,28 @@ validate_config() {
     require_var "$name"
   done
   [[ "$SINGBOX_SOCKS_PORT" =~ ^[0-9]+$ ]] || die "SINGBOX_SOCKS_PORT must be numeric"
+  [[ "$XRAY_AI_SOCKS_PORT" =~ ^[0-9]+$ ]] || die "XRAY_AI_SOCKS_PORT must be numeric"
+  [[ "$XRAY_CN_SOCKS_PORT" =~ ^[0-9]+$ ]] || die "XRAY_CN_SOCKS_PORT must be numeric"
   [[ "$DNSCOMPLEX_WEB_PORT" =~ ^[0-9]+$ ]] || die "DNSCOMPLEX_WEB_PORT must be numeric"
   [[ "$DNSCOMPLEX_METRICS_PORT" =~ ^[0-9]+$ ]] || die "DNSCOMPLEX_METRICS_PORT must be numeric"
   [[ "$IPSEC_TCP_MSS" =~ ^[0-9]+$ ]] || die "IPSEC_TCP_MSS must be numeric"
   ((DNSCOMPLEX_WEB_PORT >= 1 && DNSCOMPLEX_WEB_PORT <= 65535)) || die "DNSCOMPLEX_WEB_PORT must be 1-65535"
+  ((XRAY_AI_SOCKS_PORT >= 1 && XRAY_AI_SOCKS_PORT <= 65535)) || die "XRAY_AI_SOCKS_PORT must be 1-65535"
+  ((XRAY_CN_SOCKS_PORT >= 1 && XRAY_CN_SOCKS_PORT <= 65535)) || die "XRAY_CN_SOCKS_PORT must be 1-65535"
   ((DNSCOMPLEX_METRICS_PORT >= 1 && DNSCOMPLEX_METRICS_PORT <= 65535)) || die "DNSCOMPLEX_METRICS_PORT must be 1-65535"
   ((IPSEC_TCP_MSS >= 536 && IPSEC_TCP_MSS <= 1460)) || die "IPSEC_TCP_MSS must be 536-1460"
   [[ "$DNSCOMPLEX_UPDATE_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "DNSCOMPLEX_UPDATE_TIME must be HH:MM"
+  case "$DNSCOMPLEX_UPDATE_CHANNEL" in stable|beta|pinned) ;; *) die "DNSCOMPLEX_UPDATE_CHANNEL must be stable, beta, or pinned" ;; esac
+  case "$GITHUB_RELEASE_POLICY" in latest|pinned) ;; *) die "GITHUB_RELEASE_POLICY must be latest or pinned" ;; esac
+  if [[ "$DNSCOMPLEX_UPDATE_CHANNEL" == "pinned" || "$GITHUB_RELEASE_POLICY" == "pinned" ]]; then
+    [[ -n "$DNSCOMPLEX_PINNED_VERSION" ]] || die "DNSCOMPLEX_PINNED_VERSION is required when update channel or GitHub policy is pinned"
+  fi
   case "$ADGUARD_DNS_CACHE_MODE" in off|small|large) ;; *) die "ADGUARD_DNS_CACHE_MODE must be off, small, or large" ;; esac
   case "$HA_MODE" in single|primary|secondary) ;; *) die "HA_MODE must be single, primary, or secondary" ;; esac
   case "$PROMETHEUS_MODE" in exporter-only|local) ;; *) die "PROMETHEUS_MODE must be exporter-only or local" ;; esac
+  case "$AI_EGRESS_MODE" in ipsec|xray) ;; *) die "AI_EGRESS_MODE must be ipsec or xray" ;; esac
+  case "$CN_EGRESS_MODE" in ipsec|xray) ;; *) die "CN_EGRESS_MODE must be ipsec or xray" ;; esac
+  case "$XRAY_ENABLED" in 0|1) ;; *) die "XRAY_ENABLED must be 0 or 1" ;; esac
 }
 
 require_debian13() {
@@ -420,6 +464,15 @@ linux_arch() {
   esac
 }
 
+xray_asset_pattern() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'Xray-linux-64\\.zip$\n' ;;
+    aarch64|arm64) printf 'Xray-linux-arm64-v8a\\.zip$\n' ;;
+    armv7l) printf 'Xray-linux-arm32-v7a\\.zip$\n' ;;
+    *) die "unsupported Xray architecture: $(uname -m)" ;;
+  esac
+}
+
 github_latest_asset_url() {
   local repo=$1
   local pattern=$2
@@ -455,6 +508,31 @@ split_words() {
     [[ -n "$item" ]] && printf '%s\n' "$item"
   done
   IFS=$old_ifs
+}
+
+migrate_ai_meta_sample_domains() {
+  local item changed=0 has_meta_ai=0
+  local -a kept=()
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    case "$item" in
+      facebook.com|instagram.com|meta.com|threads.net|whatsapp.com)
+        changed=1
+        continue
+        ;;
+      meta.ai)
+        has_meta_ai=1
+        ;;
+    esac
+    kept+=("$item")
+  done < <(split_words "${AI_SAMPLE_DOMAINS:-}")
+  if [[ "$has_meta_ai" == "0" ]]; then
+    kept+=("meta.ai")
+    changed=1
+  fi
+  if [[ "$changed" == "1" ]]; then
+    AI_SAMPLE_DOMAINS=$(printf '%s\n' "${kept[@]}" | awk '!seen[$0]++' | xargs)
+  fi
 }
 
 smartdns_upstream_line() {
@@ -543,6 +621,16 @@ SINGBOX_SOCKS_PORT='$SINGBOX_SOCKS_PORT'
 SINGBOX_SOCKS_LISTEN='$SINGBOX_SOCKS_LISTEN'
 SINGBOX_HTTP_PORT='$SINGBOX_HTTP_PORT'
 SINGBOX_HTTP_LISTEN='$SINGBOX_HTTP_LISTEN'
+XRAY_ENABLED='$XRAY_ENABLED'
+XRAY_LISTEN_HOST='$XRAY_LISTEN_HOST'
+XRAY_AI_SOCKS_PORT='$XRAY_AI_SOCKS_PORT'
+XRAY_CN_SOCKS_PORT='$XRAY_CN_SOCKS_PORT'
+AI_EGRESS_MODE='$AI_EGRESS_MODE'
+CN_EGRESS_MODE='$CN_EGRESS_MODE'
+AI_XRAY_URI='$AI_XRAY_URI'
+CN_XRAY_URI='$CN_XRAY_URI'
+AI_XRAY_OUTBOUND_JSON='$AI_XRAY_OUTBOUND_JSON'
+CN_XRAY_OUTBOUND_JSON='$CN_XRAY_OUTBOUND_JSON'
 APPLE_PRIVATE_RELAY_BLOCK='$APPLE_PRIVATE_RELAY_BLOCK'
 DNSCOMPLEX_WEB_LISTEN='$DNSCOMPLEX_WEB_LISTEN'
 DNSCOMPLEX_WEB_PORT='$DNSCOMPLEX_WEB_PORT'
@@ -551,6 +639,9 @@ DNSCOMPLEX_METRICS_LISTEN='$DNSCOMPLEX_METRICS_LISTEN'
 DNSCOMPLEX_METRICS_PORT='$DNSCOMPLEX_METRICS_PORT'
 DNSCOMPLEX_UPDATE_TIME='$DNSCOMPLEX_UPDATE_TIME'
 DNSCOMPLEX_UPDATE_LAST_LOG='$DNSCOMPLEX_UPDATE_LAST_LOG'
+DNSCOMPLEX_UPDATE_CHANNEL='$DNSCOMPLEX_UPDATE_CHANNEL'
+DNSCOMPLEX_PINNED_VERSION='$DNSCOMPLEX_PINNED_VERSION'
+GITHUB_RELEASE_POLICY='$GITHUB_RELEASE_POLICY'
 DNSCOMPLEX_NFTSET_REFRESH_INTERVAL='$DNSCOMPLEX_NFTSET_REFRESH_INTERVAL'
 DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT='$DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT'
 ADGUARD_DNS_CACHE_MODE='$ADGUARD_DNS_CACHE_MODE'
@@ -581,18 +672,25 @@ install_packages() {
   [[ "$DRY_RUN" == "1" ]] && return 0
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y \
+  apt-get \
+    -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold \
+    install -y \
     ca-certificates curl jq tar unzip iproute2 nftables conntrack dnsmasq radvd \
     strongswan-swanctl strongswan-charon libcharon-extra-plugins \
     cron dnsutils python3
   if [[ "$PROMETHEUS_MODE" == "local" ]]; then
-    apt-get install -y prometheus alertmanager
+    apt-get \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      install -y prometheus alertmanager
   fi
   mkdir -p /var/lib/smartdns
   disable_conflicting_lan_services
   install_smartdns_release
   install_singbox_release
   install_adguardhome_release
+  install_xray_release
 }
 
 disable_conflicting_lan_services() {
@@ -613,7 +711,11 @@ install_smartdns_release() {
   tmp=$(mktemp -d)
   asset=$(github_latest_asset_url "pymumu/smartdns" "${arch}-debian-all\\.deb$")
   curl -fsSL -o "$tmp/smartdns.deb" "$asset"
-  dpkg -i "$tmp/smartdns.deb" || apt-get -f install -y
+  DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i "$tmp/smartdns.deb" || \
+    DEBIAN_FRONTEND=noninteractive apt-get \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      -f install -y
   fix_smartdns_wrapper
   ensure_smartdns_enabled
   command -v smartdns >/dev/null || die "SmartDNS install did not provide smartdns binary"
@@ -635,7 +737,11 @@ install_singbox_release() {
   tmp=$(mktemp -d)
   asset=$(github_latest_asset_url "SagerNet/sing-box" "sing-box_.*_linux_${arch}\\.deb$")
   curl -fsSL -o "$tmp/sing-box.deb" "$asset"
-  dpkg -i "$tmp/sing-box.deb" || apt-get -f install -y
+  DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i "$tmp/sing-box.deb" || \
+    DEBIAN_FRONTEND=noninteractive apt-get \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      -f install -y
   command -v sing-box >/dev/null || die "sing-box install did not provide sing-box binary"
   rm -rf "$tmp"
 }
@@ -652,6 +758,316 @@ install_adguardhome_release() {
   install -m 0755 "$tmp/AdGuardHome/AdGuardHome" /opt/AdGuardHome/AdGuardHome
   /opt/AdGuardHome/AdGuardHome --version >/dev/null || die "AdGuard Home install did not provide a working executable"
   rm -rf "$tmp"
+}
+
+install_xray_release() {
+  local asset tmp pattern
+  tmp=$(mktemp -d)
+  pattern=$(xray_asset_pattern)
+  asset=$(github_latest_asset_url "XTLS/Xray-core" "$pattern")
+  curl -fsSL -o "$tmp/xray.zip" "$asset"
+  unzip -q "$tmp/xray.zip" -d "$tmp/xray"
+  install -m 0755 "$tmp/xray/xray" /usr/local/bin/xray
+  install -d -m 0755 /usr/local/share/xray
+  [[ -f "$tmp/xray/geoip.dat" ]] && install -m 0644 "$tmp/xray/geoip.dat" /usr/local/share/xray/geoip.dat
+  [[ -f "$tmp/xray/geosite.dat" ]] && install -m 0644 "$tmp/xray/geosite.dat" /usr/local/share/xray/geosite.dat
+  command -v xray >/dev/null || die "Xray install did not provide xray binary"
+  rm -rf "$tmp"
+}
+
+render_xray_support() {
+  write_file /usr/local/lib/dnscomplex-xray/render.py <<'PY'
+#!/usr/bin/env python3
+import argparse
+import base64
+import json
+import os
+import shlex
+import sys
+import urllib.parse
+
+
+def parse_env(path):
+    data = {}
+    if not os.path.exists(path):
+        return data
+    with open(path, "r", encoding="utf-8") as fh:
+        pending_key = None
+        pending_value = []
+        for raw in fh:
+            line = raw.rstrip("\n")
+            if pending_key:
+                pending_value.append(line)
+                if line.endswith("'") and not line.endswith("\\'"):
+                    data[pending_key] = "\n".join(pending_value)[:-1]
+                    pending_key = None
+                    pending_value = []
+                continue
+            if not line or line.lstrip().startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if value.startswith("'") and not value.endswith("'"):
+                pending_key = key
+                pending_value = [value[1:]]
+                continue
+            try:
+                parts = shlex.split(value, posix=True)
+                data[key] = parts[0] if parts else ""
+            except ValueError:
+                data[key] = value.strip("'\"")
+    return data
+
+
+def b64decode_text(value):
+    value = value.strip()
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode((value + padding).encode()).decode("utf-8")
+
+
+def first(qs, key, default=""):
+    values = qs.get(key, [])
+    return values[0] if values else default
+
+
+def stream_settings(qs, host):
+    network = first(qs, "type", first(qs, "net", "tcp")) or "tcp"
+    security = first(qs, "security", first(qs, "tls", ""))
+    sni = first(qs, "sni", first(qs, "peer", host))
+    settings = {"network": network}
+    if security and security not in {"none", "false"}:
+        settings["security"] = security
+        tls_key = "realitySettings" if security == "reality" else "tlsSettings"
+        tls_settings = {}
+        if sni:
+            tls_settings["serverName"] = sni
+        fp = first(qs, "fp", first(qs, "fingerprint", ""))
+        if fp:
+            tls_settings["fingerprint"] = fp
+        alpn = first(qs, "alpn", "")
+        if alpn:
+            tls_settings["alpn"] = [item for item in alpn.split(",") if item]
+        pbk = first(qs, "pbk", first(qs, "publicKey", ""))
+        if pbk:
+            tls_settings["publicKey"] = pbk
+        sid = first(qs, "sid", first(qs, "shortId", ""))
+        if sid:
+            tls_settings["shortId"] = sid
+        spider = first(qs, "spx", first(qs, "spiderX", ""))
+        if spider:
+            tls_settings["spiderX"] = spider
+        settings[tls_key] = tls_settings
+    if network == "ws":
+        ws = {"path": first(qs, "path", "/")}
+        ws_host = first(qs, "host", "")
+        if ws_host:
+            ws["headers"] = {"Host": ws_host}
+        settings["wsSettings"] = ws
+    elif network == "grpc":
+        service = first(qs, "serviceName", first(qs, "service", ""))
+        if service:
+            settings["grpcSettings"] = {"serviceName": service}
+    elif network == "xhttp":
+        path = first(qs, "path", "")
+        xhttp = {}
+        if path:
+            xhttp["path"] = path
+        host_header = first(qs, "host", "")
+        if host_header:
+            xhttp["host"] = host_header
+        if xhttp:
+            settings["xhttpSettings"] = xhttp
+    return settings
+
+
+def parse_vless(uri, tag):
+    parsed = urllib.parse.urlparse(uri)
+    qs = urllib.parse.parse_qs(parsed.query)
+    if not parsed.username or not parsed.hostname or not parsed.port:
+        raise ValueError("vless URI must include uuid@host:port")
+    user = {"id": urllib.parse.unquote(parsed.username), "encryption": first(qs, "encryption", "none")}
+    flow = first(qs, "flow", "")
+    if flow:
+        user["flow"] = flow
+    return {
+        "tag": tag,
+        "protocol": "vless",
+        "settings": {"vnext": [{"address": parsed.hostname, "port": parsed.port, "users": [user]}]},
+        "streamSettings": stream_settings(qs, parsed.hostname),
+    }
+
+
+def parse_trojan(uri, tag):
+    parsed = urllib.parse.urlparse(uri)
+    qs = urllib.parse.parse_qs(parsed.query)
+    if not parsed.username or not parsed.hostname or not parsed.port:
+        raise ValueError("trojan URI must include password@host:port")
+    return {
+        "tag": tag,
+        "protocol": "trojan",
+        "settings": {"servers": [{"address": parsed.hostname, "port": parsed.port, "password": urllib.parse.unquote(parsed.username)}]},
+        "streamSettings": stream_settings(qs, parsed.hostname),
+    }
+
+
+def parse_vmess(uri, tag):
+    raw = uri[len("vmess://"):]
+    payload = json.loads(b64decode_text(raw))
+    host = payload.get("add") or payload.get("address")
+    port = int(payload.get("port") or 443)
+    user_id = payload.get("id")
+    if not host or not user_id:
+        raise ValueError("vmess URI must include add/id")
+    qs = {
+        "type": [payload.get("net", "tcp")],
+        "security": [payload.get("tls", "")],
+        "sni": [payload.get("sni") or payload.get("host") or host],
+        "path": [payload.get("path", "")],
+        "host": [payload.get("host", "")],
+    }
+    user = {"id": user_id, "alterId": int(payload.get("aid") or 0), "security": payload.get("scy") or "auto"}
+    return {
+        "tag": tag,
+        "protocol": "vmess",
+        "settings": {"vnext": [{"address": host, "port": port, "users": [user]}]},
+        "streamSettings": stream_settings(qs, host),
+    }
+
+
+def parse_ss(uri, tag):
+    raw = uri[len("ss://"):]
+    if "@" not in raw:
+        decoded = b64decode_text(raw.split("#", 1)[0])
+        raw = decoded
+    parsed = urllib.parse.urlparse("ss://" + raw)
+    if not parsed.hostname or not parsed.port:
+        raise ValueError("ss URI must include method:password@host:port")
+    userinfo = urllib.parse.unquote(parsed.netloc.rsplit("@", 1)[0])
+    if ":" not in userinfo:
+        userinfo = b64decode_text(userinfo)
+    method, password = userinfo.split(":", 1)
+    return {
+        "tag": tag,
+        "protocol": "shadowsocks",
+        "settings": {"servers": [{"address": parsed.hostname, "port": parsed.port, "method": method, "password": password}]},
+    }
+
+
+def parse_uri(uri, tag):
+    if uri.startswith("vless://"):
+        return parse_vless(uri, tag)
+    if uri.startswith("vmess://"):
+        return parse_vmess(uri, tag)
+    if uri.startswith("trojan://"):
+        return parse_trojan(uri, tag)
+    if uri.startswith("ss://"):
+        return parse_ss(uri, tag)
+    raise ValueError("supported URI schemes: vless, vmess, trojan, ss")
+
+
+def outbound_for(cfg, profile):
+    upper = profile.upper()
+    tag = f"xray-{profile}-out"
+    raw_json = cfg.get(f"{upper}_XRAY_OUTBOUND_JSON", "").strip()
+    uri = cfg.get(f"{upper}_XRAY_URI", "").strip()
+    if raw_json:
+        outbound = json.loads(raw_json)
+        if not isinstance(outbound, dict):
+            raise ValueError(f"{upper}_XRAY_OUTBOUND_JSON must be a JSON object")
+        outbound["tag"] = tag
+        return outbound
+    if uri:
+        return parse_uri(uri, tag)
+    return {"tag": tag, "protocol": "freedom", "settings": {}}
+
+
+def render(cfg):
+    listen = cfg.get("XRAY_LISTEN_HOST", "127.0.0.1")
+    ai_port = int(cfg.get("XRAY_AI_SOCKS_PORT", "16054"))
+    cn_port = int(cfg.get("XRAY_CN_SOCKS_PORT", "16055"))
+    return {
+        "log": {"loglevel": "warning"},
+        "inbounds": [
+            {
+                "tag": "xray-ai-in",
+                "listen": listen,
+                "port": ai_port,
+                "protocol": "socks",
+                "settings": {"auth": "noauth", "udp": True},
+            },
+            {
+                "tag": "xray-cn-in",
+                "listen": listen,
+                "port": cn_port,
+                "protocol": "socks",
+                "settings": {"auth": "noauth", "udp": True},
+            },
+        ],
+        "outbounds": [outbound_for(cfg, "ai"), outbound_for(cfg, "cn")],
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {"type": "field", "inboundTag": ["xray-ai-in"], "outboundTag": "xray-ai-out"},
+                {"type": "field", "inboundTag": ["xray-cn-in"], "outboundTag": "xray-cn-out"},
+            ],
+        },
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="/etc/dnscomplex/config.env")
+    parser.add_argument("--output", default="-")
+    parser.add_argument("--profile", choices=["ai", "cn"])
+    parser.add_argument("--uri")
+    parser.add_argument("--json")
+    args = parser.parse_args()
+    cfg = parse_env(args.config)
+    if args.profile and args.uri is not None:
+        cfg[f"{args.profile.upper()}_XRAY_URI"] = args.uri
+        cfg[f"{args.profile.upper()}_XRAY_OUTBOUND_JSON"] = ""
+    if args.profile and args.json is not None:
+        cfg[f"{args.profile.upper()}_XRAY_OUTBOUND_JSON"] = args.json
+        cfg[f"{args.profile.upper()}_XRAY_URI"] = ""
+    data = render(cfg)
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    if args.output == "-":
+        sys.stdout.write(text)
+    else:
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        tmp = args.output + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, args.output)
+
+
+if __name__ == "__main__":
+    main()
+PY
+  chmod_target 0755 /usr/local/lib/dnscomplex-xray/render.py
+  python3 "$(target_path /usr/local/lib/dnscomplex-xray/render.py)" \
+    --config "$(target_path /etc/dnscomplex/config.env)" \
+    --output "$(target_path /usr/local/etc/xray/config.json)"
+  chmod_target 0600 /usr/local/etc/xray/config.json
+
+  write_file /etc/systemd/system/xray-dnscomplex.service <<'EOF'
+[Unit]
+Description=dnscomplex Xray sidecar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=1048576
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 render_network() {
@@ -887,6 +1303,7 @@ EOF
   write_file /etc/dnscomplex/ai.domains <<EOF
 $(split_words "$AI_SAMPLE_DOMAINS")
 $(split_words "$AI_SUPPORT_DOMAINS")
+$(split_words "$AI_NFTSET_REFRESH_DOMAINS")
 EOF
   write_file /etc/dnscomplex/cn-video.domains <<EOF
 $(split_words "$CN_SAMPLE_DOMAINS")
@@ -914,6 +1331,8 @@ serve-expired yes
 serve-expired-ttl 259200
 serve-expired-reply-ttl 3
 serve-expired-prefetch-time 21600
+mdns-lookup yes
+hosts-file /etc/dnscomplex/local-hosts
 dualstack-ip-selection yes
 nftset-timeout yes
 force-qtype-SOA 65
@@ -931,6 +1350,18 @@ EOF
       smartdns_upstream_line "$upstream" cn
     done < <(split_words "$CN_DNS_UPSTREAMS")
   } | write_file /etc/smartdns/smartdns.conf
+}
+
+render_local_hosts() {
+  local target
+  target=$(target_path /etc/dnscomplex/local-hosts)
+  if [[ ! -e "$target" ]]; then
+    write_file /etc/dnscomplex/local-hosts <<'EOF'
+# Optional local DNS overrides for .local/Codex callbacks.
+# Example:
+# 192.0.2.10 example-host.local
+EOF
+  fi
 }
 
 write_adguard_allow_rules() {
@@ -1159,6 +1590,17 @@ EOF
   chmod_target 0600 /etc/swanctl/swanctl.conf
 }
 
+render_strongswan_resolve_plugin() {
+  write_file /etc/strongswan.d/charon/resolve.conf <<'EOF'
+resolve {
+    # dnscomplex keeps DNS policy in AdGuard Home, sing-box, and SmartDNS.
+    # Disable strongSwan's resolve plugin so peer-pushed DNS servers do not
+    # touch system DNS or generate resolvconf/systemd-resolved errors.
+    load = no
+}
+EOF
+}
+
 render_ipsec_ca_store() {
   local target_dir ca copied=0
   target_dir=$(target_path /etc/swanctl/x509ca)
@@ -1243,7 +1685,8 @@ EOF
 }
 
 render_singbox_ai_route_rules() {
-  local source safe
+  local source safe outbound
+  outbound=$(profile_outbound_tag ai)
   while IFS= read -r source; do
     [[ -n "$source" ]] || continue
     safe=$(rule_set_safe_name "$source")
@@ -1251,15 +1694,15 @@ render_singbox_ai_route_rules() {
       {
         "rule_set": "geosite-ai-$safe",
         "action": "route",
-        "outbound": "ai-ipsec"
+        "outbound": "$outbound"
       },
 EOF
   done < <(split_words "$AI_GEOSITE_SOURCES")
-  cat <<'EOF'
+  cat <<EOF
       {
         "rule_set": "geosite-ai-support",
         "action": "route",
-        "outbound": "ai-ipsec"
+        "outbound": "$outbound"
       },
 EOF
 }
@@ -1313,12 +1756,28 @@ EOF
 EOF
 }
 
+profile_outbound_tag() {
+  case "$1" in
+    ai)
+      [[ "${AI_EGRESS_MODE:-ipsec}" == "xray" ]] && printf 'ai-xray\n' || printf 'ai-ipsec\n'
+      ;;
+    cn)
+      [[ "${CN_EGRESS_MODE:-ipsec}" == "xray" ]] && printf 'cn-xray\n' || printf 'cn-ipsec\n'
+      ;;
+    *)
+      die "profile must be ai or cn"
+      ;;
+  esac
+}
+
 render_singbox() {
   local lan_if="${WAN_IFACE}.${LAN_VLAN_ID:-}"
   local exclude4="${LAN_IPV4_CIDR:-}"
   local exclude_transit4="${TRANSIT_IPV4_CIDR:-}"
   local exclude6="${LAN_IPV6_PREFIX:-}"
   local exclude_transit6="${TRANSIT_IPV6_CIDR:-}"
+  local cn_outbound
+  cn_outbound=$(profile_outbound_tag cn)
   if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
     lan_if="$WAN_IFACE"
     exclude4="$LAN_CLIENT_IPV4_CIDR"
@@ -1411,6 +1870,20 @@ render_singbox() {
         "server": "smartdns-cn",
         "strategy": "ipv4_only"
       }
+    },
+    {
+      "type": "socks",
+      "tag": "ai-xray",
+      "server": "$XRAY_LISTEN_HOST",
+      "server_port": $XRAY_AI_SOCKS_PORT,
+      "version": "5"
+    },
+    {
+      "type": "socks",
+      "tag": "cn-xray",
+      "server": "$XRAY_LISTEN_HOST",
+      "server_port": $XRAY_CN_SOCKS_PORT,
+      "version": "5"
     }
   ],
   "route": {
@@ -1435,7 +1908,7 @@ $(render_singbox_ai_route_rules)
       {
         "rule_set": "geosite-cn-video",
         "action": "route",
-        "outbound": "cn-ipsec"
+        "outbound": "$cn_outbound"
       },
       {
         "ip_is_private": true,
@@ -1491,6 +1964,46 @@ $(render_singbox_ai_dns_rules)
 EOF
 }
 
+render_nft_profile_prerouting_rules() {
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+EOF
+  else
+    cat <<EOF
+    iifname "$lan_if" ip daddr 255.255.255.255 meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+    iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } ct mark set $SINGBOX_AUTO_REDIRECT_OUTPUT_MARK meta mark set $mark counter comment "dnscomplex-${profile}-preroute"
+EOF
+  fi
+}
+
+render_nft_profile_restore_rules() {
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-restore"
+EOF
+  else
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark counter comment "dnscomplex-${profile}-policy-restore"
+EOF
+  fi
+}
+
+render_nft_profile_output_rules() {
+  local profile=$1 set_name=$2 mark=$3 mode=$4
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-output"
+EOF
+  else
+    cat <<EOF
+    ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark
+EOF
+  fi
+}
+
 render_nftables() {
   local lan_if="${WAN_IFACE}.${LAN_VLAN_ID:-}"
   if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
@@ -1528,15 +2041,15 @@ table inet dnscomplex {
     iifname "$lan_if" udp dport { 784, 853, 8853 } drop
     iifname "$lan_if" tcp dport 853 drop
     iifname "$lan_if" ip daddr @known_doh4 tcp dport 443 drop
-    iifname "$lan_if" ip daddr @ai4 meta l4proto { icmp, tcp, udp } ct mark set $SINGBOX_AUTO_REDIRECT_OUTPUT_MARK meta mark set $AI_MARK counter comment "dnscomplex-ai-preroute"
-    iifname "$lan_if" ip daddr @cn4 meta l4proto { icmp, tcp, udp } ct mark set $SINGBOX_AUTO_REDIRECT_OUTPUT_MARK meta mark set $CN_MARK counter comment "dnscomplex-cn-preroute"
+$(render_nft_profile_prerouting_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(render_nft_profile_prerouting_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
   }
 
   chain prerouting_policy_restore {
     type filter hook prerouting priority filter; policy accept;
     iifname "$lan_if" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
-    iifname "$lan_if" ip daddr @ai4 meta l4proto { icmp, tcp, udp } meta mark set $AI_MARK counter comment "dnscomplex-ai-policy-restore"
-    iifname "$lan_if" ip daddr @cn4 meta l4proto { icmp, tcp, udp } meta mark set $CN_MARK counter comment "dnscomplex-cn-policy-restore"
+$(render_nft_profile_restore_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(render_nft_profile_restore_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
   }
 
   chain forward {
@@ -1547,8 +2060,8 @@ table inet dnscomplex {
   chain output {
     type route hook output priority mangle; policy accept;
     ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
-    ip daddr @ai4 meta l4proto { icmp, tcp, udp } meta mark set $AI_MARK
-    ip daddr @cn4 meta l4proto { icmp, tcp, udp } meta mark set $CN_MARK
+$(render_nft_profile_output_rules ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(render_nft_profile_output_rules cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
   }
 
   chain postrouting {
@@ -1848,6 +2361,16 @@ load_config() {
   : "${SINGBOX_DNS_PORT:=1053}"
   : "${SINGBOX_HTTP_LISTEN:=0.0.0.0}"
   : "${SINGBOX_HTTP_PORT:=1081}"
+  : "${XRAY_ENABLED:=1}"
+  : "${XRAY_LISTEN_HOST:=127.0.0.1}"
+  : "${XRAY_AI_SOCKS_PORT:=16054}"
+  : "${XRAY_CN_SOCKS_PORT:=16055}"
+  : "${AI_EGRESS_MODE:=ipsec}"
+  : "${CN_EGRESS_MODE:=ipsec}"
+  : "${AI_XRAY_URI:=}"
+  : "${CN_XRAY_URI:=}"
+  : "${AI_XRAY_OUTBOUND_JSON:=}"
+  : "${CN_XRAY_OUTBOUND_JSON:=}"
   : "${DNSCOMPLEX_WEB_LISTEN:=127.0.0.1}"
   : "${DNSCOMPLEX_WEB_PORT:=8088}"
   : "${DNSCOMPLEX_WEB_PASSWORD:=dnscomplex}"
@@ -1855,6 +2378,9 @@ load_config() {
   : "${DNSCOMPLEX_METRICS_PORT:=9108}"
   : "${DNSCOMPLEX_UPDATE_TIME:=04:20}"
   : "${DNSCOMPLEX_UPDATE_LAST_LOG:=/var/log/dnscomplex/update-latest.log}"
+  : "${DNSCOMPLEX_UPDATE_CHANNEL:=stable}"
+  : "${DNSCOMPLEX_PINNED_VERSION:=}"
+  : "${GITHUB_RELEASE_POLICY:=latest}"
   : "${DNSCOMPLEX_NFTSET_REFRESH_INTERVAL:=5m}"
   : "${DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT:=2h}"
   : "${ADGUARD_DNS_CACHE_MODE:=off}"
@@ -1866,18 +2392,19 @@ load_config() {
   : "${PROMETHEUS_MODE:=exporter-only}"
   : "${IPSEC_TCP_MSS:=1200}"
   : "${APPLE_PRIVATE_RELAY_BLOCK:=1}"
-  : "${AI_GEOSITE_SOURCES:=openai anthropic meta}"
-  : "${AI_SUPPORT_DOMAINS:=}"
+  : "${AI_GEOSITE_SOURCES:=openai anthropic}"
+  : "${AI_SUPPORT_DOMAINS:=meta.ai}"
   : "${AI_NFTSET_REFRESH_DOMAINS:=chatgpt.com ios.chat.openai.com openai.com api.openai.com oaistatic.com oaiusercontent.com files.oaiusercontent.com cdn.oaistatic.com persistent.oaistatic.com cdn.openai.com anthropic.com claude.ai claude.com meta.ai}"
   : "${SING_GEOSITE_RULESET_BASE_URL:=https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set}"
   : "${CN_VIDEO_SOURCES:=acfun bilibili douyin douyu gitv hunantv huya iqiyi kuaishou le pptv youku wasu v.qq.com video.qq.com tencentvideo.com cibntv.net}"
-  : "${AI_SAMPLE_DOMAINS:=openai.com anthropic.com claude.ai meta.com facebook.com instagram.com whatsapp.com threads.net}"
+  : "${AI_SAMPLE_DOMAINS:=openai.com anthropic.com claude.ai meta.ai}"
   : "${CN_SAMPLE_DOMAINS:=bilibili.com iqiyi.com youku.com douyin.com kuaishou.com acfun.cn mgtv.com v.qq.com qq.com tv.cctv.com}"
   : "${CN_NFTSET_REFRESH_DOMAINS:=$CN_SAMPLE_DOMAINS}"
   : "${CN_STATIC_A_OVERRIDES:=}"
   : "${CN_OVERRIDE_PROBE_DOMAINS:=youku.com=youku.com,www.youku.com}"
   : "${CN_OVERRIDE_PROBE_RESOLVERS:=223.5.5.5 119.29.29.29 1.1.1.1 8.8.8.8}"
   : "${CN_OVERRIDE_PROBE_TIMEOUT:=8}"
+  migrate_ai_meta_sample_domains
   : "${AI_MARK:=0x301}"
   : "${CN_MARK:=0x351}"
   : "${AI_MARK_DEC:=769}"
@@ -1945,6 +2472,16 @@ SINGBOX_SOCKS_LISTEN
 SINGBOX_SOCKS_PORT
 SINGBOX_HTTP_LISTEN
 SINGBOX_HTTP_PORT
+XRAY_ENABLED
+XRAY_LISTEN_HOST
+XRAY_AI_SOCKS_PORT
+XRAY_CN_SOCKS_PORT
+AI_EGRESS_MODE
+CN_EGRESS_MODE
+AI_XRAY_URI
+CN_XRAY_URI
+AI_XRAY_OUTBOUND_JSON
+CN_XRAY_OUTBOUND_JSON
 DNSCOMPLEX_WEB_LISTEN
 DNSCOMPLEX_WEB_PORT
 DNSCOMPLEX_WEB_PASSWORD
@@ -1952,6 +2489,9 @@ DNSCOMPLEX_METRICS_LISTEN
 DNSCOMPLEX_METRICS_PORT
 DNSCOMPLEX_UPDATE_TIME
 DNSCOMPLEX_UPDATE_LAST_LOG
+DNSCOMPLEX_UPDATE_CHANNEL
+DNSCOMPLEX_PINNED_VERSION
+GITHUB_RELEASE_POLICY
 DNSCOMPLEX_NFTSET_REFRESH_INTERVAL
 DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT
 ADGUARD_DNS_CACHE_MODE
@@ -2002,6 +2542,31 @@ migrate_config_cmd() {
 
 split_words() {
   tr ' ,;' '\n\n\n' <<<"${1:-}" | sed '/^$/d'
+}
+
+migrate_ai_meta_sample_domains() {
+  local item changed=0 has_meta_ai=0
+  local -a kept=()
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    case "$item" in
+      facebook.com|instagram.com|meta.com|threads.net|whatsapp.com)
+        changed=1
+        continue
+        ;;
+      meta.ai)
+        has_meta_ai=1
+        ;;
+    esac
+    kept+=("$item")
+  done < <(split_words "${AI_SAMPLE_DOMAINS:-}")
+  if [[ "$has_meta_ai" == "0" ]]; then
+    kept+=("meta.ai")
+    changed=1
+  fi
+  if [[ "$changed" == "1" ]]; then
+    AI_SAMPLE_DOMAINS=$(printf '%s\n' "${kept[@]}" | awk '!seen[$0]++' | xargs)
+  fi
 }
 
 rule_set_safe_name() {
@@ -2131,11 +2696,13 @@ normalize_adguard_cache_config() {
       }
       close(cache)
     }
-    /^  cache_(enabled|size|optimistic|ttl_min|ttl_max):/ { next }
-    /^  blocked_response_ttl:/ {
-      print
+    /^  cache_/ { next }
+    /^  (bogus_nxdomain|blocked_response_ttl):/ && !inserted {
       printf "%s", block
       inserted = 1
+    }
+    /^  blocked_response_ttl:/ {
+      print
       next
     }
     { print }
@@ -2334,20 +2901,62 @@ smartdns_arch() {
   esac
 }
 
+xray_asset_pattern() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'Xray-linux-64\\.zip$\n' ;;
+    aarch64|arm64) printf 'Xray-linux-arm64-v8a\\.zip$\n' ;;
+    armv7l) printf 'Xray-linux-arm32-v7a\\.zip$\n' ;;
+    *) die "unsupported Xray architecture: $(uname -m)" ;;
+  esac
+}
+
+github_release_api_url() {
+  local repo=$1
+  local channel=${DNSCOMPLEX_UPDATE_CHANNEL:-stable}
+  local version=${DNSCOMPLEX_PINNED_VERSION:-}
+  if [[ "${GITHUB_RELEASE_POLICY:-latest}" == "pinned" || "$channel" == "pinned" ]]; then
+    [[ -n "$version" ]] || die "DNSCOMPLEX_PINNED_VERSION is required for pinned GitHub releases"
+    printf 'https://api.github.com/repos/%s/releases/tags/%s\n' "$repo" "$version"
+    return 0
+  fi
+  case "$channel" in
+    stable)
+      printf 'https://api.github.com/repos/%s/releases/latest\n' "$repo"
+      ;;
+    beta)
+      printf 'https://api.github.com/repos/%s/releases\n' "$repo"
+      ;;
+    *)
+      die "unsupported DNSCOMPLEX_UPDATE_CHANNEL=$channel"
+      ;;
+  esac
+}
+
+github_release_json() {
+  local repo=$1
+  local url
+  url=$(github_release_api_url "$repo")
+  if [[ "${DNSCOMPLEX_UPDATE_CHANNEL:-stable}" == "beta" && "${GITHUB_RELEASE_POLICY:-latest}" != "pinned" ]]; then
+    curl -fsSL "$url" | jq 'map(select(.draft == false)) | .[0]'
+  else
+    curl -fsSL "$url"
+  fi
+}
+
 github_latest_asset_url() {
   local repo=$1
   local pattern=$2
   local asset
-  asset=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" |
+  asset=$(github_release_json "$repo" |
     jq -r --arg pattern "$pattern" '.assets[].browser_download_url | select(test($pattern))' |
     head -n1)
-  [[ -n "$asset" ]] || die "could not locate latest GitHub release asset for $repo matching $pattern"
+  [[ -n "$asset" ]] || die "could not locate GitHub release asset for $repo matching $pattern"
   printf '%s\n' "$asset"
 }
 
 github_latest_release_tag() {
   local repo=$1
-  curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | jq -r '.tag_name'
+  github_release_json "$repo" | jq -r '.tag_name'
 }
 
 component_current_tag() {
@@ -2361,6 +2970,9 @@ component_current_tag() {
       ;;
     AdGuardHome)
       /opt/AdGuardHome/AdGuardHome --version 2>/dev/null | grep -Eo 'v[0-9]+(\.[0-9]+)+' | head -n1
+      ;;
+    xray)
+      xray version 2>/dev/null | awk '/^Xray / {print "v" $2; exit}'
       ;;
     *)
       return 1
@@ -2450,6 +3062,16 @@ write_config_cmd() {
     write_env_var SINGBOX_SOCKS_PORT "$SINGBOX_SOCKS_PORT"
     write_env_var SINGBOX_HTTP_LISTEN "$SINGBOX_HTTP_LISTEN"
     write_env_var SINGBOX_HTTP_PORT "$SINGBOX_HTTP_PORT"
+    write_env_var XRAY_ENABLED "$XRAY_ENABLED"
+    write_env_var XRAY_LISTEN_HOST "$XRAY_LISTEN_HOST"
+    write_env_var XRAY_AI_SOCKS_PORT "$XRAY_AI_SOCKS_PORT"
+    write_env_var XRAY_CN_SOCKS_PORT "$XRAY_CN_SOCKS_PORT"
+    write_env_var AI_EGRESS_MODE "$AI_EGRESS_MODE"
+    write_env_var CN_EGRESS_MODE "$CN_EGRESS_MODE"
+    write_env_var AI_XRAY_URI "$AI_XRAY_URI"
+    write_env_var CN_XRAY_URI "$CN_XRAY_URI"
+    write_env_var AI_XRAY_OUTBOUND_JSON "$AI_XRAY_OUTBOUND_JSON"
+    write_env_var CN_XRAY_OUTBOUND_JSON "$CN_XRAY_OUTBOUND_JSON"
     write_env_var DNSCOMPLEX_WEB_LISTEN "$DNSCOMPLEX_WEB_LISTEN"
     write_env_var DNSCOMPLEX_WEB_PORT "$DNSCOMPLEX_WEB_PORT"
 	    write_env_var DNSCOMPLEX_WEB_PASSWORD "$DNSCOMPLEX_WEB_PASSWORD"
@@ -2457,6 +3079,9 @@ write_config_cmd() {
 	    write_env_var DNSCOMPLEX_METRICS_PORT "$DNSCOMPLEX_METRICS_PORT"
 	    write_env_var DNSCOMPLEX_UPDATE_TIME "$DNSCOMPLEX_UPDATE_TIME"
 	    write_env_var DNSCOMPLEX_UPDATE_LAST_LOG "$DNSCOMPLEX_UPDATE_LAST_LOG"
+	    write_env_var DNSCOMPLEX_UPDATE_CHANNEL "$DNSCOMPLEX_UPDATE_CHANNEL"
+	    write_env_var DNSCOMPLEX_PINNED_VERSION "$DNSCOMPLEX_PINNED_VERSION"
+	    write_env_var GITHUB_RELEASE_POLICY "$GITHUB_RELEASE_POLICY"
 	    write_env_var DNSCOMPLEX_NFTSET_REFRESH_INTERVAL "$DNSCOMPLEX_NFTSET_REFRESH_INTERVAL"
     write_env_var DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT "$DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT"
     write_env_var ADGUARD_DNS_CACHE_MODE "$ADGUARD_DNS_CACHE_MODE"
@@ -2500,6 +3125,15 @@ Commands:
   remove-domain ai|cn DOMAIN_OR_GEOSITE
   set-socks LISTEN PORT
   set-ipsec ai|cn USER PASSWORD
+  set-web-password PASSWORD
+  set-local-host HOST.local IPv4
+  test-local-name HOST.local
+  set-egress ai|cn ipsec|xray
+  set-xray-uri ai|cn URI
+  set-xray-json ai|cn JSON_FILE
+  test-xray [ai|cn]
+  xray-status
+  render-xray
   set-update-time HH:MM
   refresh-nftsets
   refresh-cn-overrides [DOMAIN ...]
@@ -2508,9 +3142,13 @@ Commands:
   test-ipsec
   mss-calibrate
   routeros-print
-  update-software
+  update-software [--channel stable|beta|pinned] [--version VERSION]
   metrics-sample
   soak [--duration 30m] [--clients 1000] [--dns-qps 50] [--profiles ai,cn,default] [--idle-resume]
+  wizard
+  validate-config [--json] ENV_FILE
+  render-config [--redacted]
+  support-bundle [--output PATH] [--include-logs minimal|standard|full]
   backup [OUTPUT_TAR_GZ]
   restore INPUT_TAR_GZ
   ipsec-ifaces up|down
@@ -2538,8 +3176,8 @@ status_cmd() {
   if [[ "${1:-}" == "--verbose" || "${1:-}" == "verbose" ]]; then
     verbose=1
   fi
-  printf 'deploy_mode=%s default_ipv6_mode=%s default_dns_strategy=%s adguard_cache=%s ha_mode=%s primary=%s secondary=%s\n' \
-    "$DEPLOY_MODE" "$DEFAULT_IPV6_MODE" "$DEFAULT_DNS_STRATEGY" "$ADGUARD_DNS_CACHE_MODE" "$HA_MODE" "${HA_PRIMARY_IP:-}" "${HA_SECONDARY_IP:-}"
+  printf 'deploy_mode=%s default_ipv6_mode=%s default_dns_strategy=%s adguard_cache=%s ha_mode=%s primary=%s secondary=%s ai_egress=%s cn_egress=%s update_channel=%s pinned_version=%s github_policy=%s\n' \
+    "$DEPLOY_MODE" "$DEFAULT_IPV6_MODE" "$DEFAULT_DNS_STRATEGY" "$ADGUARD_DNS_CACHE_MODE" "$HA_MODE" "${HA_PRIMARY_IP:-}" "${HA_SECONDARY_IP:-}" "$AI_EGRESS_MODE" "$CN_EGRESS_MODE" "$DNSCOMPLEX_UPDATE_CHANNEL" "${DNSCOMPLEX_PINNED_VERSION:-}" "$GITHUB_RELEASE_POLICY"
   missing=$(config_missing_keys || true)
   if [[ -n "$missing" ]]; then
     printf 'config_missing_keys=%s\n' "$(tr '\n' ',' <<<"$missing" | sed 's/,$//')"
@@ -2557,6 +3195,7 @@ status_cmd() {
     strongswan.service \
     ipsec.service \
     nftables.service \
+    xray-dnscomplex.service \
     dnscomplex-web.service \
     dnscomplex-metrics.service \
     dnscomplex-health.timer \
@@ -2773,6 +3412,7 @@ install_domain_files() {
   {
     [[ -f /etc/dnscomplex/ai.seed-domains ]] && cat /etc/dnscomplex/ai.seed-domains
     [[ -f "$GEO_DIR/ai-support.domains" ]] && cat "$GEO_DIR/ai-support.domains"
+    split_words "${AI_NFTSET_REFRESH_DOMAINS:-}"
   } | sort -u >/etc/dnscomplex/ai.domains
   install -m 0644 "$GEO_DIR/cn-video.domains" /etc/dnscomplex/cn-video.domains
 }
@@ -2784,10 +3424,22 @@ sync_geosite_sources_from_config() {
   split_words "${CN_VIDEO_SOURCES:-}" >"$GEO_DIR/cn-video.sources"
 }
 
+sync_domain_seed_files_from_config() {
+  split_words "${AI_SAMPLE_DOMAINS:-}" >/etc/dnscomplex/ai.seed-domains
+  split_words "${CN_SAMPLE_DOMAINS:-}" >/etc/dnscomplex/cn-video.seed-domains
+}
+
+flush_policy_nftsets_cmd() {
+  nft flush set inet dnscomplex ai4 >/dev/null 2>&1 || true
+  nft flush set inet dnscomplex cn4 >/dev/null 2>&1 || true
+}
+
 update_geosite_cmd() {
   need_root
   mkdir -p "$GEO_DIR"
   sync_geosite_sources_from_config
+  sync_domain_seed_files_from_config
+  write_config_cmd
   download_sing_geosite_ai_rule_sets
   download_geosite_source
   compile_profile ai-support "$GEO_DIR/ai-support.sources" "$GEO_DIR/ai.custom"
@@ -2796,6 +3448,7 @@ update_geosite_cmd() {
   render_adguard_runtime
   sing-box check -c /etc/sing-box/config.json
   restart_dns_stack
+  flush_policy_nftsets_cmd
   refresh_nftsets_cmd || warn "nftset refresh failed after geosite update"
 }
 
@@ -2807,25 +3460,76 @@ profile_file() {
   esac
 }
 
+add_list_item() {
+  local list=$1
+  local item=$2
+  {
+    split_words "$list"
+    printf '%s\n' "$item"
+  } | awk 'NF && !seen[$0]++'
+}
+
+remove_list_item() {
+  local list=$1
+  local item=$2
+  split_words "$list" | awk -v item="$item" 'NF && $0 != item && !seen[$0]++'
+}
+
 add_domain_cmd() {
   need_root
   [[ $# -eq 2 ]] || die "usage: dnscomplex add-domain ai|cn DOMAIN_OR_GEOSITE"
+  local profile=$1
+  local value=$2
   local file
-  file=$(profile_file "$1")
+  file=$(profile_file "$profile")
   mkdir -p "$(dirname "$file")"
-  grep -Fxq "$2" "$file" 2>/dev/null || printf '%s\n' "$2" >>"$file"
+  if [[ "$value" != *.* ]]; then
+    case "$profile" in
+      ai)
+        AI_GEOSITE_SOURCES=$(add_list_item "$AI_GEOSITE_SOURCES" "$value" | xargs)
+        write_config_cmd
+        ;;
+      cn)
+        CN_VIDEO_SOURCES=$(add_list_item "$CN_VIDEO_SOURCES" "$value" | xargs)
+        write_config_cmd
+        ;;
+    esac
+  else
+    grep -Fxq "$value" "$file" 2>/dev/null || printf '%s\n' "$value" >>"$file"
+  fi
   update_geosite_cmd
 }
 
 remove_domain_cmd() {
   need_root
   [[ $# -eq 2 ]] || die "usage: dnscomplex remove-domain ai|cn DOMAIN_OR_GEOSITE"
-  local file tmp
-  file=$(profile_file "$1")
+  local profile=$1
+  local value=$2
+  local file tmp changed=0
+  file=$(profile_file "$profile")
   tmp=$(mktemp)
-  grep -Fxv "$2" "$file" >"$tmp" || true
+  grep -Fxv "$value" "$file" >"$tmp" || true
   install -m 0644 "$tmp" "$file"
   rm -f "$tmp"
+  case "$profile" in
+    ai)
+      if split_words "$AI_GEOSITE_SOURCES" | grep -Fxq "$value"; then
+        AI_GEOSITE_SOURCES=$(remove_list_item "$AI_GEOSITE_SOURCES" "$value" | xargs)
+        changed=1
+      fi
+      if split_words "$AI_SUPPORT_DOMAINS" | grep -Fxq "$value"; then
+        AI_SUPPORT_DOMAINS=$(remove_list_item "$AI_SUPPORT_DOMAINS" "$value" | xargs)
+        changed=1
+      fi
+      ;;
+    cn)
+      if split_words "$CN_VIDEO_SOURCES" | grep -Fxq "$value"; then
+        CN_VIDEO_SOURCES=$(remove_list_item "$CN_VIDEO_SOURCES" "$value" | xargs)
+        changed=1
+      fi
+      ;;
+  esac
+  ((changed == 0)) || write_config_cmd
   update_geosite_cmd
 }
 
@@ -3118,14 +3822,28 @@ test_dns_cmd() {
 }
 
 test_ipsec_cmd() {
-  swanctl --list-sas 2>/dev/null | grep -Eq 'ai|cn' || die "no AI/CN IPsec SA found"
-  ip link show ipsec-ai >/dev/null
-  ip link show ipsec-cn >/dev/null
+  local sas required=0 failed=0
+  sas=$(swanctl --list-sas 2>/dev/null || true)
+  if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
+    required=1
+    grep -Eq '^ai:' <<<"$sas" || { warn "AI IPsec SA not found"; failed=1; }
+    ip link show ipsec-ai >/dev/null || { warn "ipsec-ai interface not found"; failed=1; }
+  fi
+  if [[ "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
+    required=1
+    grep -Eq '^cn:' <<<"$sas" || { warn "CN IPsec SA not found"; failed=1; }
+    ip link show ipsec-cn >/dev/null || { warn "ipsec-cn interface not found"; failed=1; }
+  fi
+  if [[ "$required" == "0" ]]; then
+    log "AI/CN egress are not using IPsec; skipping IPsec test"
+    return 0
+  fi
+  [[ "$failed" == "0" ]]
 }
 
 mss_calibrate_cmd() {
   need_root
-  local mtu_ai mtu_cn mss_ai mss_cn
+  local mtu_ai mtu_cn mss_ai mss_cn recommended
   mtu_ai=$(ip link show ipsec-ai 2>/dev/null | awk '/mtu/ {for (i=1;i<=NF;i++) if ($i=="mtu") print $(i+1)}' | head -n1)
   mtu_cn=$(ip link show ipsec-cn 2>/dev/null | awk '/mtu/ {for (i=1;i<=NF;i++) if ($i=="mtu") print $(i+1)}' | head -n1)
   mtu_ai=${mtu_ai:-1400}
@@ -3134,7 +3852,24 @@ mss_calibrate_cmd() {
   mss_cn=$((mtu_cn - 60))
   log "AI MSS candidate: $mss_ai"
   log "CN MSS candidate: $mss_cn"
+  recommended=$(mss_recommended_value "$mss_ai" "$mss_cn")
+  IPSEC_TCP_MSS=$recommended
+  write_config_cmd
+  if [[ -f /etc/nftables.d/dnscomplex.nft ]]; then
+    sed -i -E "s/(tcp flags syn tcp option maxseg size set )[0-9]+/\\1$IPSEC_TCP_MSS/" /etc/nftables.d/dnscomplex.nft
+  fi
   systemctl restart nftables
+  refresh_nftsets_cmd || warn "nftset refresh failed after MSS calibration"
+  log "applied IPSEC_TCP_MSS=$IPSEC_TCP_MSS"
+}
+
+mss_recommended_value() {
+  local ai=$1 cn=$2 value
+  value=$ai
+  ((cn < value)) && value=$cn
+  ((value > 1360)) && value=1360
+  ((value < 536)) && value=536
+  printf '%s\n' "$value"
 }
 
 ipsec_ifaces_cmd() {
@@ -3300,13 +4035,16 @@ fix_cmd() {
   restart_ipsec_service || true
   systemctl restart dnscomplex-ipsec-ifaces dnscomplex-routing || true
   systemctl enable --now dnscomplex-metrics dnscomplex-metrics-sample.timer 2>/dev/null || true
+  systemctl enable --now xray-dnscomplex 2>/dev/null || true
   systemctl restart dnscomplex-metrics || true
+  apply_egress_stack_cmd || true
   write_update_timer_cmd || true
   systemctl reset-failed dnscomplex-update.service dnscomplex-update.timer 2>/dev/null || true
   swanctl --load-all >/tmp/dnscomplex-swanctl-load.log 2>&1 || cat /tmp/dnscomplex-swanctl-load.log >&2
   swanctl --initiate --child ai || true
   swanctl --initiate --child cn || true
   "$0" routes up || true
+  render_adguard_runtime || true
   restart_dns_stack || true
   "$0" refresh-nftsets || true
 }
@@ -3321,7 +4059,7 @@ doctor_cmd() {
     printf '[config] ok\n'
   fi
 
-  failed_units=$(systemctl --failed --plain --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^(dnscomplex|sing-box|smartdns|AdGuardHome|strongswan|nftables)' || true)
+  failed_units=$(systemctl --failed --plain --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^(dnscomplex|sing-box|smartdns|AdGuardHome|strongswan|nftables|xray)' || true)
   if [[ -n "$failed_units" ]]; then
     failed=1
     printf '[systemd] failed units:\n%s\n' "$failed_units"
@@ -3359,6 +4097,10 @@ doctor_cmd() {
     failed=1
     printf '[sing-box] config check failed\n'
   }
+  xray run -test -format=json -config /usr/local/etc/xray/config.json >/dev/null 2>&1 || {
+    failed=1
+    printf '[xray] config check failed\n'
+  }
   nft -c -f /etc/nftables.conf >/dev/null 2>&1 || {
     failed=1
     printf '[nft] config check failed\n'
@@ -3369,7 +4111,7 @@ doctor_cmd() {
 
 trace_domain_cmd() {
   [[ $# -eq 1 ]] || die "usage: dnscomplex trace-domain DOMAIN"
-  local domain=$1 profile=default source=default ips_v4 ips_v6 ip hit
+  local domain=$1 profile=default source=default ips_v4 ips_v6 ip hit outbound=default
   if grep -Rhs -F "$domain" "$GEO_DIR"/ai.sources "$GEO_DIR"/ai.custom "$GEO_DIR"/ai-support.sources /etc/dnscomplex/ai.domains 2>/dev/null | grep -Fxq "$domain"; then
     profile=AI
     source=ai-domain-list
@@ -3395,6 +4137,12 @@ trace_domain_cmd() {
     printf 'nftset[%s]=%s\n' "$ip" "$hit"
   done <<<"$ips_v4"
   printf 'profile=%s\nprofile_source=%s\n' "$profile" "$source"
+  case "$profile" in
+    AI) outbound=$(profile_outbound_tag ai) ;;
+    CN) outbound=$(profile_outbound_tag cn) ;;
+    *) outbound=default ;;
+  esac
+  printf 'expected_outbound=%s\n' "$outbound"
   if [[ "$profile" =~ ^(AI|CN)$ && -n "$ips_v6" ]]; then
     printf 'warning=%s\n' "$profile domain returned AAAA; AI/CN should remain IPv4-only"
     return 1
@@ -3439,7 +4187,7 @@ adguard_cache_diagnostics() {
 health_json_cmd() {
   local failed=0 dns_ms ct_pct service services_json cache_ok ipsec_ok
   services_json=""
-  for service in sing-box.service smartdns.service AdGuardHome.service nftables.service; do
+  for service in sing-box.service smartdns.service AdGuardHome.service nftables.service xray-dnscomplex.service; do
     if service_ok "$service"; then
       services_json+="{\"name\":\"$service\",\"ok\":true},"
     else
@@ -3453,7 +4201,13 @@ health_json_cmd() {
   cache_ok=true
   adguard_cache_diagnostics >/dev/null || { cache_ok=false; failed=1; }
   ipsec_ok=true
-  if ! swanctl --list-sas 2>/dev/null | grep -Eq 'ai:|cn:'; then
+  local sas
+  sas=$(swanctl --list-sas 2>/dev/null || true)
+  if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" ]] && ! grep -Eq '^ai:' <<<"$sas"; then
+    ipsec_ok=false
+    failed=1
+  fi
+  if [[ "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]] && ! grep -Eq '^cn:' <<<"$sas"; then
     ipsec_ok=false
     failed=1
   fi
@@ -3494,12 +4248,21 @@ health_cmd() {
   systemctl is-active --quiet smartdns || systemctl restart smartdns || true
   systemctl is-active --quiet AdGuardHome || systemctl restart AdGuardHome || true
   systemctl is-active --quiet sing-box || systemctl restart sing-box || true
-  systemctl is-active --quiet strongswan-starter || systemctl is-active --quiet strongswan-swanctl || restart_ipsec_service || true
+  systemctl is-active --quiet xray-dnscomplex || systemctl restart xray-dnscomplex || true
+  if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" || "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
+    systemctl is-active --quiet strongswan-starter || systemctl is-active --quiet strongswan-swanctl || restart_ipsec_service || true
+  fi
   "$0" ipsec-ifaces up || true
   "$0" routes up || true
   timeout 8 swanctl --load-all --noprompt >/dev/null 2>&1 || true
   local child
   for child in ai cn; do
+    if [[ "$child" == "ai" && "${AI_EGRESS_MODE:-ipsec}" != "ipsec" ]]; then
+      continue
+    fi
+    if [[ "$child" == "cn" && "${CN_EGRESS_MODE:-ipsec}" != "ipsec" ]]; then
+      continue
+    fi
     if ! timeout 5 swanctl --list-sas 2>/dev/null | grep -Eq "^${child}: #[0-9]+, ESTABLISHED"; then
       timeout 15 swanctl --initiate --child "$child" >/dev/null 2>&1 || true
     fi
@@ -3537,6 +4300,43 @@ set_update_time_cmd() {
   write_update_timer_cmd
 }
 
+set_web_password_cmd() {
+  need_root
+  [[ $# -eq 1 ]] || die "usage: dnscomplex set-web-password PASSWORD"
+  local pass=$1
+  if [[ "$pass" == "-" ]]; then
+    read -r -s -p "Web password: " pass
+    printf '\n'
+  fi
+  [[ ${#pass} -ge 8 ]] || die "web password must be at least 8 characters"
+  DNSCOMPLEX_WEB_PASSWORD=$pass
+  write_config_cmd
+  log "web password updated; log in again with username admin"
+}
+
+set_local_host_cmd() {
+  need_root
+  [[ $# -eq 2 ]] || die "usage: dnscomplex set-local-host HOST.local IPv4"
+  local host=$1 ip=$2 tmp
+  [[ "$host" == *.local ]] || die "host must end with .local"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "IPv4 address required"
+  mkdir -p /etc/dnscomplex
+  touch /etc/dnscomplex/local-hosts
+  tmp=$(mktemp)
+  awk -v host="$host" 'tolower($2) != tolower(host)' /etc/dnscomplex/local-hosts >"$tmp" || true
+  printf '%s %s\n' "$ip" "$host" >>"$tmp"
+  install -m 0644 "$tmp" /etc/dnscomplex/local-hosts
+  rm -f "$tmp"
+  restart_dns_stack || true
+  log "local host override applied: $host -> $ip"
+}
+
+test_local_name_cmd() {
+  [[ $# -eq 1 ]] || die "usage: dnscomplex test-local-name HOST.local"
+  local host=$1
+  dig +time=2 +tries=1 "$host" @127.0.0.1 -p 53 A +noall +answer +authority || true
+}
+
 set_socks_cmd() {
   need_root
   [[ $# -eq 2 ]] || die "usage: dnscomplex set-socks LISTEN PORT"
@@ -3565,6 +4365,261 @@ set_socks_cmd() {
   SINGBOX_SOCKS_PORT=$port
   write_config_cmd
   systemctl restart sing-box
+}
+
+profile_outbound_tag() {
+  case "$1" in
+    ai) [[ "${AI_EGRESS_MODE:-ipsec}" == "xray" ]] && printf 'ai-xray\n' || printf 'ai-ipsec\n' ;;
+    cn) [[ "${CN_EGRESS_MODE:-ipsec}" == "xray" ]] && printf 'cn-xray\n' || printf 'cn-ipsec\n' ;;
+    *) die "profile must be ai or cn" ;;
+  esac
+}
+
+xray_test_config_file() {
+  local file=$1
+  if command -v xray >/dev/null 2>&1; then
+    xray run -test -format=json -config "$file"
+  else
+    python3 -m json.tool "$file" >/dev/null
+    warn "xray binary is not installed; only JSON syntax was validated"
+  fi
+}
+
+render_xray_config_cmd() {
+  need_root
+  [[ -x /usr/local/lib/dnscomplex-xray/render.py ]] || die "Xray renderer is missing"
+  local tmp
+  tmp=$(mktemp)
+  /usr/local/lib/dnscomplex-xray/render.py --config "$CONFIG" --output "$tmp"
+  xray_test_config_file "$tmp"
+  install -m 0600 "$tmp" /usr/local/etc/xray/config.json
+  rm -f "$tmp"
+}
+
+write_singbox_egress_cmd() {
+  need_root
+  command -v jq >/dev/null 2>&1 || die "jq is required"
+  [[ -f /etc/sing-box/config.json ]] || die "/etc/sing-box/config.json is missing"
+  local ai_out cn_out tmp
+  ai_out=$(profile_outbound_tag ai)
+  cn_out=$(profile_outbound_tag cn)
+  tmp=$(mktemp)
+  jq --arg ai "$ai_out" --arg cn "$cn_out" '
+    (.route.rules[]? | select(.action == "route" and (.rule_set? | type == "string") and ((.rule_set | startswith("geosite-ai-")) or .rule_set == "geosite-ai-support")).outbound) = $ai |
+    (.route.rules[]? | select(.action == "route" and .rule_set? == "geosite-cn-video").outbound) = $cn
+  ' /etc/sing-box/config.json >"$tmp"
+  sing-box check -c "$tmp"
+  install -m 0644 "$tmp" /etc/sing-box/config.json
+  rm -f "$tmp"
+}
+
+runtime_nft_prerouting_rules() {
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+EOF
+  else
+    cat <<EOF
+    iifname "$lan_if" ip daddr 255.255.255.255 meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+    iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } ct mark set $SINGBOX_AUTO_REDIRECT_OUTPUT_MARK meta mark set $mark counter comment "dnscomplex-${profile}-preroute"
+EOF
+  fi
+}
+
+runtime_nft_restore_rules() {
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-restore"
+EOF
+  else
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark counter comment "dnscomplex-${profile}-policy-restore"
+EOF
+  fi
+}
+
+runtime_nft_output_rules() {
+  local profile=$1 set_name=$2 mark=$3 mode=$4
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-output"
+EOF
+  else
+    cat <<EOF
+    ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark
+EOF
+  fi
+}
+
+write_nftables_runtime_cmd() {
+  need_root
+  local lan_if="${WAN_IFACE}.${LAN_VLAN_ID:-}"
+  [[ "$DEPLOY_MODE" == "routeros-policy" ]] && lan_if="$WAN_IFACE"
+  mkdir -p /etc/nftables.d
+  cat >/etc/nftables.d/dnscomplex.nft <<EOF
+table inet dnscomplex {
+  set ai4 {
+    type ipv4_addr
+    flags interval,timeout
+    size 262144
+  }
+
+  set cn4 {
+    type ipv4_addr
+    flags interval,timeout
+    size 262144
+  }
+
+  set known_doh4 {
+    type ipv4_addr
+    flags interval
+    elements = { 1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 9.9.9.9, 149.112.112.112, 223.5.5.5, 223.6.6.6, 119.29.29.29 }
+  }
+
+  chain dns_redirect {
+    type nat hook prerouting priority dstnat; policy accept;
+    iifname "$lan_if" udp dport 53 redirect to :53
+    iifname "$lan_if" tcp dport 53 redirect to :53
+  }
+
+  chain prerouting {
+    type filter hook prerouting priority mangle; policy accept;
+    iifname "$lan_if" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
+    iifname "$lan_if" udp dport { 784, 853, 8853 } drop
+    iifname "$lan_if" tcp dport 853 drop
+    iifname "$lan_if" ip daddr @known_doh4 tcp dport 443 drop
+$(runtime_nft_prerouting_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(runtime_nft_prerouting_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+  }
+
+  chain prerouting_policy_restore {
+    type filter hook prerouting priority filter; policy accept;
+    iifname "$lan_if" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
+$(runtime_nft_restore_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(runtime_nft_restore_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    tcp flags syn tcp option maxseg size set $IPSEC_TCP_MSS
+  }
+
+  chain output {
+    type route hook output priority mangle; policy accept;
+    ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
+$(runtime_nft_output_rules ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(runtime_nft_output_rules cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+  }
+
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+  }
+}
+EOF
+  cat >/etc/nftables.conf <<'EOF'
+#!/usr/sbin/nft -f
+flush ruleset
+include "/etc/nftables.d/*.nft"
+EOF
+  nft -c -f /etc/nftables.conf
+  systemctl restart nftables || true
+}
+
+apply_egress_stack_cmd() {
+  need_root
+  render_xray_config_cmd
+  write_singbox_egress_cmd
+  write_nftables_runtime_cmd
+  systemctl daemon-reload
+  systemctl enable --now xray-dnscomplex 2>/dev/null || true
+  systemctl restart xray-dnscomplex sing-box || true
+  "$0" routes up || true
+}
+
+set_egress_cmd() {
+  need_root
+  [[ $# -eq 2 ]] || die "usage: dnscomplex set-egress ai|cn ipsec|xray"
+  local profile=$1 mode=$2
+  [[ "$mode" == "ipsec" || "$mode" == "xray" ]] || die "mode must be ipsec or xray"
+  if [[ "$mode" == "xray" ]]; then
+    case "$profile" in
+      ai) [[ -n "${AI_XRAY_URI:-}" || -n "${AI_XRAY_OUTBOUND_JSON:-}" ]] || die "set Xray URI/JSON before switching AI to xray" ;;
+      cn) [[ -n "${CN_XRAY_URI:-}" || -n "${CN_XRAY_OUTBOUND_JSON:-}" ]] || die "set Xray URI/JSON before switching CN to xray" ;;
+      *) ;;
+    esac
+  fi
+  case "$profile" in
+    ai) AI_EGRESS_MODE=$mode ;;
+    cn) CN_EGRESS_MODE=$mode ;;
+    *) die "profile must be ai or cn" ;;
+  esac
+  write_config_cmd
+  apply_egress_stack_cmd
+}
+
+set_xray_uri_cmd() {
+  need_root
+  [[ $# -eq 2 ]] || die "usage: dnscomplex set-xray-uri ai|cn URI"
+  local profile=$1 uri=$2 tmp
+  [[ "$profile" == "ai" || "$profile" == "cn" ]] || die "profile must be ai or cn"
+  tmp=$(mktemp)
+  /usr/local/lib/dnscomplex-xray/render.py --config "$CONFIG" --profile "$profile" --uri "$uri" --output "$tmp"
+  xray_test_config_file "$tmp"
+  rm -f "$tmp"
+  case "$profile" in
+    ai) AI_XRAY_URI=$uri; AI_XRAY_OUTBOUND_JSON="" ;;
+    cn) CN_XRAY_URI=$uri; CN_XRAY_OUTBOUND_JSON="" ;;
+  esac
+  write_config_cmd
+  apply_egress_stack_cmd
+}
+
+set_xray_json_cmd() {
+  need_root
+  [[ $# -eq 2 ]] || die "usage: dnscomplex set-xray-json ai|cn JSON_FILE"
+  local profile=$1 file=$2 json tmp
+  [[ "$profile" == "ai" || "$profile" == "cn" ]] || die "profile must be ai or cn"
+  [[ -r "$file" ]] || die "JSON file not readable: $file"
+  json=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' "$file")
+  tmp=$(mktemp)
+  /usr/local/lib/dnscomplex-xray/render.py --config "$CONFIG" --profile "$profile" --json "$json" --output "$tmp"
+  xray_test_config_file "$tmp"
+  rm -f "$tmp"
+  case "$profile" in
+    ai) AI_XRAY_OUTBOUND_JSON=$json; AI_XRAY_URI="" ;;
+    cn) CN_XRAY_OUTBOUND_JSON=$json; CN_XRAY_URI="" ;;
+  esac
+  write_config_cmd
+  apply_egress_stack_cmd
+}
+
+test_xray_cmd() {
+  local profile=${1:-}
+  case "$profile" in
+    ""|ai|cn) ;;
+    *) die "usage: dnscomplex test-xray [ai|cn]" ;;
+  esac
+  render_xray_config_cmd
+  systemctl is-active --quiet xray-dnscomplex 2>/dev/null || warn "xray-dnscomplex.service is not active"
+  if [[ -n "$profile" ]]; then
+    local port
+    [[ "$profile" == "ai" ]] && port=$XRAY_AI_SOCKS_PORT || port=$XRAY_CN_SOCKS_PORT
+    if command -v curl >/dev/null 2>&1; then
+      curl --socks5-hostname "$XRAY_LISTEN_HOST:$port" -4 -fsS --connect-timeout 6 -o /dev/null https://www.cloudflare.com/cdn-cgi/trace || \
+        warn "Xray $profile local SOCKS connectivity probe failed"
+    fi
+  fi
+}
+
+xray_status_cmd() {
+  printf 'xray_enabled=%s ai_egress=%s cn_egress=%s listen=%s ai_port=%s cn_port=%s\n' \
+    "$XRAY_ENABLED" "$AI_EGRESS_MODE" "$CN_EGRESS_MODE" "$XRAY_LISTEN_HOST" "$XRAY_AI_SOCKS_PORT" "$XRAY_CN_SOCKS_PORT"
+  print_unit_state xray-dnscomplex.service
+  if command -v xray >/dev/null 2>&1; then
+    xray version | head -n1
+  fi
 }
 
 write_swanctl_cmd() {
@@ -3687,13 +4742,213 @@ set_ipsec_cmd() {
   "$0" routes up || true
 }
 
+json_escape() {
+  jq -Rs . <<<"${1:-}" | sed 's/^"//; s/"$//'
+}
+
+validate_loaded_config() {
+  local errors=0 ports port_seen="" port name cidr
+  case "${DEPLOY_MODE:-}" in vlan-gateway|routeros-policy) ;; *) printf 'error: DEPLOY_MODE must be vlan-gateway or routeros-policy\n'; errors=$((errors + 1)) ;; esac
+  case "${DEFAULT_DNS_STRATEGY:-prefer_ipv6}" in prefer_ipv4|prefer_ipv6) ;; *) printf 'error: DEFAULT_DNS_STRATEGY must be prefer_ipv4 or prefer_ipv6\n'; errors=$((errors + 1)) ;; esac
+  case "${DEFAULT_IPV6_MODE:-auto}" in auto|on|off) ;; *) printf 'error: DEFAULT_IPV6_MODE must be auto, on, or off\n'; errors=$((errors + 1)) ;; esac
+  case "${ADGUARD_DNS_CACHE_MODE:-off}" in off|small|large) ;; *) printf 'error: ADGUARD_DNS_CACHE_MODE must be off, small, or large\n'; errors=$((errors + 1)) ;; esac
+  case "${DNSCOMPLEX_UPDATE_CHANNEL:-stable}" in stable|beta|pinned) ;; *) printf 'error: DNSCOMPLEX_UPDATE_CHANNEL must be stable, beta, or pinned\n'; errors=$((errors + 1)) ;; esac
+  case "${GITHUB_RELEASE_POLICY:-latest}" in latest|pinned) ;; *) printf 'error: GITHUB_RELEASE_POLICY must be latest or pinned\n'; errors=$((errors + 1)) ;; esac
+  if [[ "${DNSCOMPLEX_UPDATE_CHANNEL:-stable}" == "pinned" || "${GITHUB_RELEASE_POLICY:-latest}" == "pinned" ]]; then
+    [[ -n "${DNSCOMPLEX_PINNED_VERSION:-}" ]] || { printf 'error: DNSCOMPLEX_PINNED_VERSION is required for pinned update policy\n'; errors=$((errors + 1)); }
+  fi
+  for name in SINGBOX_SOCKS_PORT SINGBOX_HTTP_PORT SINGBOX_DNS_PORT SMARTDNS_DEFAULT_PORT SMARTDNS_AI_PORT SMARTDNS_CN_PORT DNSCOMPLEX_WEB_PORT DNSCOMPLEX_METRICS_PORT XRAY_AI_SOCKS_PORT XRAY_CN_SOCKS_PORT; do
+    port=${!name:-}
+    [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]] || { printf 'error: %s must be port 1-65535\n' "$name"; errors=$((errors + 1)); continue; }
+    if grep -Eq "(^| )${port}( |$)" <<<"$port_seen"; then
+      printf 'error: duplicate listen port %s around %s\n' "$port" "$name"
+      errors=$((errors + 1))
+    fi
+    port_seen="$port_seen $port"
+  done
+  case "${AI_EGRESS_MODE:-ipsec}" in ipsec|xray) ;; *) printf 'error: AI_EGRESS_MODE must be ipsec or xray\n'; errors=$((errors + 1)) ;; esac
+  case "${CN_EGRESS_MODE:-ipsec}" in ipsec|xray) ;; *) printf 'error: CN_EGRESS_MODE must be ipsec or xray\n'; errors=$((errors + 1)) ;; esac
+  if [[ "${AI_EGRESS_MODE:-ipsec}" == "xray" ]]; then
+    [[ -n "${AI_XRAY_URI:-}" || -n "${AI_XRAY_OUTBOUND_JSON:-}" ]] || { printf 'error: AI xray mode requires AI_XRAY_URI or AI_XRAY_OUTBOUND_JSON\n'; errors=$((errors + 1)); }
+  fi
+  if [[ "${CN_EGRESS_MODE:-ipsec}" == "xray" ]]; then
+    [[ -n "${CN_XRAY_URI:-}" || -n "${CN_XRAY_OUTBOUND_JSON:-}" ]] || { printf 'error: CN xray mode requires CN_XRAY_URI or CN_XRAY_OUTBOUND_JSON\n'; errors=$((errors + 1)); }
+  fi
+  for cidr in "${LAN_IPV4_CIDR:-}" "${TRANSIT_IPV4_CIDR:-}" "${LAN_CLIENT_IPV4_CIDR:-}"; do
+    [[ -z "$cidr" ]] && continue
+    python3 - "$cidr" <<'PY' >/dev/null 2>&1 || { printf 'error: invalid IPv4 CIDR %s\n' "$cidr"; errors=$((errors + 1)); }
+import ipaddress, sys
+ipaddress.ip_interface(sys.argv[1])
+PY
+  done
+  for cidr in "${LAN_IPV6_PREFIX:-}" "${TRANSIT_IPV6_CIDR:-}"; do
+    [[ -z "$cidr" ]] && continue
+    python3 - "$cidr" <<'PY' >/dev/null 2>&1 || { printf 'error: invalid IPv6 CIDR/prefix %s\n' "$cidr"; errors=$((errors + 1)); }
+import ipaddress, sys
+ipaddress.ip_network(sys.argv[1], strict=False)
+PY
+  done
+  if [[ "${SMARTDNS_AI_PORT:-6054}" == "${SMARTDNS_CN_PORT:-6055}" ]]; then
+    printf 'error: AI/CN SmartDNS ports must be different to preserve A-only nftset policy\n'
+    errors=$((errors + 1))
+  fi
+  return "$errors"
+}
+
+validate_config_file_cmd() {
+  local json=0 file output rc
+  if [[ "${1:-}" == "--json" ]]; then
+    json=1
+    shift
+  fi
+  [[ $# -eq 1 ]] || die "usage: dnscomplex validate-config [--json] ENV_FILE"
+  file=$1
+  [[ -r "$file" ]] || die "config file not readable: $file"
+  output=$(
+    set +e
+    # shellcheck source=/dev/null
+    CONFIG="$file"
+    load_config >/dev/null 2>&1
+    validate_loaded_config
+    printf '__RC__=%s\n' "$?"
+  )
+  rc=$(awk -F= '/^__RC__/ {print $2}' <<<"$output")
+  output=$(sed '/^__RC__=/d' <<<"$output")
+  rc=${rc:-1}
+  if [[ "$json" == "1" ]]; then
+    jq -n --argjson ok "$([[ "$rc" == "0" ]] && printf true || printf false)" --arg output "$output" '{ok:$ok, output:$output}'
+  else
+    if [[ "$rc" == "0" ]]; then
+      printf 'config valid: %s\n' "$file"
+    else
+      printf '%s\n' "$output"
+    fi
+  fi
+  return "$rc"
+}
+
+redact_stream() {
+  python3 -c '
+import re
+import sys
+
+text = sys.stdin.read()
+patterns = [
+    (r"(AI_IPSEC_USERNAME|CN_IPSEC_USERNAME|AI_IPSEC_PASSWORD|CN_IPSEC_PASSWORD|DNSCOMPLEX_WEB_PASSWORD|AI_XRAY_URI|CN_XRAY_URI|AI_XRAY_OUTBOUND_JSON|CN_XRAY_OUTBOUND_JSON|GITHUB_TOKEN|GH_TOKEN|TOKEN|USERNAME|PASSWORD|SECRET|PSK|COOKIE|SESSION)=([^\s]+)", r"\1=[REDACTED_SECRET]"),
+    (r"(vless|vmess|trojan|ss)://[^\s]+", r"\1://[REDACTED_XRAY_URI]"),
+    (r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "[REDACTED_UUID]"),
+    (r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", "[REDACTED_IPV4]"),
+    (r"\bfd[0-9a-fA-F:]*:[0-9a-fA-F:]*\b", "[REDACTED_IPV6]"),
+    (r"\b[\w.-]+\.local\b", "[REDACTED_HOSTNAME]"),
+]
+for pattern, repl in patterns:
+    text = re.sub(pattern, repl, text)
+sys.stdout.write(text)
+'
+}
+
+render_config_cmd() {
+  local redacted=0
+  if [[ "${1:-}" == "--redacted" ]]; then
+    redacted=1
+    shift
+  fi
+  [[ $# -eq 0 ]] || die "usage: dnscomplex render-config [--redacted]"
+  if [[ "$redacted" == "1" ]]; then
+    cat "$CONFIG" | redact_stream
+  else
+    cat "$CONFIG"
+  fi
+}
+
+wizard_cmd() {
+  cat <<'EOF'
+# dnscomplex wizard template
+# Save this as config.env, fill the blanks, then run:
+#   dnscomplex validate-config config.env
+#   sudo bash install.sh --config config.env --yes
+DNSCOMPLEX_NONINTERACTIVE=1
+DEPLOY_MODE=routeros-policy
+WAN_IFACE=eth0
+ROUTEROS_LAN_IPV4=192.0.2.1
+LINUX_LAN_IPV4=192.0.2.2
+LAN_CLIENT_IPV4_CIDR=192.0.2.0/24
+SINGBOX_SOCKS_LISTEN=192.0.2.2
+SINGBOX_SOCKS_PORT=1080
+DNSCOMPLEX_WEB_LISTEN=192.0.2.2
+DNSCOMPLEX_WEB_PORT=8088
+DNSCOMPLEX_UPDATE_CHANNEL=stable
+GITHUB_RELEASE_POLICY=latest
+AI_EGRESS_MODE=ipsec
+CN_EGRESS_MODE=ipsec
+AI_IPSEC_USERNAME=
+AI_IPSEC_PASSWORD=
+CN_IPSEC_USERNAME=
+CN_IPSEC_PASSWORD=
+EOF
+}
+
+support_bundle_cmd() {
+  need_root
+  local output="" include_logs=standard tmp
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --output) output=${2:-}; shift 2 ;;
+      --include-logs) include_logs=${2:-}; shift 2 ;;
+      *) die "usage: dnscomplex support-bundle [--output PATH] [--include-logs minimal|standard|full]" ;;
+    esac
+  done
+  case "$include_logs" in minimal|standard|full) ;; *) die "--include-logs must be minimal, standard, or full" ;; esac
+  output=${output:-"/var/log/dnscomplex/support-bundle-$(date +%Y%m%d-%H%M%S).tar.gz"}
+  tmp=$(mktemp -d)
+  mkdir -p "$tmp/raw" "$tmp/redacted"
+  {
+    printf 'dnscomplex_version=%s\n' "${DNSCOMPLEX_VERSION:-unknown}"
+    printf 'created_at=%s\n' "$(date -Is)"
+    printf 'include_logs=%s\n' "$include_logs"
+  } >"$tmp/raw/summary.txt"
+  "$0" status --verbose >"$tmp/raw/status.txt" 2>&1 || true
+  "$0" doctor >"$tmp/raw/doctor.txt" 2>&1 || true
+  "$0" health --json >"$tmp/raw/health.json" 2>&1 || true
+  for domain in openai.com claude.ai youku.com youtube.com example.com; do
+    "$0" trace-domain "$domain" >"$tmp/raw/trace-$domain.txt" 2>&1 || true
+  done
+  systemctl --no-pager --plain status sing-box smartdns AdGuardHome xray-dnscomplex dnscomplex-web dnscomplex-metrics >"$tmp/raw/systemctl-status.txt" 2>&1 || true
+  systemctl list-timers 'dnscomplex-*.timer' --no-pager >"$tmp/raw/timers.txt" 2>&1 || true
+  nft list table inet dnscomplex >"$tmp/raw/nft-dnscomplex.txt" 2>&1 || true
+  conntrack -S >"$tmp/raw/conntrack-stats.txt" 2>&1 || true
+  "$0" metrics-sample >"$tmp/raw/metrics-sample.json" 2>&1 || true
+  [[ -r "$BASE/routeros.rsc" ]] && cp "$BASE/routeros.rsc" "$tmp/raw/routeros.rsc"
+  render_config_cmd --redacted >"$tmp/raw/config.env.redacted" 2>&1 || true
+  if [[ "$include_logs" != "minimal" ]]; then
+    journalctl -u dnscomplex-web -u dnscomplex-metrics -u sing-box -u smartdns -u AdGuardHome --since "24 hours ago" --no-pager >"$tmp/raw/journal.txt" 2>&1 || true
+    [[ -r "${DNSCOMPLEX_UPDATE_LAST_LOG:-}" ]] && cp "$DNSCOMPLEX_UPDATE_LAST_LOG" "$tmp/raw/update-latest.log"
+  fi
+  if [[ "$include_logs" == "full" ]]; then
+    ls -la /var/log/dnscomplex >"$tmp/raw/dnscomplex-log-list.txt" 2>&1 || true
+  fi
+  while IFS= read -r -d '' file; do
+    rel=${file#"$tmp/raw/"}
+    mkdir -p "$tmp/redacted/$(dirname "$rel")"
+    redact_stream <"$file" >"$tmp/redacted/$rel"
+  done < <(find "$tmp/raw" -type f -print0)
+  mkdir -p "$(dirname "$output")"
+  tar -czf "$output" -C "$tmp/redacted" .
+  rm -rf "$tmp"
+  log "support bundle written: $output"
+}
+
 install_smartdns_release() {
   local arch asset tmp
   arch=$(smartdns_arch)
   tmp=$(mktemp -d)
   asset=$(github_latest_asset_url "pymumu/smartdns" "${arch}-debian-all\\.deb$")
   curl -fsSL -o "$tmp/smartdns.deb" "$asset"
-  dpkg -i "$tmp/smartdns.deb" || apt-get -f install -y
+  DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i "$tmp/smartdns.deb" || \
+    DEBIAN_FRONTEND=noninteractive apt-get \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      -f install -y
   fix_smartdns_wrapper
   ensure_smartdns_enabled
   command -v smartdns >/dev/null || die "SmartDNS install did not provide smartdns binary"
@@ -3715,7 +4970,11 @@ install_singbox_release() {
   tmp=$(mktemp -d)
   asset=$(github_latest_asset_url "SagerNet/sing-box" "sing-box_.*_linux_${arch}\\.deb$")
   curl -fsSL -o "$tmp/sing-box.deb" "$asset"
-  dpkg -i "$tmp/sing-box.deb" || apt-get -f install -y
+  DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i "$tmp/sing-box.deb" || \
+    DEBIAN_FRONTEND=noninteractive apt-get \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      -f install -y
   command -v sing-box >/dev/null || die "sing-box install did not provide sing-box binary"
   rm -rf "$tmp"
 }
@@ -3734,10 +4993,25 @@ install_adguardhome_release() {
   rm -rf "$tmp"
 }
 
+install_xray_release() {
+  local asset tmp pattern
+  tmp=$(mktemp -d)
+  pattern=$(xray_asset_pattern)
+  asset=$(github_latest_asset_url "XTLS/Xray-core" "$pattern")
+  curl -fsSL -o "$tmp/xray.zip" "$asset"
+  unzip -q "$tmp/xray.zip" -d "$tmp/xray"
+  install -m 0755 "$tmp/xray/xray" /usr/local/bin/xray
+  install -d -m 0755 /usr/local/share/xray
+  [[ -f "$tmp/xray/geoip.dat" ]] && install -m 0644 "$tmp/xray/geoip.dat" /usr/local/share/xray/geoip.dat
+  [[ -f "$tmp/xray/geosite.dat" ]] && install -m 0644 "$tmp/xray/geosite.dat" /usr/local/share/xray/geosite.dat
+  command -v xray >/dev/null || die "Xray install did not provide xray binary"
+  rm -rf "$tmp"
+}
+
 backup_release_binaries() {
   local dir=$1
   mkdir -p "$dir"
-  for bin in sing-box smartdns; do
+  for bin in sing-box smartdns xray; do
     if command -v "$bin" >/dev/null 2>&1; then
       cp -a "$(command -v "$bin")" "$dir/$bin"
     fi
@@ -3752,6 +5026,7 @@ restore_release_binaries() {
   [[ -d "$dir" ]] || return 0
   [[ -f "$dir/sing-box" && -n "$(command -v sing-box 2>/dev/null || true)" ]] && install -m 0755 "$dir/sing-box" "$(command -v sing-box)"
   [[ -f "$dir/smartdns" && -n "$(command -v smartdns 2>/dev/null || true)" ]] && install -m 0755 "$dir/smartdns" "$(command -v smartdns)"
+  [[ -f "$dir/xray" && -n "$(command -v xray 2>/dev/null || true)" ]] && install -m 0755 "$dir/xray" "$(command -v xray)"
   [[ -f "$dir/AdGuardHome" ]] && install -m 0755 "$dir/AdGuardHome" /opt/AdGuardHome/AdGuardHome
 }
 
@@ -3760,26 +5035,33 @@ update_software_impl() {
   local before
   UPDATED_SERVICES=()
   before=$(mktemp -d)
-  log "stage: backup current config and release binaries"
+  update_software_stage "backup current config and release binaries"
   backup_cmd "$before/dnscomplex-pre-update.tar.gz"
   backup_release_binaries "$before/bin"
   export DEBIAN_FRONTEND=noninteractive
-  log "stage: Debian apt update"
+  update_software_stage "Debian apt update"
   apt-get update
-  log "stage: Debian apt upgrade"
-  apt-get upgrade -y
+  update_software_stage "Debian apt upgrade"
+  apt-get \
+    -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold \
+    upgrade -y
+  update_software_stage "GitHub release metadata and asset verification channel=${DNSCOMPLEX_UPDATE_CHANNEL:-stable} policy=${GITHUB_RELEASE_POLICY:-latest} pinned=${DNSCOMPLEX_PINNED_VERSION:-}"
   update_release_if_needed sing-box SagerNet/sing-box sing-box install_singbox_release
   update_release_if_needed smartdns pymumu/smartdns smartdns install_smartdns_release
   update_release_if_needed AdGuardHome AdguardTeam/AdGuardHome AdGuardHome install_adguardhome_release
-  log "stage: config validation"
-  if sing-box check -c /etc/sing-box/config.json && nft -c -f /etc/nftables.conf; then
+  update_release_if_needed xray XTLS/Xray-core xray-dnscomplex install_xray_release
+  update_software_stage "dnscomplex installer/schema validation"
+  "$0" validate-config "$CONFIG"
+  update_software_stage "config validation"
+  if sing-box check -c /etc/sing-box/config.json && xray run -test -format=json -config /usr/local/etc/xray/config.json && nft -c -f /etc/nftables.conf; then
     if ((${#UPDATED_SERVICES[@]} > 0)); then
-      log "stage: restart changed services: ${UPDATED_SERVICES[*]}"
+      update_software_stage "restart changed services: ${UPDATED_SERVICES[*]}"
       systemctl restart "${UPDATED_SERVICES[@]}"
     else
-      log "stage: no GitHub component changed; no service restart needed"
+      update_software_stage "no GitHub component changed; no service restart needed"
     fi
-    log "stage: post-update health validation"
+    update_software_stage "post-update health validation"
     if "$0" test; then
       :
     else
@@ -3801,6 +5083,36 @@ update_software_impl() {
 
 update_software_cmd() {
   need_root
+  local requested_channel="" requested_version=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --channel)
+        requested_channel=${2:-}
+        shift 2
+        ;;
+      --version)
+        requested_version=${2:-}
+        shift 2
+        ;;
+      *)
+        die "usage: dnscomplex update-software [--channel stable|beta|pinned] [--version VERSION]"
+        ;;
+    esac
+  done
+  if [[ -n "$requested_channel" ]]; then
+    case "$requested_channel" in stable|beta|pinned) ;; *) die "--channel must be stable, beta, or pinned" ;; esac
+    DNSCOMPLEX_UPDATE_CHANNEL=$requested_channel
+    [[ "$requested_channel" == "pinned" ]] && GITHUB_RELEASE_POLICY=pinned || GITHUB_RELEASE_POLICY=latest
+  fi
+  if [[ -n "$requested_version" ]]; then
+    DNSCOMPLEX_PINNED_VERSION=$requested_version
+    DNSCOMPLEX_UPDATE_CHANNEL=pinned
+    GITHUB_RELEASE_POLICY=pinned
+  fi
+  if [[ "$DNSCOMPLEX_UPDATE_CHANNEL" == "pinned" || "$GITHUB_RELEASE_POLICY" == "pinned" ]]; then
+    [[ -n "$DNSCOMPLEX_PINNED_VERSION" ]] || die "--version VERSION is required for pinned updates"
+  fi
+  write_config_cmd
   mkdir -p /var/log/dnscomplex
   local stamp_log log_file rc
   stamp_log="/var/log/dnscomplex/update-$(date +%Y%m%d-%H%M%S).log"
@@ -3821,6 +5133,10 @@ update_software_cmd() {
   fi
 }
 
+update_software_stage() {
+  log "stage: $*"
+}
+
 routeros_print_cmd() {
   cat "$BASE/routeros.rsc"
 }
@@ -3831,6 +5147,50 @@ metrics_sample_cmd() {
   else
     die "metrics exporter is not installed"
   fi
+}
+
+soak_trace_expect() {
+  local domain=$1
+  local expected=$2
+  local output profile
+  output=$("$0" trace-domain "$domain" 2>&1) || {
+    printf 'trace failed domain=%s expected=%s\n%s\n' "$domain" "$expected" "$output"
+    return 1
+  }
+  profile=$(awk -F= '$1 == "profile" {print $2; exit}' <<<"$output")
+  if [[ "$profile" != "$expected" ]]; then
+    printf 'trace mismatch domain=%s expected=%s actual=%s\n%s\n' "$domain" "$expected" "${profile:-missing}" "$output"
+    return 1
+  fi
+  printf 'trace ok domain=%s profile=%s\n' "$domain" "$profile"
+}
+
+soak_local_hosts_check() {
+  local host failures=0
+  [[ -f /etc/dnscomplex/local-hosts ]] || return 0
+  while IFS= read -r host; do
+    [[ -n "$host" ]] || continue
+    if ! dig +time=2 +tries=1 +short A "$host" @127.0.0.1 -p 53 | grep -Eq '^[0-9]+(\.[0-9]+){3}$'; then
+      printf 'local-hosts idle-resume failed host=%s\n' "$host"
+      failures=$((failures + 1))
+    fi
+  done < <(awk '$1 ~ /^[0-9]+(\.[0-9]+){3}$/ && $2 ~ /\./ {print $2}' /etc/dnscomplex/local-hosts)
+  [[ "$failures" == "0" ]]
+}
+
+soak_idle_resume_check() {
+  printf 'idle-resume nftset recovery start\n'
+  flush_policy_nftsets_cmd
+  refresh_nftsets_cmd
+  soak_trace_expect chatgpt.com AI
+  soak_trace_expect claude.ai AI
+  soak_trace_expect meta.ai AI
+  soak_trace_expect youku.com CN
+  soak_trace_expect facebook.com default
+  soak_trace_expect instagram.com default
+  soak_trace_expect youtube.com default
+  soak_local_hosts_check
+  printf 'idle-resume nftset recovery done\n'
 }
 
 duration_to_seconds() {
@@ -3871,6 +5231,11 @@ soak_cmd() {
   deadline=$((SECONDS + seconds))
   {
     printf 'start=%s duration=%s clients=%s dns_qps=%s profiles=%s idle_resume=%s\n' "$(date -Is)" "$duration" "$clients" "$dns_qps" "$profiles" "$idle_resume"
+    if [[ "$idle_resume" == "1" ]]; then
+      if ! soak_idle_resume_check; then
+        failures=$((failures + 1))
+      fi
+    fi
     while ((SECONDS < deadline)); do
       iter=$((iter + 1))
       if ! "$0" health --json; then
@@ -3883,7 +5248,7 @@ soak_cmd() {
       sleep 10
     done
     printf 'end=%s iterations=%s failures=%s\n' "$(date -Is)" "$iter" "$failures"
-  } | tee "$log_file"
+  } > >(tee "$log_file")
   printf '{"duration":"%s","clients":%s,"dns_qps":%s,"profiles":"%s","idle_resume":%s,"iterations":%s,"failures":%s,"log":"%s"}\n' \
     "$duration" "$clients" "$dns_qps" "$profiles" "$idle_resume" "$iter" "$failures" "$log_file" >"$summary_file"
   log "soak summary: $summary_file"
@@ -3918,6 +5283,7 @@ test_cmd() {
   test_dns_cmd
   test_ipsec_cmd
   sing-box check -c /etc/sing-box/config.json
+  xray run -test -format=json -config /usr/local/etc/xray/config.json
   nft -c -f /etc/nftables.conf
   if ! swanctl --load-all --noprompt >"$swan_log" 2>&1; then
     cat "$swan_log" >&2
@@ -3943,6 +5309,15 @@ main() {
     remove-domain) remove_domain_cmd "$@" ;;
     set-socks) set_socks_cmd "$@" ;;
     set-ipsec) set_ipsec_cmd "$@" ;;
+    set-web-password) set_web_password_cmd "$@" ;;
+    set-local-host) set_local_host_cmd "$@" ;;
+    test-local-name) test_local_name_cmd "$@" ;;
+    set-egress) set_egress_cmd "$@" ;;
+    set-xray-uri) set_xray_uri_cmd "$@" ;;
+    set-xray-json) set_xray_json_cmd "$@" ;;
+    test-xray) test_xray_cmd "$@" ;;
+    xray-status) xray_status_cmd "$@" ;;
+    render-xray) render_xray_config_cmd "$@" ;;
     set-update-time) set_update_time_cmd "$@" ;;
     refresh-nftsets) refresh_nftsets_cmd "$@" ;;
     refresh-cn-overrides) refresh_cn_overrides_cmd "$@" ;;
@@ -3954,6 +5329,10 @@ main() {
     update-software) update_software_cmd "$@" ;;
     metrics-sample) metrics_sample_cmd "$@" ;;
     soak) soak_cmd "$@" ;;
+    wizard) wizard_cmd "$@" ;;
+    validate-config) validate_config_file_cmd "$@" ;;
+    render-config) render_config_cmd "$@" ;;
+    support-bundle) support_bundle_cmd "$@" ;;
     backup) backup_cmd "$@" ;;
     restore) restore_cmd "$@" ;;
     ipsec-ifaces) ipsec_ifaces_cmd "$@" ;;
@@ -3963,7 +5342,9 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
 MANAGER
   chmod_target 0755 /usr/local/sbin/dnscomplex
 }
@@ -4245,6 +5626,7 @@ render_web_interface() {
 #!/usr/bin/env python3
 import base64
 import binascii
+import hashlib
 import ipaddress
 import json
 import os
@@ -4253,7 +5635,9 @@ import shlex
 import socket
 import sqlite3
 import subprocess
+import tempfile
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONFIG = "/etc/dnscomplex/config.env"
@@ -4265,6 +5649,7 @@ SERVICES = [
     "AdGuardHome.service",
     "strongswan-starter.service",
     "nftables.service",
+    "xray-dnscomplex.service",
     "dnscomplex-health.timer",
     "dnscomplex-update.timer",
     "dnscomplex-cn-overrides.timer",
@@ -4286,6 +5671,8 @@ CONFIG_KEYS = [
     "AI_SUPPORT_DOMAINS",
     "AI_NFTSET_REFRESH_DOMAINS",
     "CN_VIDEO_SOURCES",
+    "AI_SAMPLE_DOMAINS",
+    "CN_SAMPLE_DOMAINS",
     "CN_NFTSET_REFRESH_DOMAINS",
     "CN_STATIC_A_OVERRIDES",
     "CN_OVERRIDE_PROBE_DOMAINS",
@@ -4294,12 +5681,25 @@ CONFIG_KEYS = [
     "SINGBOX_SOCKS_PORT",
     "SINGBOX_HTTP_LISTEN",
     "SINGBOX_HTTP_PORT",
+    "XRAY_ENABLED",
+    "XRAY_LISTEN_HOST",
+    "XRAY_AI_SOCKS_PORT",
+    "XRAY_CN_SOCKS_PORT",
+    "AI_EGRESS_MODE",
+    "CN_EGRESS_MODE",
+    "AI_XRAY_URI",
+    "CN_XRAY_URI",
+    "AI_XRAY_OUTBOUND_JSON",
+    "CN_XRAY_OUTBOUND_JSON",
     "DNSCOMPLEX_WEB_LISTEN",
     "DNSCOMPLEX_WEB_PORT",
     "DNSCOMPLEX_METRICS_LISTEN",
     "DNSCOMPLEX_METRICS_PORT",
     "DNSCOMPLEX_UPDATE_TIME",
     "DNSCOMPLEX_UPDATE_LAST_LOG",
+    "DNSCOMPLEX_UPDATE_CHANNEL",
+    "DNSCOMPLEX_PINNED_VERSION",
+    "GITHUB_RELEASE_POLICY",
     "DNSCOMPLEX_NFTSET_REFRESH_INTERVAL",
     "DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT",
     "ADGUARD_DNS_CACHE_MODE",
@@ -4313,6 +5713,9 @@ CONFIG_KEYS = [
     "APPLE_PRIVATE_RELAY_BLOCK",
 ]
 
+SECRET_KEYS = {"AI_XRAY_URI", "CN_XRAY_URI", "AI_XRAY_OUTBOUND_JSON", "CN_XRAY_OUTBOUND_JSON"}
+MASKED_SECRET = "********"
+
 HTML = r"""<!doctype html>
 <html lang="zh-Hant">
 <head>
@@ -4323,10 +5726,13 @@ HTML = r"""<!doctype html>
     :root { color-scheme: light; --bg:#f6f7f9; --panel:#fff; --text:#17202a; --muted:#687385; --line:#d7dde6; --ok:#137a3a; --bad:#b42318; --warn:#9a6700; --accent:#0b5cad; }
     * { box-sizing: border-box; }
     body { margin:0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); }
-    header { height:56px; display:flex; align-items:center; justify-content:space-between; padding:0 20px; background:#ffffff; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:2; }
+    header { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:12px 20px; background:#ffffff; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:2; }
     h1 { font-size:18px; margin:0; font-weight:700; }
     main { max-width:1380px; margin:0 auto; padding:18px; display:grid; gap:16px; }
-    nav { display:flex; flex-wrap:wrap; gap:8px; }
+    nav { display:flex; flex-wrap:wrap; gap:12px; justify-content:flex-end; }
+    .nav-group { display:flex; align-items:center; gap:6px; border-left:1px solid var(--line); padding-left:12px; }
+    .nav-group:first-child { border-left:0; padding-left:0; }
+    .nav-label { color:var(--muted); font-size:12px; font-weight:700; }
     button, input, textarea, select { font:inherit; }
     button { border:1px solid var(--line); background:#fff; color:var(--text); border-radius:6px; padding:8px 11px; cursor:pointer; }
     button.primary { background:var(--accent); color:white; border-color:var(--accent); }
@@ -4339,6 +5745,9 @@ HTML = r"""<!doctype html>
     label { color:var(--muted); font-size:12px; }
     input, textarea, select { width:100%; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--text); padding:8px; }
     textarea { min-height:74px; resize:vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .config-input-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px 16px; margin-top:12px; }
+    .config-input-grid .field { margin-bottom:0; }
+    .config-input-grid label { overflow-wrap:anywhere; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
     th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top; }
     th { color:var(--muted); font-weight:600; }
@@ -4347,32 +5756,104 @@ HTML = r"""<!doctype html>
     .active .dot { background:var(--ok); }
     .failed .dot, .inactive .dot { background:var(--bad); }
     .muted { color:var(--muted); }
-    pre { margin:0; background:#0f1720; color:#dbe7ff; border-radius:8px; padding:12px; overflow:auto; max-height:420px; font-size:12px; }
+    pre { margin:0; background:#0f1720; color:#dbe7ff; border-radius:8px; padding:12px; overflow:auto; max-height:420px; max-width:100%; font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; }
     .tabs { display:flex; gap:8px; flex-wrap:wrap; }
     .tabs button[aria-selected="true"] { background:#e9f2ff; border-color:#b7d4fa; color:#073b75; }
     .view { display:none; }
     .view.active { display:grid; gap:16px; }
+    .summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; }
+    .summary-card, .task-card, .profile-card { border:1px solid var(--line); border-radius:8px; background:#fff; padding:14px; }
+    .summary-card strong { display:block; font-size:22px; margin-top:4px; }
+    .summary-card small, .profile-card small { color:var(--muted); }
+    .summary-card.ok { border-color:#b7e0c4; background:#f4fbf6; }
+    .summary-card.warn { border-color:#f2d18b; background:#fff9e8; }
+    .summary-card.bad { border-color:#efb4ad; background:#fff4f3; }
+    .task-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+    .task-card { text-align:left; min-height:92px; }
+    .task-card b { display:block; margin-bottom:5px; }
+    .task-card span { color:var(--muted); font-size:13px; }
+    .profile-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }
+    .profile-card h3 { margin:0 0 8px; font-size:16px; }
+    .badge { display:inline-flex; align-items:center; border-radius:999px; padding:3px 8px; font-size:12px; border:1px solid var(--line); background:#f8fafc; }
+    .badge.ok { color:var(--ok); border-color:#b7e0c4; background:#f4fbf6; }
+    .badge.warn { color:var(--warn); border-color:#f2d18b; background:#fff9e8; }
+    .badge.bad { color:var(--bad); border-color:#efb4ad; background:#fff4f3; }
+    .warning-list { display:grid; gap:8px; }
+    .warning-item { border-left:4px solid var(--warn); background:#fff9e8; padding:10px 12px; border-radius:6px; }
+    .empty-state { color:var(--muted); border:1px dashed var(--line); border-radius:8px; padding:14px; }
+    .section-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    .help-card { background:#f8fafc; border:1px solid var(--line); border-radius:8px; padding:12px; color:#334155; }
+    .help-card h3 { margin:0 0 6px; font-size:14px; }
+    .help-card p { margin:0; color:var(--muted); font-size:13px; line-height:1.45; }
+    .mini-list { margin:8px 0 0; padding-left:18px; color:var(--muted); font-size:13px; line-height:1.55; }
+    .domain-sections { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }
+    .domain-box { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; }
+    .domain-box h3 { margin:0 0 8px; font-size:14px; }
+    .pill-list { display:flex; gap:6px; flex-wrap:wrap; }
+    .pill { border:1px solid var(--line); border-radius:999px; padding:3px 8px; background:#f8fafc; font-size:12px; }
+    .form-hint { color:var(--muted); font-size:12px; line-height:1.45; }
+    .output-note { margin-top:10px; color:var(--muted); font-size:12px; }
+    .config-advanced summary { cursor:pointer; color:var(--accent); font-weight:700; margin-bottom:10px; }
+    @media (max-width: 760px) {
+      header { position:static; display:grid; }
+      nav { justify-content:flex-start; }
+      .nav-group { width:100%; border-left:0; padding-left:0; flex-wrap:wrap; }
+      button { min-height:38px; }
+    }
   </style>
 </head>
 <body>
   <header>
     <h1>dnscomplex</h1>
     <nav class="tabs">
-      <button data-tab="overview" aria-selected="true">狀態</button>
-      <button data-tab="traffic">流量</button>
-      <button data-tab="connections">連線</button>
-      <button data-tab="split">分流</button>
-      <button data-tab="config">參數</button>
-      <button data-tab="maintenance">維護</button>
+      <div class="nav-group"><span class="nav-label">日常</span><button data-tab="overview" aria-selected="true">總覽</button><button data-tab="daily-test">上網測試</button><button data-tab="connections">活躍連線</button><button data-tab="traffic">流量趨勢</button></div>
+      <div class="nav-group"><span class="nav-label">設定</span><button data-tab="dns">DNS 去廣告</button><button data-tab="split">AI/CN 分流</button><button data-tab="config">常用設定</button><button data-tab="wizard">精靈</button></div>
+      <div class="nav-group"><span class="nav-label">進階</span><button data-tab="services">服務狀態</button><button data-tab="update">更新</button><button data-tab="diagnostics">診斷</button><button data-tab="maintenance">進階維護</button></div>
     </nav>
   </header>
   <main>
     <div id="overview" class="view active">
       <section>
-        <div class="row" style="justify-content:space-between"><h2>程序狀態</h2><button onclick="refreshAll()">刷新</button></div>
-        <div id="services"></div>
+        <div class="section-head"><h2>而家是否正常</h2><button onclick="refreshAll()">刷新</button></div>
+        <div id="summaryCards" class="summary-grid"></div>
       </section>
-      <section><h2>IPsec / 路由摘要</h2><pre id="statusText"></pre></section>
+      <section>
+        <div class="section-head"><h2>需要處理</h2><button onclick="runAction('doctor')">執行 Doctor</button></div>
+        <div id="warningList" class="warning-list"></div>
+      </section>
+      <section>
+        <h2>我想做...</h2>
+        <div id="taskGrid" class="task-grid">
+          <button class="task-card" onclick="openTab('daily-test')"><b>測試手機上網</b><span>檢查 DNS、AI/CN、IPv6 同常見網站。</span></button>
+          <button class="task-card" onclick="openTab('split')"><b>設定 AI / CN 出口</b><span>切換 IPsec 或 Xray，測試後先套用。</span></button>
+          <button class="task-card" onclick="openTab('split')"><b>新增要分流的網站</b><span>加入 AI/CN domain 或 geosite/SRS。</span></button>
+          <button class="task-card" onclick="openTab('config')"><b>修改 SOCKS / IPsec</b><span>管理接入地址、端口及帳密。</span></button>
+          <button class="task-card" onclick="openTab('update')"><b>檢查更新</b><span>查看 stable/beta/pinned channel 和更新紀錄。</span></button>
+          <button class="task-card" onclick="openTab('diagnostics')"><b>生成診斷包</b><span>一鍵產生已消㾗 support bundle。</span></button>
+        </div>
+      </section>
+      <section>
+        <h2>分流摘要</h2>
+        <div id="profileCards" class="profile-grid"></div>
+      </section>
+    </div>
+    <div id="daily-test" class="view">
+      <section>
+        <div class="section-head"><h2>上網測試</h2><button onclick="runAction('test')">完整測試</button></div>
+        <div class="task-grid">
+          <button class="task-card" onclick="runAction('test-dns')"><b>測試 DNS</b><span>確認 AdGuard + SmartDNS 回應正常。</span></button>
+          <button class="task-card" onclick="runAction('test-ipsec')"><b>測試 AI/CN IPsec</b><span>確認分流隧道連線狀態。</span></button>
+          <button class="task-card" onclick="runAction('refresh-nftsets')"><b>刷新分流 IP</b><span>修正手機閒置後 nftset 過期問題。</span></button>
+          <button class="task-card" onclick="traceDomainValue('chatgpt.com')"><b>Trace ChatGPT</b><span>檢查 AI 分流路徑。</span></button>
+          <button class="task-card" onclick="traceDomainValue('youku.com')"><b>Trace Youku</b><span>檢查 CN 分流路徑。</span></button>
+          <button class="task-card" onclick="traceDomainValue('youtube.com')"><b>Trace YouTube</b><span>檢查 default / IPv6 路徑。</span></button>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <input id="quickTraceDomain" placeholder="輸入 domain，例如 claude.ai">
+          <button onclick="traceDomainValue(quickTraceDomain.value)">Trace domain</button>
+        </div>
+      </section>
+      <section><h2>測試輸出</h2><pre id="dailyOutput"></pre></section>
     </div>
     <div id="traffic" class="view">
       <section>
@@ -4393,33 +5874,85 @@ HTML = r"""<!doctype html>
         <p class="muted">Domain 由 AdGuard DNS 查詢紀錄對應目的 IP；直接連 IP、外部 DoH、或不經 200VM 的流量會標示為 unknown/bypass。</p>
       </section>
     </div>
+    <div id="dns" class="view">
+      <section>
+        <div class="section-head"><h2>DNS 去廣告</h2><button onclick="runAction('test-dns')">測試 DNS</button></div>
+        <div id="dnsSummary" class="summary-grid"></div>
+      </section>
+      <section>
+        <h2>常用操作</h2>
+        <div class="task-grid">
+          <button class="task-card" onclick="runAction('refresh-nftsets')"><b>刷新 AI/CN IP 快取</b><span>讓 SmartDNS 重新寫入 nftset。</span></button>
+          <button class="task-card" onclick="runAction('refresh-cn-overrides')"><b>刷新 CN Override</b><span>重新探測 Youku 等 CN 特例 IP。</span></button>
+          <button class="task-card" onclick="openTab('services')"><b>查看 SmartDNS / AdGuard</b><span>到進階頁檢查 service 狀態。</span></button>
+        </div>
+      </section>
+    </div>
     <div id="split" class="view">
       <section>
-        <h2>新增 / 移除 AI 或 CN 分流</h2>
+        <div class="section-head"><h2>AI/CN 分流</h2><button onclick="loadUiSummary()">刷新摘要</button></div>
+        <div id="splitProfileCards" class="profile-grid"></div>
+      </section>
+      <section>
+        <h2>出口模式</h2>
+        <div class="grid">
+          <div>
+            <h2>AI</h2>
+            <div class="field"><label>出口模式</label><select id="aiEgressMode"><option value="ipsec">IPsec</option><option value="xray">Xray</option></select></div>
+            <div class="field"><label>Xray URI</label><textarea id="aiXrayUri" placeholder="vless:// / vmess:// / trojan:// / ss://"></textarea></div>
+            <div class="field"><label>Raw Xray outbound JSON</label><textarea id="aiXrayJson" placeholder='{"protocol":"vless",...}'></textarea></div>
+            <div class="row"><button onclick="testEgress('ai')">測試 AI Xray</button><button class="primary" onclick="applyEgress('ai')">套用 AI 出口</button></div>
+          </div>
+          <div>
+            <h2>CN</h2>
+            <div class="field"><label>出口模式</label><select id="cnEgressMode"><option value="ipsec">IPsec</option><option value="xray">Xray</option></select></div>
+            <div class="field"><label>Xray URI</label><textarea id="cnXrayUri" placeholder="vless:// / vmess:// / trojan:// / ss://"></textarea></div>
+            <div class="field"><label>Raw Xray outbound JSON</label><textarea id="cnXrayJson" placeholder='{"protocol":"trojan",...}'></textarea></div>
+            <div class="row"><button onclick="testEgress('cn')">測試 CN Xray</button><button class="primary" onclick="applyEgress('cn')">套用 CN 出口</button></div>
+          </div>
+        </div>
+      </section>
+      <section>
+        <h2>Domain / Geosite</h2>
+        <div class="help-card">
+          <h3>點樣用</h3>
+          <p>輸入 <b>domain</b> 例如 <code>example.com</code> 會加入自訂分流；輸入 <b>geosite source</b> 例如 <code>openai</code>、<code>anthropic</code>、<code>bilibili</code> 會加入或移除內建來源。Meta AI 預設只用 <code>meta.ai</code>；不要加入 <code>meta</code>，否則 Facebook/Instagram 也會走 AI 出口。</p>
+          <ul class="mini-list">
+            <li>AI：OpenAI / Claude / Meta 等，只回 IPv4，按出口模式走 IPsec 或 Xray。</li>
+            <li>CN：Youku / Bilibili / iQiyi 等，只回 IPv4，按出口模式走 IPsec 或 Xray。</li>
+            <li>唔確定生效未：輸入 domain 後按「Trace 生效路徑」。</li>
+          </ul>
+        </div>
         <div class="grid">
           <div class="field"><label>分類</label><select id="domainProfile"><option value="ai">AI</option><option value="cn">CN</option></select></div>
-          <div class="field"><label>SRS source 或 domain</label><input id="domainValue" placeholder="例如 openai 或 example.com"></div>
+          <div class="field"><label>SRS source / geosite / domain</label><textarea id="domainValue" placeholder="例如 meta.ai 或 example.com；可逐行批量貼上"></textarea><div class="form-hint">Meta AI 用 meta.ai；如果見到 AI 內建來源有 meta，建議移除。</div></div>
         </div>
-        <div class="row"><button class="primary" onclick="domainAction('add-domain')">新增</button><button class="danger" onclick="domainAction('remove-domain')">移除</button><button onclick="runAction('update-geosite')">更新 geosite/SRS</button></div>
+        <div class="row"><button class="primary" onclick="rulesDomain('add')">新增</button><button class="danger" onclick="rulesDomain('remove')">移除</button><button onclick="rulesRebuild()">只重建並套用 SRS</button><button onclick="traceDomainValue(domainValue.value.split(/\\s+/)[0])">Trace 生效路徑</button></div>
+        <div class="output-note">操作結果會顯示在下方；成功後會自動刷新「目前清單」。</div>
       </section>
-      <section><h2>目前分流清單</h2><pre id="domainsText"></pre></section>
+      <section><h2>目前清單</h2><div id="domainsStructured" class="domain-sections"></div><details style="margin-top:12px"><summary>查看原始檔案內容</summary><pre id="domainsText"></pre></details></section>
+      <section><h2>操作結果</h2><pre id="splitOutput"></pre></section>
     </div>
     <div id="config" class="view">
       <section>
-        <div class="row" style="justify-content:space-between"><h2>主要參數</h2><button class="primary" onclick="saveConfig()">儲存並修正設定</button></div>
-        <div id="configForm" class="grid"></div>
+        <div class="section-head"><h2>常用設定</h2><button class="primary" onclick="saveConfig()">儲存進階 config 並修正設定</button></div>
+        <div class="help-card">
+          <h3>常用設定只放日常會改的項目</h3>
+          <p>一般只需要改 SOCKS、IPsec 帳密、自動更新時間。完整 config.env 放在下方「進階原始 config」，未清楚用途前不要改。</p>
+        </div>
       </section>
       <section>
-        <h2>快速修改</h2>
         <div class="grid">
           <div>
-            <h2>SOCKS</h2>
+            <h2>SOCKS 接入</h2>
+            <p class="muted">供手機、Xray VM 或其他設備用 SOCKS 代理接入。</p>
             <div class="field"><label>Listen</label><input id="socksListen"></div>
             <div class="field"><label>Port</label><input id="socksPort"></div>
             <button onclick="setSocks()">更新 SOCKS</button>
           </div>
           <div>
             <h2>IPsec 帳密</h2>
+            <p class="muted">只影響使用 IPsec 出口模式的 AI/CN profile。</p>
             <div class="field"><label>分類</label><select id="ipsecProfile"><option value="ai">AI</option><option value="cn">CN</option></select></div>
             <div class="field"><label>Username</label><input id="ipsecUser"></div>
             <div class="field"><label>Password</label><input id="ipsecPass" type="password"></div>
@@ -4427,10 +5960,85 @@ HTML = r"""<!doctype html>
           </div>
           <div>
             <h2>自動更新</h2>
+            <p class="muted">每日保守更新 Debian 套件、GitHub release 同 geosite/SRS。</p>
             <div class="field"><label>每日時間 HH:MM</label><input id="updateTime"></div>
             <button onclick="setUpdateTime()">更新時間</button>
           </div>
+          <div>
+            <h2>管理界面帳號密碼</h2>
+            <p class="muted">用戶名固定為 admin；修改後下一次操作需要重新登入。</p>
+            <div class="field"><label>新密碼</label><input id="webPassword" type="password" autocomplete="new-password"></div>
+            <button onclick="setWebPassword()">更新管理密碼</button>
+          </div>
+          <div>
+            <h2>MSS 狀態</h2>
+            <p class="muted">MSS 會寫入 config.env 及 nftables；按校準後兩邊會同步。</p>
+            <div class="field"><label>目前 IPSEC_TCP_MSS</label><input id="mssCurrent" readonly></div>
+            <button onclick="mssCalibrate()">校準並套用 MSS</button>
+          </div>
+          <div>
+            <h2>本機 .local / Codex 連線</h2>
+            <p class="muted">如果 Codex 手機 App 連本機 .local 名稱偶發失敗，可把 Mac 的 LAN IP 綁定到 .local 名稱。</p>
+            <div class="field"><label>Host.local</label><input id="localHostName" placeholder="example-host.local"></div>
+            <div class="field"><label>IPv4</label><input id="localHostIp" placeholder="192.0.2.10"></div>
+            <div class="row"><button onclick="setLocalHost()">套用本機名稱</button><button onclick="testLocalName()">測試本機名稱</button></div>
+          </div>
         </div>
+      </section>
+      <section><h2>操作結果</h2><pre id="configOutput"></pre></section>
+      <section class="config-advanced">
+        <details>
+          <summary>進階原始 config.env</summary>
+          <div id="configGroups" class="config-groups"></div>
+        </details>
+      </section>
+    </div>
+    <div id="services" class="view">
+      <section>
+        <div class="section-head"><h2>服務狀態</h2><button onclick="loadStatus()">刷新</button></div>
+        <div id="servicesTable"></div>
+      </section>
+      <section><h2>IPsec / 路由摘要</h2><pre id="statusText"></pre></section>
+    </div>
+    <div id="wizard" class="view">
+      <section>
+        <div class="row" style="justify-content:space-between"><h2>安裝精靈 / 設定驗證器</h2><button onclick="loadWizardSchema()">載入 schema</button></div>
+        <div class="help-card">
+          <h3>用途</h3>
+          <p>精靈會先驗證，不會直接覆蓋 production。新安裝或想整理 config 時，先貼上 config.env，按「驗證」，通過後才按「套用」。</p>
+        </div>
+        <div class="field"><label>config.env</label><textarea id="wizardConfig" placeholder="貼上 config.env，或按載入 schema 參考欄位"></textarea></div>
+        <div class="row"><button onclick="validateWizard()">驗證</button><button class="primary" onclick="applyWizard()">套用</button></div>
+        <pre id="wizardOutput"></pre>
+      </section>
+    </div>
+    <div id="update" class="view">
+      <section>
+        <div class="row" style="justify-content:space-between"><h2>Release / Update Channel</h2><button onclick="loadUpdateStatus()">刷新</button></div>
+        <div class="help-card">
+          <h3>點樣揀</h3>
+          <ul class="mini-list">
+            <li><b>stable：一般使用</b>，只追最新穩定 release。</li>
+            <li><b>beta</b>：追 prerelease，適合測試新功能。</li>
+            <li><b>pinned</b>：固定版本，例如上一版最穩時使用；要填 Pinned version。</li>
+          </ul>
+        </div>
+        <div class="grid">
+          <div class="field"><label>Channel</label><select id="updateChannel"><option value="stable">stable</option><option value="beta">beta</option><option value="pinned">pinned</option></select></div>
+          <div class="field"><label>Pinned version</label><input id="updateVersion" placeholder="例如 v1.2.3"></div>
+        </div>
+        <div class="row"><button class="primary" onclick="runUpdate()">執行更新</button></div>
+        <pre id="updateOutput"></pre>
+      </section>
+    </div>
+    <div id="diagnostics" class="view">
+      <section>
+        <h2>已消㾗診斷工單 / Support Bundle</h2>
+        <div class="grid">
+          <div class="field"><label>Log 範圍</label><select id="bundleLogs"><option value="standard">standard</option><option value="minimal">minimal</option><option value="full">full</option></select></div>
+        </div>
+        <div class="row"><button class="primary" onclick="supportBundle()">生成診斷包</button></div>
+        <pre id="diagnosticsOutput"></pre>
       </section>
     </div>
     <div id="maintenance" class="view">
@@ -4459,21 +6067,105 @@ HTML = r"""<!doctype html>
   </main>
 <script>
 const configKeys = CONFIG_KEYS_PLACEHOLDER;
-document.querySelectorAll('.tabs button').forEach(btn => btn.addEventListener('click', () => {
+function openTab(tab) {
   document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-selected','false'));
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  btn.setAttribute('aria-selected','true');
-  document.getElementById(btn.dataset.tab).classList.add('active');
+  const btn = document.querySelector(`.tabs button[data-tab="${tab}"]`);
+  if (btn) btn.setAttribute('aria-selected','true');
+  const view = document.getElementById(tab);
+  if (view) view.classList.add('active');
+}
+document.querySelectorAll('.tabs button').forEach(btn => btn.addEventListener('click', () => {
+  openTab(btn.dataset.tab);
 }));
 async function api(path, opts={}) {
   const res = await fetch(path, Object.assign({headers:{'content-type':'application/json'}}, opts));
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
-function showOutput(data) { document.getElementById('output').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2); }
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function outputText(data) {
+  return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+}
+function writeOutput(target, data) {
+  const node = typeof target === 'string' ? document.getElementById(target) : target;
+  if (node) node.textContent = outputText(data);
+}
+function activeOutputTarget() {
+  if (document.getElementById('daily-test')?.classList.contains('active')) return 'dailyOutput';
+  if (document.getElementById('split')?.classList.contains('active')) return 'splitOutput';
+  if (document.getElementById('config')?.classList.contains('active')) return 'configOutput';
+  if (document.getElementById('wizard')?.classList.contains('active')) return 'wizardOutput';
+  if (document.getElementById('update')?.classList.contains('active')) return 'updateOutput';
+  if (document.getElementById('diagnostics')?.classList.contains('active')) return 'diagnosticsOutput';
+  return 'output';
+}
+function showOutput(data) { writeOutput('output', data); }
+function setPanelOutput(data, target='output') {
+  const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+  writeOutput(target, text);
+  writeOutput('output', text);
+  const daily = document.getElementById('dailyOutput');
+  if (daily) daily.textContent = text;
+}
+async function runWithOutput(target, task) {
+  writeOutput(target, '處理中...');
+  try {
+    const data = await task();
+    writeOutput(target, data);
+    return data;
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    writeOutput(target, '操作失敗：\n' + message);
+    return {ok:false, output:message};
+  }
+}
+function badgeClass(state) {
+  if (state === 'ok' || state === true || state === '正常' || state === 'active') return 'ok';
+  if (state === 'bad' || state === false || state === '異常' || state === 'failed') return 'bad';
+  return 'warn';
+}
+function renderSummaryCards(cards) {
+  const host = document.getElementById('summaryCards');
+  host.innerHTML = (cards || []).map(card => `<div class="summary-card ${badgeClass(card.state)}"><small>${card.label}</small><strong>${card.value}</strong><small>${card.detail || ''}</small></div>`).join('');
+}
+function renderWarnings(warnings) {
+  const host = document.getElementById('warningList');
+  if (!warnings || !warnings.length) {
+    host.innerHTML = '<div class="empty-state">暫時無需要處理的問題。</div>';
+    return;
+  }
+  host.innerHTML = warnings.map(w => `<div class="warning-item"><b>${escapeHtml(w.title)}</b><br><span>${escapeHtml(w.detail)}</span>${w.next ? `<br><small><b>建議下一步：</b>${escapeHtml(w.next)}</small>` : ''}</div>`).join('');
+}
+function renderProfiles(profiles, target='profileCards') {
+  const host = document.getElementById(target);
+  if (!host) return;
+  host.innerHTML = (profiles || []).map(p => `<div class="profile-card"><h3>${p.name}</h3><div class="row"><span class="badge ${badgeClass(p.state)}">${p.status}</span><span class="badge">${p.egress}</span><span class="badge">${p.ip_policy}</span></div><p class="muted">${p.dns_policy}</p><small>${p.detail || ''}</small></div>`).join('');
+}
+function renderDnsSummary(data) {
+  const host = document.getElementById('dnsSummary');
+  if (!host) return;
+  const cards = [
+    {label:'DNS 去廣告', value:data.adguard || '未知', detail:'AdGuard Home 負責過濾同 querylog', state:data.adguard_state || 'warn'},
+    {label:'DNS Cache', value:data.cache || 'SmartDNS', detail:'SmartDNS 作唯一 cache 權威', state:data.cache_state || 'ok'},
+    {label:'AI/CN DNS', value:'只回 IPv4', detail:'避免 AI/CN AAAA 外洩', state:'ok'},
+    {label:'Default DNS', value:'IPv4 + IPv6', detail:'default 才同時支援 A/AAAA', state:'ok'}
+  ];
+  host.innerHTML = cards.map(card => `<div class="summary-card ${badgeClass(card.state)}"><small>${card.label}</small><strong>${card.value}</strong><small>${card.detail}</small></div>`).join('');
+}
+async function loadUiSummary() {
+  const data = await api('/api/ui/summary');
+  renderSummaryCards(data.cards);
+  renderWarnings(data.warnings);
+  renderProfiles(data.profiles, 'profileCards');
+  renderProfiles(data.profiles, 'splitProfileCards');
+  renderDnsSummary(data.dns || {});
+}
 async function loadStatus() {
   const data = await api('/api/status');
-  document.getElementById('services').innerHTML = '<table><thead><tr><th>服務</th><th>狀態</th><th>啟用</th></tr></thead><tbody>' + data.services.map(s => `<tr><td>${s.name}</td><td><span class="status ${s.active}"><span class="dot"></span>${s.active}</span></td><td>${s.enabled}</td></tr>`).join('') + '</tbody></table>';
+  document.getElementById('servicesTable').innerHTML = '<table><thead><tr><th>服務</th><th>狀態</th><th>啟用</th></tr></thead><tbody>' + data.services.map(s => `<tr><td>${s.name}</td><td><span class="status ${s.active}"><span class="dot"></span>${s.active}</span></td><td>${s.enabled}</td></tr>`).join('') + '</tbody></table>';
   document.getElementById('statusText').textContent = data.summary;
 }
 async function loadTraffic() {
@@ -4524,55 +6216,178 @@ async function loadConnections() {
 }
 async function loadConfig() {
   const data = await api('/api/config');
-  const form = document.getElementById('configForm');
-  form.innerHTML = '';
-  configKeys.forEach(k => {
-    const wrap = document.createElement('div');
-    wrap.className = 'field';
-    const input = document.createElement((data[k] || '').length > 70 ? 'textarea' : 'input');
-    input.id = 'cfg_' + k;
-    input.value = data[k] || '';
-    wrap.innerHTML = `<label>${k}</label>`;
-    wrap.appendChild(input);
-    form.appendChild(wrap);
-  });
+  renderConfigGroups(data);
   document.getElementById('socksListen').value = data.SINGBOX_SOCKS_LISTEN || '';
   document.getElementById('socksPort').value = data.SINGBOX_SOCKS_PORT || '';
   document.getElementById('updateTime').value = data.DNSCOMPLEX_UPDATE_TIME || '';
+  document.getElementById('mssCurrent').value = data.IPSEC_TCP_MSS || '';
+  aiEgressMode.value = data.AI_EGRESS_MODE || 'ipsec';
+  cnEgressMode.value = data.CN_EGRESS_MODE || 'ipsec';
+  aiXrayUri.value = data.AI_XRAY_URI || '';
+  cnXrayUri.value = data.CN_XRAY_URI || '';
+  aiXrayJson.value = data.AI_XRAY_OUTBOUND_JSON || '';
+  cnXrayJson.value = data.CN_XRAY_OUTBOUND_JSON || '';
+}
+function configGroupName(key) {
+  if (key.includes('IPSEC') || key.includes('MSS')) return 'IPsec / MSS';
+  if (key.includes('DNS') || key.includes('SMARTDNS') || key.includes('ADGUARD')) return 'DNS / 去廣告';
+  if (key.includes('XRAY') || key.includes('EGRESS')) return 'Xray / 出口模式';
+  if (key.includes('GEOSITE') || key.includes('NFTSET') || key.includes('SAMPLE') || key.includes('SUPPORT')) return '分流清單';
+  if (key.includes('SOCKS') || key.includes('HTTP') || key.includes('WEB')) return '接入 / 管理界面';
+  if (key.includes('UPDATE') || key.includes('GITHUB')) return '更新';
+  if (key.includes('HA_') || key.includes('PROMETHEUS') || key.includes('METRICS')) return 'HA / 監控';
+  if (key.includes('LAN') || key.includes('WAN') || key.includes('ROUTEROS') || key.includes('TRANSIT')) return '網絡 / RouterOS';
+  return '進階';
+}
+function renderConfigGroups(data) {
+  const host = document.getElementById('configGroups');
+  if (!host) return;
+  const groups = {};
+  configKeys.forEach(key => {
+    const group = configGroupName(key);
+    if (!groups[group]) groups[group] = [];
+    groups[group].push(key);
+  });
+  host.innerHTML = '';
+  Object.entries(groups).forEach(([name, keys]) => {
+    const details = document.createElement('details');
+    details.className = 'domain-box';
+    const summary = document.createElement('summary');
+    summary.textContent = name;
+    details.appendChild(summary);
+
+    const grid = document.createElement('div');
+    grid.className = 'config-input-grid';
+    keys.forEach(key => {
+      const wrap = document.createElement('div');
+      wrap.className = 'field';
+      const label = document.createElement('label');
+      label.textContent = key;
+      const value = data[key] || '';
+      const input = document.createElement(value.length > 70 ? 'textarea' : 'input');
+      input.id = 'cfg_' + key;
+      input.setAttribute('data-config-key', key);
+      input.value = value;
+      wrap.appendChild(label);
+      wrap.appendChild(input);
+      grid.appendChild(wrap);
+    });
+    details.appendChild(grid);
+    host.appendChild(details);
+  });
 }
 async function loadDomains() {
   const data = await api('/api/domains');
   document.getElementById('domainsText').textContent = data.text;
+  renderDomainSections(data.sections || []);
+}
+function renderDomainSections(sections) {
+  const host = document.getElementById('domainsStructured');
+  if (!host) return;
+  host.innerHTML = (sections || []).map(section => {
+    const items = (section.items || []).length ? section.items.map(item => `<span class="pill">${escapeHtml(item)}</span>`).join('') : '<span class="muted">(空)</span>';
+    return `<div class="domain-box"><h3>${escapeHtml(section.title)}</h3><p class="muted">${escapeHtml(section.help || '')}</p><div class="pill-list">${items}</div></div>`;
+  }).join('');
 }
 async function saveConfig() {
   const payload = {};
-  configKeys.forEach(k => payload[k] = document.getElementById('cfg_' + k).value);
-  showOutput(await api('/api/config', {method:'POST', body: JSON.stringify(payload)}));
+  document.querySelectorAll('[data-config-key]').forEach(input => {
+    payload[input.getAttribute('data-config-key')] = input.value;
+  });
+  await runWithOutput('configOutput', () => api('/api/config', {method:'POST', body: JSON.stringify(payload)}));
   await refreshAll();
 }
 async function runAction(action) {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action})}));
+  await runWithOutput(activeOutputTarget(), () => api('/api/action', {method:'POST', body: JSON.stringify({action})}));
   await refreshAll();
 }
 async function domainAction(action) {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action, profile:domainProfile.value, value:domainValue.value})}));
+  await runWithOutput('splitOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action, profile:domainProfile.value, value:domainValue.value})}));
+  await refreshAll();
+}
+async function rulesDomain(action) {
+  await runWithOutput('splitOutput', () => api('/api/rules/domain', {method:'POST', body: JSON.stringify({action, profile:domainProfile.value, value:domainValue.value})}));
+  await refreshAll();
+}
+async function rulesRebuild() {
+  await runWithOutput('splitOutput', () => api('/api/rules/rebuild', {method:'POST', body: JSON.stringify({})}));
+  await refreshAll();
+}
+async function testEgress(profile) {
+  const upper = profile === 'ai' ? 'ai' : 'cn';
+  await runWithOutput('splitOutput', () => api('/api/egress/test', {method:'POST', body: JSON.stringify({
+    profile,
+    uri: document.getElementById(upper + 'XrayUri').value,
+    outbound_json: document.getElementById(upper + 'XrayJson').value
+  })}));
+}
+async function applyEgress(profile) {
+  const upper = profile === 'ai' ? 'ai' : 'cn';
+  await runWithOutput('splitOutput', () => api('/api/egress/apply', {method:'POST', body: JSON.stringify({
+    profile,
+    mode: document.getElementById(upper + 'EgressMode').value,
+    uri: document.getElementById(upper + 'XrayUri').value,
+    outbound_json: document.getElementById(upper + 'XrayJson').value
+  })}));
   await refreshAll();
 }
 async function setSocks() {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'set-socks', listen:socksListen.value, port:socksPort.value})}));
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'set-socks', listen:socksListen.value, port:socksPort.value})}));
   await refreshAll();
 }
 async function setIpsec() {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'set-ipsec', profile:ipsecProfile.value, user:ipsecUser.value, password:ipsecPass.value})}));
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'set-ipsec', profile:ipsecProfile.value, user:ipsecUser.value, password:ipsecPass.value})}));
 }
 async function setUpdateTime() {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'set-update-time', value:updateTime.value})}));
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'set-update-time', value:updateTime.value})}));
   await refreshAll();
 }
-async function traceDomainAction() {
-  showOutput(await api('/api/action', {method:'POST', body: JSON.stringify({action:'trace-domain', value:traceDomain.value})}));
+async function setWebPassword() {
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'set-web-password', password:webPassword.value})}));
+  webPassword.value = '';
 }
-async function refreshAll() { await Promise.all([loadStatus(), loadTraffic(), loadConnections(), loadConfig(), loadDomains(), loadMetrics()]); }
+async function mssCalibrate() {
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'mss-calibrate'})}));
+  await refreshAll();
+}
+async function setLocalHost() {
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'set-local-host', host:localHostName.value, ip:localHostIp.value})}));
+}
+async function testLocalName() {
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'test-local-name', host:localHostName.value})}));
+}
+async function traceDomainAction() {
+  await runWithOutput('output', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'trace-domain', value:traceDomain.value})}));
+}
+async function traceDomainValue(value) {
+  if (!value) return;
+  const target = document.getElementById('splitOutput') && document.getElementById('split').classList.contains('active') ? 'splitOutput' : 'dailyOutput';
+  await runWithOutput(target, () => api('/api/action', {method:'POST', body: JSON.stringify({action:'trace-domain', value})}));
+}
+async function loadWizardSchema() {
+  const data = await runWithOutput('wizardOutput', () => api('/api/wizard/schema'));
+  if (!wizardConfig.value) wizardConfig.value = data.template || '';
+}
+async function validateWizard() {
+  await runWithOutput('wizardOutput', () => api('/api/wizard/validate', {method:'POST', body: JSON.stringify({config:wizardConfig.value})}));
+}
+async function applyWizard() {
+  await runWithOutput('wizardOutput', () => api('/api/wizard/apply', {method:'POST', body: JSON.stringify({config:wizardConfig.value})}));
+  await refreshAll();
+}
+async function loadUpdateStatus() {
+  const data = await runWithOutput('updateOutput', () => api('/api/update/status'));
+  updateChannel.value = data.channel || 'stable';
+  updateVersion.value = data.pinned_version || '';
+}
+async function runUpdate() {
+  await runWithOutput('updateOutput', () => api('/api/update/run', {method:'POST', body: JSON.stringify({channel:updateChannel.value, version:updateVersion.value})}));
+  await refreshAll();
+}
+async function supportBundle() {
+  await runWithOutput('diagnosticsOutput', () => api('/api/support-bundle', {method:'POST', body: JSON.stringify({include_logs:bundleLogs.value})}));
+}
+async function refreshAll() { await Promise.all([loadUiSummary(), loadStatus(), loadTraffic(), loadConnections(), loadConfig(), loadDomains(), loadMetrics()]); }
 refreshAll().catch(err => showOutput(String(err)));
 </script>
 </body>
@@ -4599,7 +6414,13 @@ def quote_value(value):
 
 def write_config(updated):
     current = parse_config()
-    current.update({k: str(v) for k, v in updated.items() if k in CONFIG_KEYS})
+    for k, v in updated.items():
+        if k not in CONFIG_KEYS:
+            continue
+        value = str(v)
+        if k in SECRET_KEYS and value == MASKED_SECRET:
+            continue
+        current[k] = value
     lines = []
     seen = set()
     if os.path.exists(CONFIG):
@@ -4620,6 +6441,100 @@ def write_config(updated):
         fh.writelines(lines)
     os.chmod(tmp, 0o600)
     os.replace(tmp, CONFIG)
+
+def safe_config():
+    cfg = parse_config()
+    safe = {}
+    for key in CONFIG_KEYS:
+        value = cfg.get(key, "")
+        if key in SECRET_KEYS and value:
+            safe[key] = MASKED_SECRET
+        else:
+            safe[key] = value
+    return safe
+
+def redact_text(text):
+    patterns = [
+        (r"(AI_IPSEC_USERNAME|CN_IPSEC_USERNAME|AI_IPSEC_PASSWORD|CN_IPSEC_PASSWORD|DNSCOMPLEX_WEB_PASSWORD|AI_XRAY_URI|CN_XRAY_URI|AI_XRAY_OUTBOUND_JSON|CN_XRAY_OUTBOUND_JSON|GITHUB_TOKEN|GH_TOKEN|TOKEN|USERNAME|PASSWORD|SECRET|PSK|COOKIE|SESSION)=([^\s]+)", r"\1=[REDACTED_SECRET]"),
+        (r"(vless|vmess|trojan|ss)://[^\s]+", r"\1://[REDACTED_XRAY_URI]"),
+        (r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "[REDACTED_UUID]"),
+        (r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", "[REDACTED_IPV4]"),
+        (r"\b(?:10|127)\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}\b", "[REDACTED_IPV4]"),
+        (r"\b172\.(?:1[6-9]|2[0-9]|3[0-1])\.[0-9]{1,3}\.[0-9]{1,3}\b", "[REDACTED_IPV4]"),
+        (r"\b192\.168\.[0-9]{1,3}\.[0-9]{1,3}\b", "[REDACTED_IPV4]"),
+        (r"\bfd[0-9a-fA-F:]*:[0-9a-fA-F:]*\b", "[REDACTED_IPV6]"),
+        (r"\b[\w.-]+\.local\b", "[REDACTED_HOSTNAME]"),
+    ]
+    redacted = text
+    for pattern, repl in patterns:
+        redacted = re.sub(pattern, repl, redacted)
+    return redacted
+
+def wizard_template():
+    return shell_output([DNSCOMPLEX, "wizard"], 10)
+
+def wizard_schema():
+    return {
+        "profiles": ["ai", "cn", "default"],
+        "deploy_modes": ["routeros-policy", "vlan-gateway"],
+        "egress_modes": ["ipsec", "xray"],
+        "update_channels": ["stable", "beta", "pinned"],
+        "required_routeros_policy": ["WAN_IFACE", "ROUTEROS_LAN_IPV4", "LINUX_LAN_IPV4", "LAN_CLIENT_IPV4_CIDR"],
+        "required_ipsec": ["AI_IPSEC_USERNAME", "AI_IPSEC_PASSWORD", "CN_IPSEC_USERNAME", "CN_IPSEC_PASSWORD"],
+        "template": wizard_template(),
+    }
+
+def validate_config_text(text):
+    with tempfile.NamedTemporaryFile("w+", delete=False) as fh:
+        fh.write(text)
+        path = fh.name
+    try:
+        return run([DNSCOMPLEX, "validate-config", "--json", path], 60)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+def apply_config_text(text):
+    validation = validate_config_text(text)
+    if not validation.get("ok"):
+        return {"ok": False, "code": validation.get("code", 1), "output": validation.get("output", "")}
+    tmp = CONFIG + ".wizardtmp"
+    backup = CONFIG + ".wizardbak"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+        if not text.endswith("\n"):
+            fh.write("\n")
+    os.chmod(tmp, 0o600)
+    if os.path.exists(CONFIG):
+        with open(CONFIG, "r", encoding="utf-8", errors="replace") as src, open(backup, "w", encoding="utf-8") as dst:
+            dst.write(src.read())
+        os.chmod(backup, 0o600)
+    os.replace(tmp, CONFIG)
+    result = run([DNSCOMPLEX, "fix"], 180)
+    if not result.get("ok") and os.path.exists(backup):
+        os.replace(backup, CONFIG)
+        rollback = run([DNSCOMPLEX, "fix"], 180)
+        result["output"] += "\nrollback:\n" + rollback.get("output", "")
+    elif os.path.exists(backup):
+        os.unlink(backup)
+    return result
+
+def update_status():
+    cfg = parse_config()
+    log_path = cfg.get("DNSCOMPLEX_UPDATE_LAST_LOG", "/var/log/dnscomplex/update-latest.log")
+    log_text = ""
+    if os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            log_text = "".join(fh.readlines()[-80:])
+    return {
+        "channel": cfg.get("DNSCOMPLEX_UPDATE_CHANNEL", "stable"),
+        "pinned_version": cfg.get("DNSCOMPLEX_PINNED_VERSION", ""),
+        "github_release_policy": cfg.get("GITHUB_RELEASE_POLICY", "latest"),
+        "last_update_log": log_path,
+        "last_update_output": redact_text(log_text),
+    }
 
 def run(args, timeout=120):
     proc = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
@@ -4694,6 +6609,98 @@ def domains_text():
         else:
             parts.append("(missing)")
     return "\n\n".join(parts)
+
+def read_list_file(path):
+    if not os.path.exists(path):
+        return []
+    items = []
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            value = line.strip()
+            if value and not value.startswith("#"):
+                items.append(value)
+    return items
+
+def domains_model():
+    return {
+        "sections": [
+            {
+                "title": "AI 內建來源",
+                "help": "例如 openai、anthropic；Meta AI 使用 AI 支援 domain 的 meta.ai，避免 Facebook/Instagram 走 AI。",
+                "items": read_list_file("/var/lib/dnscomplex/geosite/ai.sources"),
+            },
+            {
+                "title": "AI 自訂項目",
+                "help": "手動加入的 AI domain 或額外 geosite source。",
+                "items": read_list_file("/var/lib/dnscomplex/geosite/ai.custom"),
+            },
+            {
+                "title": "AI 支援 domain",
+                "help": "只在確定 app 依賴需要同走 AI 出口時才加入。",
+                "items": read_list_file("/var/lib/dnscomplex/geosite/ai-support.sources"),
+            },
+            {
+                "title": "CN 內建來源",
+                "help": "中國大陸視頻/直播/OTT curated profile。",
+                "items": read_list_file("/var/lib/dnscomplex/geosite/cn-video.sources"),
+            },
+            {
+                "title": "CN 自訂項目",
+                "help": "手動加入的 CN domain 或額外 geosite source。",
+                "items": read_list_file("/var/lib/dnscomplex/geosite/cn-video.custom"),
+            },
+        ],
+        "text": domains_text(),
+    }
+
+def egress_test(payload):
+    profile = payload.get("profile", "")
+    if profile not in {"ai", "cn"}:
+        return {"ok": False, "code": 2, "output": "invalid profile"}
+    uri = payload.get("uri", "")
+    outbound_json = payload.get("outbound_json", "")
+    with tempfile.NamedTemporaryFile("w+", delete=False) as fh:
+        out = fh.name
+    try:
+        args = ["/usr/local/lib/dnscomplex-xray/render.py", "--config", CONFIG, "--profile", profile, "--output", out]
+        if outbound_json and outbound_json != MASKED_SECRET:
+            args.extend(["--json", outbound_json])
+        elif uri and uri != MASKED_SECRET:
+            args.extend(["--uri", uri])
+        rendered = run(args, 30)
+        if not rendered["ok"]:
+            return rendered
+        return run(["xray", "run", "-test", "-format=json", "-config", out], 30)
+    finally:
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
+
+def egress_apply(payload):
+    profile = payload.get("profile", "")
+    mode = payload.get("mode", "")
+    if profile not in {"ai", "cn"} or mode not in {"ipsec", "xray"}:
+        return {"ok": False, "code": 2, "output": "invalid profile or mode"}
+    outputs = []
+    outbound_json = payload.get("outbound_json", "")
+    uri = payload.get("uri", "")
+    if outbound_json and outbound_json != MASKED_SECRET:
+        with tempfile.NamedTemporaryFile("w+", delete=False) as fh:
+            fh.write(outbound_json)
+            json_path = fh.name
+        try:
+            outputs.append(run([DNSCOMPLEX, "set-xray-json", profile, json_path], 180))
+        finally:
+            try:
+                os.unlink(json_path)
+            except OSError:
+                pass
+    elif uri and uri != MASKED_SECRET:
+        outputs.append(run([DNSCOMPLEX, "set-xray-uri", profile, uri], 180))
+    outputs.append(run([DNSCOMPLEX, "set-egress", profile, mode], 180))
+    ok = all(item.get("ok") for item in outputs)
+    return {"ok": ok, "code": 0 if ok else 1, "output": "\n".join(item.get("output", "") for item in outputs)}
 
 def read_dns_name(buf, offset, depth=0):
     labels = []
@@ -4875,16 +6882,85 @@ def metrics_history(limit=720):
     except Exception as exc:
         return [{"error": str(exc)}]
 
+def service_active(name):
+    return shell_output(["systemctl", "is-active", name], 5).strip() == "active"
+
+def ui_summary():
+    cfg = parse_config()
+    health_raw = shell_output([DNSCOMPLEX, "health", "--json"], 15)
+    try:
+        health = json.loads(health_raw)
+    except json.JSONDecodeError:
+        health = {"status": "degraded", "error": health_raw}
+
+    adguard_ok = service_active("AdGuardHome.service")
+    smartdns_ok = service_active("smartdns.service")
+    singbox_ok = service_active("sing-box.service")
+    nft_ok = service_active("nftables.service")
+    xray_ok = service_active("xray-dnscomplex.service")
+    ai_mode = cfg.get("AI_EGRESS_MODE", "ipsec")
+    cn_mode = cfg.get("CN_EGRESS_MODE", "ipsec")
+    ipsec_ok = bool(health.get("ipsec_ok", False))
+    conntrack = float(health.get("conntrack_usage_percent", 0) or 0)
+    dns_latency = health.get("dns_latency_ms", "-")
+    default_ipv6 = cfg.get("DEFAULT_IPV6_MODE", "auto")
+
+    cards = [
+        {"label": "上網狀態", "value": "正常" if health.get("status") == "healthy" else "需檢查", "detail": f"DNS {dns_latency}ms / conntrack {conntrack:.2f}%", "state": "ok" if health.get("status") == "healthy" else "bad"},
+        {"label": "DNS 去廣告", "value": "啟用" if adguard_ok and smartdns_ok else "異常", "detail": "AdGuard 過濾，SmartDNS cache", "state": "ok" if adguard_ok and smartdns_ok else "bad"},
+        {"label": "AI 分流", "value": ai_mode.upper(), "detail": "只走 IPv4，避免 AAAA 外洩", "state": "ok" if (ai_mode == "xray" and xray_ok) or (ai_mode == "ipsec" and ipsec_ok) else "warn"},
+        {"label": "CN 分流", "value": cn_mode.upper(), "detail": "只走 IPv4，SmartDNS 寫 nftset", "state": "ok" if (cn_mode == "xray" and xray_ok) or (cn_mode == "ipsec" and ipsec_ok) else "warn"},
+        {"label": "IPv6 / Default", "value": default_ipv6, "detail": "default 可用 IPv4 + IPv6", "state": "ok" if default_ipv6 in {"auto", "on"} else "warn"},
+    ]
+
+    warnings = []
+    if not singbox_ok:
+        warnings.append({"title": "sing-box 未正常運行", "detail": "TUN / SOCKS / 分流會受影響。", "next": "到「進階 > 進階維護」按 Doctor，再按修正設定。"})
+    if not adguard_ok or not smartdns_ok:
+        warnings.append({"title": "DNS 服務異常", "detail": "AdGuard 或 SmartDNS 未 active，手機可能會解析失敗。", "next": "到「日常 > 上網測試」按測試 DNS；失敗再到「進階維護」按修正設定。"})
+    if not nft_ok:
+        warnings.append({"title": "nftables 異常", "detail": "AI/CN 目的 IP policy 可能不生效。", "next": "到「進階 > 進階維護」按修正設定，然後刷新 AI/CN IP 快取。"})
+    if (ai_mode == "ipsec" or cn_mode == "ipsec") and not ipsec_ok:
+        warnings.append({"title": "IPsec 未完全連線", "detail": "使用 IPsec 的 AI/CN profile 可能未能分流。", "next": "到「日常 > 上網測試」按測試 AI/CN IPsec；如帳密改過，到常用設定更新。"})
+    if conntrack >= 70:
+        warnings.append({"title": "Conntrack 使用率偏高", "detail": f"目前 {conntrack:.2f}%，大量設備使用時需要處理容量。", "next": "到「日常 > 流量趨勢」查看走勢，必要時擴容或調整 conntrack。"})
+    if cfg.get("ADGUARD_DNS_CACHE_MODE", "off") != "off":
+        warnings.append({"title": "AdGuard cache 被開啟", "detail": "建議由 SmartDNS 作唯一 DNS cache，避免 double-cache。", "next": "到常用設定的進階 config 將 ADGUARD_DNS_CACHE_MODE 設為 off。"})
+
+    profiles = [
+        {"name": "AI", "status": "正常" if cards[2]["state"] == "ok" else "需檢查", "state": cards[2]["state"], "egress": ai_mode, "ip_policy": "只 IPv4", "dns_policy": "AI SmartDNS 只回 A 記錄並寫入 ai4 nftset", "detail": "OpenAI / Claude / Meta 等 domain 使用此 profile。"},
+        {"name": "CN", "status": "正常" if cards[3]["state"] == "ok" else "需檢查", "state": cards[3]["state"], "egress": cn_mode, "ip_policy": "只 IPv4", "dns_policy": "CN SmartDNS 只回 A 記錄並寫入 cn4 nftset", "detail": "Youku / Bilibili / iQiyi 等視頻站使用此 profile。"},
+        {"name": "Default", "status": "正常" if health.get("status") == "healthy" else "需檢查", "state": "ok" if health.get("status") == "healthy" else "warn", "egress": "RouterOS", "ip_policy": "IPv4 + IPv6", "dns_policy": "Default SmartDNS 可回 A/AAAA", "detail": "不在 AI/CN 清單的網站走 default。"},
+    ]
+
+    dns = {
+        "adguard": "啟用" if adguard_ok else "異常",
+        "adguard_state": "ok" if adguard_ok else "bad",
+        "cache": "SmartDNS",
+        "cache_state": "ok" if cfg.get("ADGUARD_DNS_CACHE_MODE", "off") == "off" else "warn",
+    }
+    return {"cards": cards, "warnings": warnings, "profiles": profiles, "dns": dns}
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
 
-    def authed(self):
-        cfg = parse_config()
-        password = cfg.get("DNSCOMPLEX_WEB_PASSWORD", "")
+    def session_token(self, password):
+        return hashlib.sha256(("dnscomplex-web:" + password).encode("utf-8")).hexdigest()
+
+    def cookie_ok(self, password):
+        cookie = self.headers.get("Cookie", "")
+        expected = self.session_token(password)
+        for item in cookie.split(";"):
+            if "=" not in item:
+                continue
+            key, value = item.strip().split("=", 1)
+            if key == "dnscomplex_session" and value == expected:
+                return True
+        return False
+
+    def basic_ok(self, password):
         auth = self.headers.get("Authorization", "")
-        if not password:
-            return False
         if not auth.startswith("Basic "):
             return False
         try:
@@ -4894,19 +6970,111 @@ class Handler(BaseHTTPRequestHandler):
         supplied = decoded.split(":", 1)[1] if ":" in decoded else ""
         return supplied == password
 
+    def authed(self):
+        cfg = parse_config()
+        password = cfg.get("DNSCOMPLEX_WEB_PASSWORD", "")
+        if not password:
+            return False
+        if self.cookie_ok(password):
+            self._set_session_cookie = False
+            return True
+        if self.basic_ok(password):
+            self._set_session_cookie = True
+            self._session_password = password
+            return True
+        return False
+
+    def maybe_set_session_cookie(self):
+        if getattr(self, "_set_session_cookie", False):
+            token = self.session_token(getattr(self, "_session_password", ""))
+            self.send_header("Set-Cookie", f"dnscomplex_session={token}; Path=/; SameSite=Strict; HttpOnly")
+
     def require_auth(self):
         if self.authed():
             return True
+        if self.path.startswith("/api/"):
+            self.send_json({"error": "unauthorized"}, 401)
+            return False
+        self.send_login_page()
+        return False
+
+    def send_auth_challenge(self):
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="dnscomplex"')
         self.end_headers()
-        return False
+
+    def send_html(self, html, code=200):
+        body = html.encode("utf-8")
+        self.send_response(code)
+        self.send_header("content-type", "text/html; charset=utf-8")
+        self.send_header("content-length", str(len(body)))
+        self.maybe_set_session_cookie()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_login_page(self, error=""):
+        error_html = f'<div class="login-error">{html.escape(error)}</div>' if error else ""
+        self.send_html(f'''<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dnscomplex 登入</title>
+  <style>
+    body {{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f6f8fb; color:#111827; }}
+    form {{ width:min(360px, calc(100vw - 32px)); background:white; border:1px solid #d8dee8; border-radius:8px; padding:24px; box-shadow:0 12px 32px rgba(15,23,42,.12); }}
+    h1 {{ margin:0 0 6px; font-size:24px; }}
+    p {{ margin:0 0 20px; color:#64748b; }}
+    label {{ display:block; font-size:13px; font-weight:700; margin:14px 0 6px; }}
+    input {{ width:100%; box-sizing:border-box; border:1px solid #cbd5e1; border-radius:6px; padding:10px 12px; font-size:15px; }}
+    button {{ width:100%; margin-top:18px; border:0; border-radius:6px; padding:11px 14px; background:#2563eb; color:white; font-weight:700; font-size:15px; cursor:pointer; }}
+    .login-error {{ margin:14px 0 0; padding:10px 12px; border:1px solid #fecaca; border-radius:6px; background:#fef2f2; color:#991b1b; }}
+  </style>
+</head>
+<body>
+  <form method="post" action="/login">
+    <h1>dnscomplex</h1>
+    <p>登入管理介面</p>
+    <label for="username">用戶名稱</label>
+    <input id="username" name="username" value="admin" autocomplete="username">
+    <label for="password">密碼</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" autofocus>
+    {error_html}
+    <button type="submit">登入</button>
+  </form>
+</body>
+</html>''')
+
+    def handle_login(self):
+        cfg = parse_config()
+        password = cfg.get("DNSCOMPLEX_WEB_PASSWORD", "")
+        length = int(self.headers.get("content-length", "0"))
+        raw = self.rfile.read(length).decode("utf-8") if length > 0 else ""
+        content_type = self.headers.get("content-type", "")
+        if "application/json" in content_type:
+            try:
+                payload = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                payload = {}
+        else:
+            parsed = urllib.parse.parse_qs(raw)
+            payload = {key: values[0] if values else "" for key, values in parsed.items()}
+        if payload.get("username", "admin") == "admin" and payload.get("password", "") == password and password:
+            self._set_session_cookie = True
+            self._session_password = password
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.maybe_set_session_cookie()
+            self.end_headers()
+            return
+        self.send_login_page("登入資料不正確", 401)
 
     def send_json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("content-type", "application/json; charset=utf-8")
         self.send_header("content-length", str(len(body)))
+        self.maybe_set_session_cookie()
         self.end_headers()
         self.wfile.write(body)
 
@@ -4917,16 +7085,14 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
     def do_GET(self):
+        if self.path == "/login":
+            self.send_login_page()
+            return
         if not self.require_auth():
             return
         if self.path == "/":
             html = HTML.replace("CONFIG_KEYS_PLACEHOLDER", json.dumps(CONFIG_KEYS))
-            body = html.encode("utf-8")
-            self.send_response(200)
-            self.send_header("content-type", "text/html; charset=utf-8")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self.send_html(html)
             return
         if self.path == "/api/status":
             summary = "\n".join([
@@ -4941,11 +7107,27 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"services": [service_state(s) for s in SERVICES], "summary": summary})
             return
         if self.path == "/api/config":
-            cfg = parse_config()
-            self.send_json({k: cfg.get(k, "") for k in CONFIG_KEYS})
+            self.send_json(safe_config())
+            return
+        if self.path == "/api/ui/summary":
+            self.send_json(ui_summary())
+            return
+        if self.path == "/api/wizard/schema":
+            self.send_json(wizard_schema())
+            return
+        if self.path == "/api/update/status":
+            self.send_json(update_status())
+            return
+        if self.path.startswith("/api/trace-domain"):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            domain = (query.get("domain") or [""])[0]
+            if not domain:
+                self.send_json({"ok": False, "output": "missing domain"}, 400)
+                return
+            self.send_json(run([DNSCOMPLEX, "trace-domain", domain], 120))
             return
         if self.path == "/api/domains":
-            self.send_json({"text": domains_text()})
+            self.send_json(domains_model())
             return
         if self.path == "/api/traffic":
             text = "\n".join([
@@ -4971,6 +7153,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if self.path == "/login":
+            self.handle_login()
+            return
         if not self.require_auth():
             return
         try:
@@ -4980,10 +7165,46 @@ class Handler(BaseHTTPRequestHandler):
                 result = run([DNSCOMPLEX, "fix"], 180)
                 self.send_json(result)
                 return
+            if self.path == "/api/wizard/validate":
+                result = validate_config_text(payload.get("config", ""))
+                result["output"] = redact_text(result.get("output", ""))
+                self.send_json(result)
+                return
+            if self.path == "/api/wizard/apply":
+                result = apply_config_text(payload.get("config", ""))
+                result["output"] = redact_text(result.get("output", ""))
+                self.send_json(result)
+                return
+            if self.path == "/api/update/run":
+                args = [DNSCOMPLEX, "update-software"]
+                channel = payload.get("channel", "")
+                version = payload.get("version", "")
+                if channel:
+                    args.extend(["--channel", channel])
+                if version:
+                    args.extend(["--version", version])
+                result = run(args, 900)
+                result["output"] = redact_text(result.get("output", ""))
+                self.send_json(result)
+                return
+            if self.path == "/api/support-bundle":
+                include_logs = payload.get("include_logs", "standard")
+                result = run([DNSCOMPLEX, "support-bundle", "--include-logs", include_logs], 300)
+                result["output"] = redact_text(result.get("output", ""))
+                self.send_json(result)
+                return
             if self.path == "/api/action":
                 action = payload.get("action", "")
                 if action in {"test", "fix", "doctor", "test-dns", "test-ipsec", "refresh-nftsets", "refresh-cn-overrides", "update-geosite", "update-software", "backup", "mss-calibrate"}:
                     self.send_json(run([DNSCOMPLEX, action], 600))
+                    return
+                if action == "test-xray":
+                    profile = payload.get("profile", "")
+                    args = [DNSCOMPLEX, "test-xray"] + ([profile] if profile else [])
+                    self.send_json(run(args, 180))
+                    return
+                if action == "set-egress":
+                    self.send_json(run([DNSCOMPLEX, "set-egress", payload.get("profile", ""), payload.get("mode", "")], 180))
                     return
                 if action == "trace-domain":
                     value = payload.get("value", "")
@@ -5010,6 +7231,16 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     self.send_json(run([DNSCOMPLEX, "set-ipsec", profile, payload.get("user", ""), payload.get("password", "")], 180))
                     return
+                if action == "set-web-password":
+                    password = payload.get("password", "")
+                    self.send_json(run([DNSCOMPLEX, "set-web-password", password], 120))
+                    return
+                if action == "set-local-host":
+                    self.send_json(run([DNSCOMPLEX, "set-local-host", payload.get("host", ""), payload.get("ip", "")], 120))
+                    return
+                if action == "test-local-name":
+                    self.send_json(run([DNSCOMPLEX, "test-local-name", payload.get("host", "")], 120))
+                    return
                 if action == "set-update-time":
                     value = payload.get("value", "")
                     if not re.match(r"^([01][0-9]|2[0-3]):[0-5][0-9]$", value):
@@ -5017,6 +7248,29 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     self.send_json(run([DNSCOMPLEX, "set-update-time", value], 120))
                     return
+            if self.path == "/api/egress/test":
+                self.send_json(egress_test(payload))
+                return
+            if self.path == "/api/egress/apply":
+                self.send_json(egress_apply(payload))
+                return
+            if self.path in {"/api/rules/domain", "/api/rules/geosite"}:
+                action = payload.get("action", "add")
+                profile = payload.get("profile", "")
+                values = [v.strip() for v in re.split(r"[\r\n]+", payload.get("value", "")) if v.strip()]
+                if action not in {"add", "remove"} or profile not in {"ai", "cn"} or not values:
+                    self.send_json({"ok": False, "output": "invalid action/profile/value"}, 400)
+                    return
+                outputs = []
+                cmd = "add-domain" if action == "add" else "remove-domain"
+                for value in values:
+                    outputs.append(run([DNSCOMPLEX, cmd, profile, value], 180))
+                ok = all(item.get("ok") for item in outputs)
+                self.send_json({"ok": ok, "code": 0 if ok else 1, "output": "\n".join(item.get("output", "") for item in outputs)})
+                return
+            if self.path == "/api/rules/rebuild":
+                self.send_json(run([DNSCOMPLEX, "update-geosite"], 600))
+                return
             self.send_json({"error": "not found"}, 404)
         except Exception as exc:
             self.send_json({"ok": False, "output": str(exc)}, 500)
@@ -5070,10 +7324,10 @@ enable_services() {
     fi
   done
   [[ "$ipsec_enabled" == "1" ]] || warn "no strongSwan systemd unit found; IPsec may need manual service setup"
-  systemctl enable --now smartdns AdGuardHome sing-box
+  systemctl enable --now smartdns AdGuardHome sing-box xray-dnscomplex
   systemctl enable --now dnscomplex-web
   systemctl enable --now dnscomplex-metrics
-  systemctl restart smartdns AdGuardHome sing-box || true
+  systemctl restart smartdns AdGuardHome sing-box xray-dnscomplex || true
   systemctl restart dnscomplex-web dnscomplex-metrics || true
 }
 
@@ -5083,11 +7337,14 @@ render_all() {
   apply_runtime_network_settings
   resolve_default_ipv6_mode
   render_geosite_seeds
+  render_local_hosts
   render_smartdns
   render_adguard
   render_adguard_service
   render_swanctl
+  render_strongswan_resolve_plugin
   render_ipsec_ca_store
+  render_xray_support
   render_singbox
   render_nftables
   render_ipsec_services
