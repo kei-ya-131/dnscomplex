@@ -4693,6 +4693,324 @@ connections {
   }
 }
 
+xray_test_config_file() {
+  local file=$1
+  if command -v xray >/dev/null 2>&1; then
+    xray run -test -format=json -config "$file"
+  else
+    python3 -m json.tool "$file" >/dev/null
+    warn "xray binary is not installed; only JSON syntax was validated"
+  fi
+}
+
+render_xray_config_cmd() {
+  need_root
+  [[ -x /usr/local/lib/dnscomplex-xray/render.py ]] || die "Xray renderer is missing"
+  local tmp
+  tmp=$(mktemp)
+  /usr/local/lib/dnscomplex-xray/render.py --config "$CONFIG" --output "$tmp"
+  xray_test_config_file "$tmp"
+  install -m 0600 "$tmp" /usr/local/etc/xray/config.json
+  rm -f "$tmp"
+}
+
+write_singbox_egress_cmd() {
+  need_root
+  command -v jq >/dev/null 2>&1 || die "jq is required"
+  [[ -f /etc/sing-box/config.json ]] || die "/etc/sing-box/config.json is missing"
+  local ai_out cn_out tmp
+  ai_out=$(profile_outbound_tag ai)
+  cn_out=$(profile_outbound_tag cn)
+  tmp=$(mktemp)
+  jq --arg ai "$ai_out" --arg cn "$cn_out" '
+    (.route.rules[]? | select(.action == "route" and (.rule_set? | type == "string") and ((.rule_set | startswith("geosite-ai-")) or .rule_set == "geosite-ai-support")).outbound) = $ai |
+    (.route.rules[]? | select(.action == "route" and .rule_set? == "geosite-cn-video").outbound) = $cn
+  ' /etc/sing-box/config.json >"$tmp"
+  sing-box check -c "$tmp"
+  install -m 0644 "$tmp" /etc/sing-box/config.json
+  rm -f "$tmp"
+}
+
+runtime_nft_prerouting_rules() {
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+EOF
+  else
+    cat <<EOF
+    iifname "$lan_if" ip daddr 255.255.255.255 meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+    iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } ct mark set $SINGBOX_AUTO_REDIRECT_OUTPUT_MARK meta mark set $mark counter comment "dnscomplex-${profile}-preroute"
+EOF
+  fi
+}
+
+runtime_nft_restore_rules() {
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-restore"
+EOF
+  else
+    cat <<EOF
+    iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark counter comment "dnscomplex-${profile}-policy-restore"
+EOF
+  fi
+}
+
+runtime_nft_output_rules() {
+  local profile=$1 set_name=$2 mark=$3 mode=$4
+  if [[ "$mode" == "xray" ]]; then
+    cat <<EOF
+    ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-output"
+EOF
+  else
+    cat <<EOF
+    ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark
+EOF
+  fi
+}
+
+write_nftables_runtime_cmd() {
+  need_root
+  local lan_if="${WAN_IFACE}.${LAN_VLAN_ID:-}"
+  [[ "$DEPLOY_MODE" == "routeros-policy" ]] && lan_if="$WAN_IFACE"
+  mkdir -p /etc/nftables.d
+  cat >/etc/nftables.d/dnscomplex.nft <<EOF
+table inet dnscomplex {
+  set ai4 {
+    type ipv4_addr
+    flags interval,timeout
+    size 262144
+  }
+
+  set cn4 {
+    type ipv4_addr
+    flags interval,timeout
+    size 262144
+  }
+
+  set known_doh4 {
+    type ipv4_addr
+    flags interval
+    elements = { 1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 9.9.9.9, 149.112.112.112, 223.5.5.5, 223.6.6.6, 119.29.29.29 }
+  }
+
+  chain dns_redirect {
+    type nat hook prerouting priority dstnat; policy accept;
+    iifname "$lan_if" udp dport 53 redirect to :53
+    iifname "$lan_if" tcp dport 53 redirect to :53
+  }
+
+  chain prerouting {
+    type filter hook prerouting priority mangle; policy accept;
+    iifname "$lan_if" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
+    iifname "$lan_if" udp dport { 784, 853, 8853 } drop
+    iifname "$lan_if" tcp dport 853 drop
+    iifname "$lan_if" ip daddr @known_doh4 tcp dport 443 drop
+$(runtime_nft_prerouting_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(runtime_nft_prerouting_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+  }
+
+  chain prerouting_policy_restore {
+    type filter hook prerouting priority filter; policy accept;
+    iifname "$lan_if" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
+$(runtime_nft_restore_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(runtime_nft_restore_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    tcp flags syn tcp option maxseg size set $IPSEC_TCP_MSS
+  }
+
+  chain output {
+    type route hook output priority mangle; policy accept;
+    ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
+$(runtime_nft_output_rules ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
+$(runtime_nft_output_rules cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+  }
+
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+  }
+}
+EOF
+  cat >/etc/nftables.conf <<'EOF'
+#!/usr/sbin/nft -f
+flush ruleset
+include "/etc/nftables.d/*.nft"
+EOF
+  nft -c -f /etc/nftables.conf
+  systemctl restart nftables || true
+}
+
+apply_egress_stack_cmd() {
+  need_root
+  render_xray_config_cmd
+  write_singbox_egress_cmd
+  write_nftables_runtime_cmd
+  systemctl daemon-reload
+  systemctl enable --now xray-dnscomplex 2>/dev/null || true
+  systemctl restart xray-dnscomplex sing-box || true
+  "$0" routes up || true
+}
+
+set_egress_cmd() {
+  need_root
+  [[ $# -eq 2 ]] || die "usage: dnscomplex set-egress ai|cn ipsec|xray"
+  local profile=$1 mode=$2
+  [[ "$mode" == "ipsec" || "$mode" == "xray" ]] || die "mode must be ipsec or xray"
+  if [[ "$mode" == "xray" ]]; then
+    case "$profile" in
+      ai) [[ -n "${AI_XRAY_URI:-}" || -n "${AI_XRAY_OUTBOUND_JSON:-}" ]] || die "set Xray URI/JSON before switching AI to xray" ;;
+      cn) [[ -n "${CN_XRAY_URI:-}" || -n "${CN_XRAY_OUTBOUND_JSON:-}" ]] || die "set Xray URI/JSON before switching CN to xray" ;;
+      *) ;;
+    esac
+  fi
+  case "$profile" in
+    ai) AI_EGRESS_MODE=$mode ;;
+    cn) CN_EGRESS_MODE=$mode ;;
+    *) die "profile must be ai or cn" ;;
+  esac
+  write_config_cmd
+  apply_egress_stack_cmd
+}
+
+set_xray_uri_cmd() {
+  need_root
+  [[ $# -eq 2 ]] || die "usage: dnscomplex set-xray-uri ai|cn URI"
+  local profile=$1 uri=$2 tmp
+  [[ "$profile" == "ai" || "$profile" == "cn" ]] || die "profile must be ai or cn"
+  tmp=$(mktemp)
+  /usr/local/lib/dnscomplex-xray/render.py --config "$CONFIG" --profile "$profile" --uri "$uri" --output "$tmp"
+  xray_test_config_file "$tmp"
+  rm -f "$tmp"
+  case "$profile" in
+    ai) AI_XRAY_URI=$uri; AI_XRAY_OUTBOUND_JSON="" ;;
+    cn) CN_XRAY_URI=$uri; CN_XRAY_OUTBOUND_JSON="" ;;
+  esac
+  write_config_cmd
+  apply_egress_stack_cmd
+}
+
+set_xray_json_cmd() {
+  need_root
+  [[ $# -eq 2 ]] || die "usage: dnscomplex set-xray-json ai|cn JSON_FILE"
+  local profile=$1 file=$2 json tmp
+  [[ "$profile" == "ai" || "$profile" == "cn" ]] || die "profile must be ai or cn"
+  [[ -r "$file" ]] || die "JSON file not readable: $file"
+  json=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' "$file")
+  tmp=$(mktemp)
+  /usr/local/lib/dnscomplex-xray/render.py --config "$CONFIG" --profile "$profile" --json "$json" --output "$tmp"
+  xray_test_config_file "$tmp"
+  rm -f "$tmp"
+  case "$profile" in
+    ai) AI_XRAY_OUTBOUND_JSON=$json; AI_XRAY_URI="" ;;
+    cn) CN_XRAY_OUTBOUND_JSON=$json; CN_XRAY_URI="" ;;
+  esac
+  write_config_cmd
+  apply_egress_stack_cmd
+}
+
+test_xray_cmd() {
+  local profile=${1:-}
+  case "$profile" in
+    ""|ai|cn) ;;
+    *) die "usage: dnscomplex test-xray [ai|cn]" ;;
+  esac
+  render_xray_config_cmd
+  systemctl is-active --quiet xray-dnscomplex 2>/dev/null || warn "xray-dnscomplex.service is not active"
+  if [[ -n "$profile" ]]; then
+    local port
+    [[ "$profile" == "ai" ]] && port=$XRAY_AI_SOCKS_PORT || port=$XRAY_CN_SOCKS_PORT
+    if command -v curl >/dev/null 2>&1; then
+      curl --socks5-hostname "$XRAY_LISTEN_HOST:$port" -4 -fsS --connect-timeout 6 -o /dev/null https://www.cloudflare.com/cdn-cgi/trace || \
+        warn "Xray $profile local SOCKS connectivity probe failed"
+    fi
+  fi
+}
+
+xray_status_cmd() {
+  printf 'xray_enabled=%s ai_egress=%s cn_egress=%s listen=%s ai_port=%s cn_port=%s\n' \
+    "$XRAY_ENABLED" "$AI_EGRESS_MODE" "$CN_EGRESS_MODE" "$XRAY_LISTEN_HOST" "$XRAY_AI_SOCKS_PORT" "$XRAY_CN_SOCKS_PORT"
+  print_unit_state xray-dnscomplex.service
+  if command -v xray >/dev/null 2>&1; then
+    xray version | head -n1
+  fi
+}
+
+write_swanctl_cmd() {
+  need_root
+  local tmp local_ip="${LINUX_TRANSIT_IPV4:-}"
+  if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
+    local_ip="$LINUX_LAN_IPV4"
+  fi
+  tmp=$(mktemp)
+  cat >"$tmp" <<EOF
+connections {
+  ai {
+    version = 2
+    local_addrs = $local_ip
+    remote_addrs = $AI_IPSEC_SERVER
+    vips = 0.0.0.0
+    proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
+    dpd_delay = 20s
+    dpd_timeout = 90s
+    rekey_time = 0s
+    local {
+      auth = eap-mschapv2
+      eap_id = $AI_IPSEC_USERNAME
+    }
+    remote {
+      auth = pubkey
+      id = $IPSEC_REMOTE_ID
+    }
+    children {
+      ai {
+        local_ts = 0.0.0.0/0
+        remote_ts = 0.0.0.0/0
+        if_id_in = $AI_XFRM_ID
+        if_id_out = $AI_XFRM_ID
+        esp_proposals = aes256-sha256,aes128-sha256
+        dpd_action = restart
+        start_action = start
+        close_action = restart
+      }
+    }
+  }
+  cn {
+    version = 2
+    local_addrs = $local_ip
+    remote_addrs = $CN_IPSEC_SERVER
+    vips = 0.0.0.0
+    proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
+    dpd_delay = 20s
+    dpd_timeout = 90s
+    rekey_time = 0s
+    local {
+      auth = eap-mschapv2
+      eap_id = $CN_IPSEC_USERNAME
+    }
+    remote {
+      auth = pubkey
+      id = $IPSEC_REMOTE_ID
+    }
+    children {
+      cn {
+        local_ts = 0.0.0.0/0
+        remote_ts = 0.0.0.0/0
+        if_id_in = $CN_XFRM_ID
+        if_id_out = $CN_XFRM_ID
+        esp_proposals = aes256-sha256,aes128-sha256
+        dpd_action = restart
+        start_action = start
+        close_action = restart
+      }
+    }
+  }
+}
+
 secrets {
   eap-ai {
     id = $AI_IPSEC_USERNAME
@@ -6041,6 +6359,42 @@ HTML = r"""<!doctype html>
         <pre id="diagnosticsOutput"></pre>
       </section>
     </div>
+    <div id="services" class="view">
+      <section>
+        <div class="section-head"><h2>服務狀態</h2><button onclick="loadStatus()">刷新</button></div>
+        <div id="servicesTable"></div>
+      </section>
+      <section><h2>IPsec / 路由摘要</h2><pre id="statusText"></pre></section>
+    </div>
+    <div id="wizard" class="view">
+      <section>
+        <div class="row" style="justify-content:space-between"><h2>安裝精靈 / 設定驗證器</h2><button onclick="loadWizardSchema()">載入 schema</button></div>
+        <div class="field"><label>config.env</label><textarea id="wizardConfig" placeholder="貼上 config.env，或按載入 schema 參考欄位"></textarea></div>
+        <div class="row"><button onclick="validateWizard()">驗證</button><button class="primary" onclick="applyWizard()">套用</button></div>
+        <pre id="wizardOutput"></pre>
+      </section>
+    </div>
+    <div id="update" class="view">
+      <section>
+        <div class="row" style="justify-content:space-between"><h2>Release / Update Channel</h2><button onclick="loadUpdateStatus()">刷新</button></div>
+        <div class="grid">
+          <div class="field"><label>Channel</label><select id="updateChannel"><option value="stable">stable</option><option value="beta">beta</option><option value="pinned">pinned</option></select></div>
+          <div class="field"><label>Pinned version</label><input id="updateVersion" placeholder="例如 v1.2.3"></div>
+        </div>
+        <div class="row"><button class="primary" onclick="runUpdate()">執行更新</button></div>
+        <pre id="updateOutput"></pre>
+      </section>
+    </div>
+    <div id="diagnostics" class="view">
+      <section>
+        <h2>已消㾗診斷工單 / Support Bundle</h2>
+        <div class="grid">
+          <div class="field"><label>Log 範圍</label><select id="bundleLogs"><option value="standard">standard</option><option value="minimal">minimal</option><option value="full">full</option></select></div>
+        </div>
+        <div class="row"><button class="primary" onclick="supportBundle()">生成診斷包</button></div>
+        <pre id="diagnosticsOutput"></pre>
+      </section>
+    </div>
     <div id="maintenance" class="view">
       <section>
         <h2>維護動作</h2>
@@ -6324,6 +6678,32 @@ async function testEgress(profile) {
 async function applyEgress(profile) {
   const upper = profile === 'ai' ? 'ai' : 'cn';
   await runWithOutput('splitOutput', () => api('/api/egress/apply', {method:'POST', body: JSON.stringify({
+    profile,
+    mode: document.getElementById(upper + 'EgressMode').value,
+    uri: document.getElementById(upper + 'XrayUri').value,
+    outbound_json: document.getElementById(upper + 'XrayJson').value
+  })}));
+  await refreshAll();
+}
+async function rulesDomain(action) {
+  showOutput(await api('/api/rules/domain', {method:'POST', body: JSON.stringify({action, profile:domainProfile.value, value:domainValue.value})}));
+  await refreshAll();
+}
+async function rulesRebuild() {
+  showOutput(await api('/api/rules/rebuild', {method:'POST', body: JSON.stringify({})}));
+  await refreshAll();
+}
+async function testEgress(profile) {
+  const upper = profile === 'ai' ? 'ai' : 'cn';
+  showOutput(await api('/api/egress/test', {method:'POST', body: JSON.stringify({
+    profile,
+    uri: document.getElementById(upper + 'XrayUri').value,
+    outbound_json: document.getElementById(upper + 'XrayJson').value
+  })}));
+}
+async function applyEgress(profile) {
+  const upper = profile === 'ai' ? 'ai' : 'cn';
+  showOutput(await api('/api/egress/apply', {method:'POST', body: JSON.stringify({
     profile,
     mode: document.getElementById(upper + 'EgressMode').value,
     uri: document.getElementById(upper + 'XrayUri').value,
