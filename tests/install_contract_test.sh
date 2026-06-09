@@ -58,10 +58,17 @@ EOF
 
 DNSCOMPLEX_ROOT="$tmpdir/root" bash "$repo_root/install.sh" --dry-run --config "$tmpdir/config.env"
 
+cat "$tmpdir/config.env" >"$tmpdir/old-ai-samples.env"
+cat >>"$tmpdir/old-ai-samples.env" <<'EOF'
+AI_SAMPLE_DOMAINS='openai.com anthropic.com claude.ai meta.com facebook.com instagram.com whatsapp.com threads.net'
+EOF
+DNSCOMPLEX_ROOT="$tmpdir/root-old-ai-samples" bash "$repo_root/install.sh" --dry-run --config "$tmpdir/old-ai-samples.env"
+
 assert_file "$tmpdir/root/etc/sing-box/config.json"
 assert_file "$tmpdir/root/etc/smartdns/smartdns.conf"
 assert_file "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml"
 assert_file "$tmpdir/root/etc/swanctl/swanctl.conf"
+assert_file "$tmpdir/root/etc/strongswan.d/charon/resolve.conf"
 assert_file "$tmpdir/root/etc/nftables.d/dnscomplex.nft"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.timer"
@@ -108,7 +115,7 @@ assert_contains "$tmpdir/root/etc/sing-box/config.json" '"mask-h2.icloud.com"'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" '"gateway.icloud.com"'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-ai-openai.srs'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-ai-anthropic.srs'
-assert_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-ai-meta.srs'
+assert_not_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-ai-meta.srs'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-ai-support.srs'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-cn-video.srs'
 assert_not_contains "$tmpdir/root/etc/sing-box/config.json" '"strategy": "ipv6_only"'
@@ -154,6 +161,8 @@ assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'cache-checkpoint-time
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'serve-expired-ttl 259200'
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'serve-expired-reply-ttl 3'
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'serve-expired-prefetch-time 21600'
+assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'mdns-lookup yes'
+assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'hosts-file /etc/dnscomplex/local-hosts'
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'address /-.youku.com/47.246.99.254'
 assert_not_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'address /youku.com/47.246.99.254'
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_OVERRIDE_PROBE_DOMAINS='youku.com=youku.com,www.youku.com'"
@@ -180,6 +189,7 @@ assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'eap-mschapv2'
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'dpd_delay'
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'local_addrs ='
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'id = pointtoserver.com'
+assert_contains "$tmpdir/root/etc/strongswan.d/charon/resolve.conf" 'load = no'
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "IPSEC_REMOTE_ID='pointtoserver.com'"
 assert_file "$tmpdir/root/etc/swanctl/x509ca/README.dnscomplex"
 
@@ -231,6 +241,12 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'doctor_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'health_json_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'metrics_sample_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'soak_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'soak_trace_expect chatgpt.com AI'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'soak_trace_expect youku.com CN'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'soak_trace_expect facebook.com default'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'idle-resume nftset recovery'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'local-hosts idle-resume'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" "> >(tee \"\$log_file\")"
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'wizard_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'validate_config_file_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'render_config_cmd'
@@ -251,10 +267,24 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'status_cmd "$@" ;;'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'status [--verbose]'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set_socks_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set_ipsec_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set_web_password_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set_update_time_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'refresh_cn_overrides_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'refresh_nftsets_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'mss_recommended_value'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'applied IPSEC_TCP_MSS'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nftset refresh failed after MSS calibration'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set-local-host'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'test-local-name'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'Dpkg::Options::=--force-confold'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'public_ipv4'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'remove_list_item'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'add_list_item'
+# shellcheck disable=SC2016
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'AI_GEOSITE_SOURCES=$('
+# shellcheck disable=SC2016
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'CN_VIDEO_SOURCES=$('
 # shellcheck disable=SC2016
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'refresh_nftset_group ai "$SMARTDNS_AI_PORT" ai4'
 # shellcheck disable=SC2016
@@ -339,17 +369,34 @@ assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_XRAY_OUTBOUND_JSON=
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_XRAY_OUTBOUND_JSON=''"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_NFTSET_REFRESH_DOMAINS='chatgpt.com ios.chat.openai.com openai.com api.openai.com oaistatic.com oaiusercontent.com files.oaiusercontent.com cdn.oaistatic.com persistent.oaistatic.com cdn.openai.com anthropic.com claude.ai claude.com meta.ai'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_NFTSET_REFRESH_DOMAINS='bilibili.com iqiyi.com youku.com douyin.com kuaishou.com acfun.cn mgtv.com v.qq.com qq.com tv.cctv.com'"
-assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_SUPPORT_DOMAINS=''"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_SUPPORT_DOMAINS='meta.ai'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_SAMPLE_DOMAINS='openai.com anthropic.com claude.ai meta.ai'"
+assert_contains "$tmpdir/root/etc/dnscomplex/ai.seed-domains" 'meta.ai'
+assert_contains "$tmpdir/root/etc/dnscomplex/ai.domains" 'meta.ai'
+assert_contains "$tmpdir/root/etc/dnscomplex/ai.domains" 'chatgpt.com'
+assert_not_contains "$tmpdir/root/etc/dnscomplex/ai.seed-domains" 'facebook.com'
+assert_not_contains "$tmpdir/root/etc/dnscomplex/ai.seed-domains" 'instagram.com'
+assert_not_contains "$tmpdir/root/etc/dnscomplex/ai.domains" 'facebook.com'
+assert_not_contains "$tmpdir/root/etc/dnscomplex/ai.domains" 'instagram.com'
+assert_contains "$tmpdir/root-old-ai-samples/etc/dnscomplex/config.env" "AI_SAMPLE_DOMAINS='openai.com anthropic.com claude.ai meta.ai'"
+assert_not_contains "$tmpdir/root-old-ai-samples/etc/dnscomplex/config.env" 'facebook.com'
+assert_not_contains "$tmpdir/root-old-ai-samples/etc/dnscomplex/ai.seed-domains" 'facebook.com'
+assert_not_contains "$tmpdir/root-old-ai-samples/etc/dnscomplex/ai.domains" 'instagram.com'
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "SING_GEOSITE_RULESET_BASE_URL='https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set'"
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'SagerNet/sing-box'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'AdguardTeam/AdGuardHome'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'pymumu/smartdns'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'XTLS/Xray-core'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'github_latest_asset_url'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'migrate_ai_meta_sample_domains'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'sync_domain_seed_files_from_config'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'flush_policy_nftsets_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nft flush set inet dnscomplex ai4'
 
 assert_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources" 'openai'
 assert_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources" 'anthropic'
-assert_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources" 'meta'
+assert_not_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources" 'meta'
+assert_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai-support.sources" 'meta.ai'
 assert_not_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai-support.sources" 'api.revenuecat.com'
 assert_not_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai-support.sources" 'api.statsig.com'
 assert_not_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai-support.sources" 'events.statsigapi.net'
@@ -380,7 +427,8 @@ assert_contains "$repo_root/install.sh" 'systemctl enable --now smartdns AdGuard
 assert_contains "$repo_root/install.sh" 'systemctl enable --now dnscomplex-web'
 assert_contains "$repo_root/install.sh" 'systemctl enable --now dnscomplex-metrics'
 assert_contains "$repo_root/install.sh" 'dnscomplex-metrics-sample.timer'
-assert_contains "$repo_root/install.sh" 'apt-get upgrade -y'
+assert_contains "$repo_root/install.sh" 'Dpkg::Options::=--force-confold'
+assert_contains "$repo_root/install.sh" 'upgrade -y'
 assert_contains "$repo_root/install.sh" 'update_release_if_needed'
 assert_contains "$repo_root/install.sh" 'conntrack'
 assert_contains "$repo_root/install.sh" 'dnscomplex update-geosite'
@@ -410,6 +458,20 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/rules/d
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/rules/geosite'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/rules/rebuild'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/trace-domain'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'domains_model'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'renderDomainSections'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'splitOutput'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'runWithOutput'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '處理中'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '操作結果'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '內建來源'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '自訂項目'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '建議下一步'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '常用設定只放日常會改的項目'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '精靈會先驗證，不會直接覆蓋 production'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'stable：一般使用'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'white-space:pre-wrap'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'overflow-wrap:anywhere'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'AI_NFTSET_REFRESH_DOMAINS'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'smartdns_diagnostics'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'ipv6_diagnostics'
@@ -425,6 +487,19 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/connect
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'active_connections'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'dns_answer_ips'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'set-update-time'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'set-web-password'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '管理界面帳號密碼'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'MSS 狀態'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '校準並套用 MSS'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '本機 .local / Codex 連線'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'renderConfigGroups'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'config-groups'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'data-config-key'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'config-input-grid'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" "querySelectorAll('[data-config-key]')"
+assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'id="configForm"'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '"AI_SAMPLE_DOMAINS"'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '"CN_SAMPLE_DOMAINS"'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'update-software'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'last_update_log'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'domain_source'
@@ -481,7 +556,7 @@ AI_IPSEC_USERNAME=secret-user
 CN_IPSEC_PASSWORD=cn-super-secret
 AI_XRAY_OUTBOUND_JSON={"password":"json-secret","server":"203.0.113.8"}
 AI_XRAY_URI=vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls#ai
-GITHUB_TOKEN=ghp_1234567890abcdef1234567890abcdef123456
+GITHUB_TOKEN=redaction-probe-token-value
 LAN=192.168.88.1 203.0.113.8 fd00:88::1 hostname router.local
 EOF
 redacted_probe=$(bash -c '
@@ -489,7 +564,7 @@ redacted_probe=$(bash -c '
   redact_stream <"$2"
 ' _ "$tmpdir/root/usr/local/sbin/dnscomplex" "$secret_probe")
 case "$redacted_probe" in
-  *super-secret-pass*|*secret-user*|*cn-super-secret*|*json-secret*|*123e4567-e89b-12d3-a456-426614174000*|*ghp_1234567890abcdef1234567890abcdef123456*|*192.168.88.1*|*203.0.113.8*|*fd00:88::1*|*router.local*)
+  *super-secret-pass*|*secret-user*|*cn-super-secret*|*json-secret*|*123e4567-e89b-12d3-a456-426614174000*|*redaction-probe-token-value*|*192.168.88.1*|*203.0.113.8*|*fd00:88::1*|*router.local*)
     fail "support redaction leaked sensitive probe: $redacted_probe"
     ;;
 esac
