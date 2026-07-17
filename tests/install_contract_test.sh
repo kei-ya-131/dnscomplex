@@ -808,7 +808,10 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'write_smartdns_restart
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'mktemp "$RUN_DIR/.smartdns.last_restart.XXXXXX"'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'chmod 0600 "$temp"'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'mv -f "$temp" "$RUN_DIR/smartdns.last_restart"'
-assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'monotonic_millis) + 15000'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'monotonic_millis) + 14500'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'restart_watchdog_unit_if_inactive "$unit" || return 1'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'could not allocate SmartDNS probe state'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'trap cleanup_restart_epoch_temp EXIT HUP INT TERM'
 assert_contains "$repo_root/install.sh" 'cron dnsutils python3 coreutils util-linux'
 health_body=$(awk '
   /^health_cmd\(\) \{/ { inside=1 }
