@@ -25,6 +25,8 @@ XRAY_AI_SOCKS_PORT=16054
 XRAY_CN_SOCKS_PORT=16055
 AI_EGRESS_MODE="ipsec"
 CN_EGRESS_MODE="ipsec"
+AI_QUIC_POLICY="reject"
+CN_QUIC_POLICY="reject"
 AI_XRAY_URI=""
 CN_XRAY_URI=""
 AI_XRAY_OUTBOUND_JSON=""
@@ -52,17 +54,18 @@ AI_XFRM_ID="301"
 CN_XFRM_ID="351"
 DEPLOY_MODE="vlan-gateway"
 
-AI_GEOSITE_SOURCES_DEFAULT="openai anthropic meta"
-AI_SUPPORT_DOMAINS_DEFAULT=""
+AI_GEOSITE_SOURCES_DEFAULT="openai anthropic"
+AI_SUPPORT_DOMAINS_DEFAULT="meta.ai"
 AI_NFTSET_REFRESH_DOMAINS_DEFAULT="chatgpt.com ios.chat.openai.com openai.com api.openai.com oaistatic.com oaiusercontent.com files.oaiusercontent.com cdn.oaistatic.com persistent.oaistatic.com cdn.openai.com anthropic.com claude.ai claude.com meta.ai"
 SING_GEOSITE_RULESET_BASE_URL_DEFAULT="https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set"
 CN_VIDEO_SOURCES_DEFAULT="acfun bilibili douyin douyu gitv hunantv huya iqiyi kuaishou le pptv youku wasu v.qq.com video.qq.com tencentvideo.com cibntv.net"
-AI_SAMPLE_DOMAINS_DEFAULT="openai.com anthropic.com claude.ai meta.com facebook.com instagram.com whatsapp.com threads.net"
-CN_SAMPLE_DOMAINS_DEFAULT="bilibili.com iqiyi.com youku.com douyin.com kuaishou.com acfun.cn mgtv.com v.qq.com qq.com tv.cctv.com"
+AI_SAMPLE_DOMAINS_DEFAULT="openai.com anthropic.com claude.ai meta.ai"
+CN_SAMPLE_DOMAINS_DEFAULT="bilibili.com iqiyi.com youku.com douyin.com kuaishou.com acfun.cn mgtv.com v.qq.com tv.cctv.com"
 CN_NFTSET_REFRESH_DOMAINS_DEFAULT="$CN_SAMPLE_DOMAINS_DEFAULT"
 CN_STATIC_A_OVERRIDES_DEFAULT="youku.com=47.246.99.254"
 CN_OVERRIDE_PROBE_DOMAINS_DEFAULT="youku.com=youku.com,www.youku.com"
 CN_OVERRIDE_PROBE_RESOLVERS_DEFAULT="223.5.5.5 119.29.29.29 1.1.1.1 8.8.8.8"
+LOCAL_DOMAIN_IPV6_POLICY="ipv4_only"
 
 usage() {
   cat <<'EOF'
@@ -93,7 +96,9 @@ Optional variables:
   SINGBOX_SOCKS_LISTEN SINGBOX_SOCKS_PORT
   SINGBOX_HTTP_LISTEN SINGBOX_HTTP_PORT APPLE_PRIVATE_RELAY_BLOCK
   XRAY_ENABLED AI_EGRESS_MODE CN_EGRESS_MODE AI_XRAY_URI CN_XRAY_URI
+  AI_QUIC_POLICY=reject|allow CN_QUIC_POLICY=reject|allow
   AI_XRAY_OUTBOUND_JSON CN_XRAY_OUTBOUND_JSON XRAY_LISTEN_HOST XRAY_AI_SOCKS_PORT XRAY_CN_SOCKS_PORT
+  LOCAL_DOMAIN_IPV6_POLICY=ipv4_only|allow
   SINGBOX_DNS_LISTEN SINGBOX_DNS_PORT
   DNSCOMPLEX_WEB_LISTEN DNSCOMPLEX_WEB_PORT DNSCOMPLEX_WEB_PASSWORD DNSCOMPLEX_UPDATE_TIME
   DNSCOMPLEX_NFTSET_REFRESH_INTERVAL DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT IPSEC_TCP_MSS
@@ -179,6 +184,8 @@ load_config() {
   : "${CN_STATIC_A_OVERRIDES:=$CN_STATIC_A_OVERRIDES_DEFAULT}"
   : "${CN_OVERRIDE_PROBE_DOMAINS:=$CN_OVERRIDE_PROBE_DOMAINS_DEFAULT}"
   : "${CN_OVERRIDE_PROBE_RESOLVERS:=$CN_OVERRIDE_PROBE_RESOLVERS_DEFAULT}"
+  migrate_ai_meta_sample_domains
+  : "${LOCAL_DOMAIN_IPV6_POLICY:=ipv4_only}"
   : "${DEPLOY_MODE:=vlan-gateway}"
   : "${LAN_IPV6_GATEWAY:=$(ipv6_gateway_from_prefix "${LAN_IPV6_PREFIX:-fd00:88::/64}")}"
   : "${SINGBOX_SOCKS_LISTEN:=0.0.0.0}"
@@ -191,6 +198,8 @@ load_config() {
   : "${XRAY_CN_SOCKS_PORT:=16055}"
   : "${AI_EGRESS_MODE:=ipsec}"
   : "${CN_EGRESS_MODE:=ipsec}"
+  : "${AI_QUIC_POLICY:=reject}"
+  : "${CN_QUIC_POLICY:=reject}"
   : "${AI_XRAY_URI:=}"
   : "${CN_XRAY_URI:=}"
   : "${AI_XRAY_OUTBOUND_JSON:=}"
@@ -337,6 +346,9 @@ validate_config() {
   case "$PROMETHEUS_MODE" in exporter-only|local) ;; *) die "PROMETHEUS_MODE must be exporter-only or local" ;; esac
   case "$AI_EGRESS_MODE" in ipsec|xray) ;; *) die "AI_EGRESS_MODE must be ipsec or xray" ;; esac
   case "$CN_EGRESS_MODE" in ipsec|xray) ;; *) die "CN_EGRESS_MODE must be ipsec or xray" ;; esac
+  case "$AI_QUIC_POLICY" in reject|allow) ;; *) die "AI_QUIC_POLICY must be reject or allow" ;; esac
+  case "$CN_QUIC_POLICY" in reject|allow) ;; *) die "CN_QUIC_POLICY must be reject or allow" ;; esac
+  case "$LOCAL_DOMAIN_IPV6_POLICY" in ipv4_only|allow) ;; *) die "LOCAL_DOMAIN_IPV6_POLICY must be ipv4_only or allow" ;; esac
   case "$XRAY_ENABLED" in 0|1) ;; *) die "XRAY_ENABLED must be 0 or 1" ;; esac
 }
 
@@ -379,6 +391,21 @@ chmod_target() {
   local mode=$1
   local path=$2
   chmod "$mode" "$(target_path "$path")"
+}
+
+disable_systemd_ssh_generator() {
+  local target
+  target=$(target_path /etc/systemd/system-generators/systemd-ssh-generator)
+  mkdir -p "$(dirname "$target")"
+  if [[ -d "$target" && ! -L "$target" ]]; then
+    die "$target is a directory; cannot mask systemd-ssh-generator"
+  fi
+  ln -sfn /dev/null "$target"
+  if [[ "$DRY_RUN" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl stop sshd-unix-local.socket sshd-vsock.socket sshd-unix-export.socket 2>/dev/null || true
+    systemctl reset-failed sshd-unix-local.socket sshd-vsock.socket sshd-unix-export.socket 2>/dev/null || true
+    systemctl daemon-reload
+  fi
 }
 
 run_cmd() {
@@ -509,6 +536,31 @@ split_words() {
   IFS=$old_ifs
 }
 
+migrate_ai_meta_sample_domains() {
+  local item changed=0 has_meta_ai=0
+  local -a kept=()
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    case "$item" in
+      facebook.com|instagram.com|meta.com|threads.net|whatsapp.com)
+        changed=1
+        continue
+        ;;
+      meta.ai)
+        has_meta_ai=1
+        ;;
+    esac
+    kept+=("$item")
+  done < <(split_words "${AI_SAMPLE_DOMAINS:-}")
+  if [[ "$has_meta_ai" == "0" ]]; then
+    kept+=("meta.ai")
+    changed=1
+  fi
+  if [[ "$changed" == "1" ]]; then
+    AI_SAMPLE_DOMAINS=$(printf '%s\n' "${kept[@]}" | awk '!seen[$0]++' | xargs)
+  fi
+}
+
 smartdns_upstream_line() {
   local upstream=$1
   local group=$2
@@ -586,6 +638,7 @@ CN_NFTSET_REFRESH_DOMAINS='$CN_NFTSET_REFRESH_DOMAINS'
 CN_STATIC_A_OVERRIDES='$CN_STATIC_A_OVERRIDES'
 CN_OVERRIDE_PROBE_DOMAINS='$CN_OVERRIDE_PROBE_DOMAINS'
 CN_OVERRIDE_PROBE_RESOLVERS='$CN_OVERRIDE_PROBE_RESOLVERS'
+LOCAL_DOMAIN_IPV6_POLICY='$LOCAL_DOMAIN_IPV6_POLICY'
 SMARTDNS_DEFAULT_PORT='$SMARTDNS_DEFAULT_PORT'
 SMARTDNS_AI_PORT='$SMARTDNS_AI_PORT'
 SMARTDNS_CN_PORT='$SMARTDNS_CN_PORT'
@@ -601,6 +654,8 @@ XRAY_AI_SOCKS_PORT='$XRAY_AI_SOCKS_PORT'
 XRAY_CN_SOCKS_PORT='$XRAY_CN_SOCKS_PORT'
 AI_EGRESS_MODE='$AI_EGRESS_MODE'
 CN_EGRESS_MODE='$CN_EGRESS_MODE'
+AI_QUIC_POLICY='$AI_QUIC_POLICY'
+CN_QUIC_POLICY='$CN_QUIC_POLICY'
 AI_XRAY_URI='$AI_XRAY_URI'
 CN_XRAY_URI='$CN_XRAY_URI'
 AI_XRAY_OUTBOUND_JSON='$AI_XRAY_OUTBOUND_JSON'
@@ -646,12 +701,18 @@ install_packages() {
   [[ "$DRY_RUN" == "1" ]] && return 0
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y \
+  apt-get \
+    -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold \
+    install -y \
     ca-certificates curl jq tar unzip iproute2 nftables conntrack dnsmasq radvd \
     strongswan-swanctl strongswan-charon libcharon-extra-plugins \
     cron dnsutils python3
   if [[ "$PROMETHEUS_MODE" == "local" ]]; then
-    apt-get install -y prometheus alertmanager
+    apt-get \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      install -y prometheus alertmanager
   fi
   mkdir -p /var/lib/smartdns
   disable_conflicting_lan_services
@@ -679,7 +740,11 @@ install_smartdns_release() {
   tmp=$(mktemp -d)
   asset=$(github_latest_asset_url "pymumu/smartdns" "${arch}-debian-all\\.deb$")
   curl -fsSL -o "$tmp/smartdns.deb" "$asset"
-  dpkg -i "$tmp/smartdns.deb" || apt-get -f install -y
+  DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i "$tmp/smartdns.deb" || \
+    DEBIAN_FRONTEND=noninteractive apt-get \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      -f install -y
   fix_smartdns_wrapper
   ensure_smartdns_enabled
   command -v smartdns >/dev/null || die "SmartDNS install did not provide smartdns binary"
@@ -701,7 +766,11 @@ install_singbox_release() {
   tmp=$(mktemp -d)
   asset=$(github_latest_asset_url "SagerNet/sing-box" "sing-box_.*_linux_${arch}\\.deb$")
   curl -fsSL -o "$tmp/sing-box.deb" "$asset"
-  dpkg -i "$tmp/sing-box.deb" || apt-get -f install -y
+  DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i "$tmp/sing-box.deb" || \
+    DEBIAN_FRONTEND=noninteractive apt-get \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      -f install -y
   command -v sing-box >/dev/null || die "sing-box install did not provide sing-box binary"
   rm -rf "$tmp"
 }
@@ -1263,6 +1332,7 @@ EOF
   write_file /etc/dnscomplex/ai.domains <<EOF
 $(split_words "$AI_SAMPLE_DOMAINS")
 $(split_words "$AI_SUPPORT_DOMAINS")
+$(split_words "$AI_NFTSET_REFRESH_DOMAINS")
 EOF
   write_file /etc/dnscomplex/cn-video.domains <<EOF
 $(split_words "$CN_SAMPLE_DOMAINS")
@@ -1290,10 +1360,15 @@ serve-expired yes
 serve-expired-ttl 259200
 serve-expired-reply-ttl 3
 serve-expired-prefetch-time 21600
+mdns-lookup yes
+hosts-file /etc/dnscomplex/local-hosts
 dualstack-ip-selection yes
 nftset-timeout yes
 force-qtype-SOA 65
 EOF
+    if [[ "${LOCAL_DOMAIN_IPV6_POLICY:-ipv4_only}" == "ipv4_only" ]]; then
+      printf 'address /local/#6\n'
+    fi
     while IFS= read -r upstream; do
       smartdns_static_address_line "$upstream"
     done < <(split_words "$CN_STATIC_A_OVERRIDES")
@@ -1307,6 +1382,22 @@ EOF
       smartdns_upstream_line "$upstream" cn
     done < <(split_words "$CN_DNS_UPSTREAMS")
   } | write_file /etc/smartdns/smartdns.conf
+}
+
+render_local_hosts() {
+  local target tmp
+  target=$(target_path /etc/dnscomplex/local-hosts)
+  if [[ ! -e "$target" ]]; then
+    write_file /etc/dnscomplex/local-hosts <<'EOF'
+# Optional local DNS overrides for .local/Codex callbacks.
+# Example:
+# 192.0.2.10 example-host.local
+EOF
+  fi
+  tmp=$(mktemp)
+  awk 'tolower($0) !~ /macbook-?air[.]local/' "$target" >"$tmp"
+  install -m 0644 "$tmp" "$target"
+  rm -f "$tmp"
 }
 
 write_adguard_allow_rules() {
@@ -1533,6 +1624,17 @@ secrets {
 }
 EOF
   chmod_target 0600 /etc/swanctl/swanctl.conf
+}
+
+render_strongswan_resolve_plugin() {
+  write_file /etc/strongswan.d/charon/resolve.conf <<'EOF'
+resolve {
+    # dnscomplex keeps DNS policy in AdGuard Home, sing-box, and SmartDNS.
+    # Disable strongSwan's resolve plugin so peer-pushed DNS servers do not
+    # touch system DNS or generate resolvconf/systemd-resolved errors.
+    load = no
+}
+EOF
 }
 
 render_ipsec_ca_store() {
@@ -1899,40 +2001,58 @@ EOF
 }
 
 render_nft_profile_prerouting_rules() {
-  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5 quic_policy=$6
+  local quic_rule=""
+  if [[ "$quic_policy" == "reject" ]]; then
+    quic_rule="    iifname \"$lan_if\" ip daddr @$set_name udp dport 443 counter reject with icmp type port-unreachable comment \"dnscomplex-${profile}-quic-reject\""
+  fi
   if [[ "$mode" == "xray" ]]; then
     cat <<EOF
+$quic_rule
     iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
 EOF
   else
     cat <<EOF
     iifname "$lan_if" ip daddr 255.255.255.255 meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+$quic_rule
     iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } ct mark set $SINGBOX_AUTO_REDIRECT_OUTPUT_MARK meta mark set $mark counter comment "dnscomplex-${profile}-preroute"
 EOF
   fi
 }
 
 render_nft_profile_restore_rules() {
-  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5 quic_policy=$6
+  local quic_rule=""
+  if [[ "$quic_policy" == "reject" ]]; then
+    quic_rule="    iifname \"$lan_if\" ip daddr @$set_name udp dport 443 counter reject with icmp type port-unreachable comment \"dnscomplex-${profile}-quic-reject-restore\""
+  fi
   if [[ "$mode" == "xray" ]]; then
     cat <<EOF
+$quic_rule
     iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-restore"
 EOF
   else
     cat <<EOF
+$quic_rule
     iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark counter comment "dnscomplex-${profile}-policy-restore"
 EOF
   fi
 }
 
 render_nft_profile_output_rules() {
-  local profile=$1 set_name=$2 mark=$3 mode=$4
+  local profile=$1 set_name=$2 mark=$3 mode=$4 quic_policy=$5
+  local quic_rule=""
+  if [[ "$quic_policy" == "reject" ]]; then
+    quic_rule="    ip daddr @$set_name udp dport 443 counter reject with icmp type port-unreachable comment \"dnscomplex-${profile}-quic-reject-output\""
+  fi
   if [[ "$mode" == "xray" ]]; then
     cat <<EOF
+$quic_rule
     ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-output"
 EOF
   else
     cat <<EOF
+$quic_rule
     ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark
 EOF
   fi
@@ -1975,15 +2095,15 @@ table inet dnscomplex {
     iifname "$lan_if" udp dport { 784, 853, 8853 } drop
     iifname "$lan_if" tcp dport 853 drop
     iifname "$lan_if" ip daddr @known_doh4 tcp dport 443 drop
-$(render_nft_profile_prerouting_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
-$(render_nft_profile_prerouting_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+$(render_nft_profile_prerouting_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE" "$AI_QUIC_POLICY")
+$(render_nft_profile_prerouting_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE" "$CN_QUIC_POLICY")
   }
 
   chain prerouting_policy_restore {
     type filter hook prerouting priority filter; policy accept;
     iifname "$lan_if" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
-$(render_nft_profile_restore_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
-$(render_nft_profile_restore_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+$(render_nft_profile_restore_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE" "$AI_QUIC_POLICY")
+$(render_nft_profile_restore_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE" "$CN_QUIC_POLICY")
   }
 
   chain forward {
@@ -1994,8 +2114,8 @@ $(render_nft_profile_restore_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE"
   chain output {
     type route hook output priority mangle; policy accept;
     ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
-$(render_nft_profile_output_rules ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
-$(render_nft_profile_output_rules cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+$(render_nft_profile_output_rules ai ai4 "$AI_MARK" "$AI_EGRESS_MODE" "$AI_QUIC_POLICY")
+$(render_nft_profile_output_rules cn cn4 "$CN_MARK" "$CN_EGRESS_MODE" "$CN_QUIC_POLICY")
   }
 
   chain postrouting {
@@ -2301,6 +2421,8 @@ load_config() {
   : "${XRAY_CN_SOCKS_PORT:=16055}"
   : "${AI_EGRESS_MODE:=ipsec}"
   : "${CN_EGRESS_MODE:=ipsec}"
+  : "${AI_QUIC_POLICY:=reject}"
+  : "${CN_QUIC_POLICY:=reject}"
   : "${AI_XRAY_URI:=}"
   : "${CN_XRAY_URI:=}"
   : "${AI_XRAY_OUTBOUND_JSON:=}"
@@ -2326,18 +2448,20 @@ load_config() {
   : "${PROMETHEUS_MODE:=exporter-only}"
   : "${IPSEC_TCP_MSS:=1200}"
   : "${APPLE_PRIVATE_RELAY_BLOCK:=1}"
-  : "${AI_GEOSITE_SOURCES:=openai anthropic meta}"
-  : "${AI_SUPPORT_DOMAINS:=}"
+  : "${AI_GEOSITE_SOURCES:=openai anthropic}"
+  : "${AI_SUPPORT_DOMAINS:=meta.ai}"
   : "${AI_NFTSET_REFRESH_DOMAINS:=chatgpt.com ios.chat.openai.com openai.com api.openai.com oaistatic.com oaiusercontent.com files.oaiusercontent.com cdn.oaistatic.com persistent.oaistatic.com cdn.openai.com anthropic.com claude.ai claude.com meta.ai}"
   : "${SING_GEOSITE_RULESET_BASE_URL:=https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set}"
   : "${CN_VIDEO_SOURCES:=acfun bilibili douyin douyu gitv hunantv huya iqiyi kuaishou le pptv youku wasu v.qq.com video.qq.com tencentvideo.com cibntv.net}"
-  : "${AI_SAMPLE_DOMAINS:=openai.com anthropic.com claude.ai meta.com facebook.com instagram.com whatsapp.com threads.net}"
-  : "${CN_SAMPLE_DOMAINS:=bilibili.com iqiyi.com youku.com douyin.com kuaishou.com acfun.cn mgtv.com v.qq.com qq.com tv.cctv.com}"
+  : "${AI_SAMPLE_DOMAINS:=openai.com anthropic.com claude.ai meta.ai}"
+  : "${CN_SAMPLE_DOMAINS:=bilibili.com iqiyi.com youku.com douyin.com kuaishou.com acfun.cn mgtv.com v.qq.com tv.cctv.com}"
   : "${CN_NFTSET_REFRESH_DOMAINS:=$CN_SAMPLE_DOMAINS}"
   : "${CN_STATIC_A_OVERRIDES:=}"
   : "${CN_OVERRIDE_PROBE_DOMAINS:=youku.com=youku.com,www.youku.com}"
   : "${CN_OVERRIDE_PROBE_RESOLVERS:=223.5.5.5 119.29.29.29 1.1.1.1 8.8.8.8}"
   : "${CN_OVERRIDE_PROBE_TIMEOUT:=8}"
+  : "${LOCAL_DOMAIN_IPV6_POLICY:=ipv4_only}"
+  migrate_ai_meta_sample_domains
   : "${AI_MARK:=0x301}"
   : "${CN_MARK:=0x351}"
   : "${AI_MARK_DEC:=769}"
@@ -2396,6 +2520,7 @@ CN_NFTSET_REFRESH_DOMAINS
 CN_STATIC_A_OVERRIDES
 CN_OVERRIDE_PROBE_DOMAINS
 CN_OVERRIDE_PROBE_RESOLVERS
+LOCAL_DOMAIN_IPV6_POLICY
 SMARTDNS_DEFAULT_PORT
 SMARTDNS_AI_PORT
 SMARTDNS_CN_PORT
@@ -2411,6 +2536,8 @@ XRAY_AI_SOCKS_PORT
 XRAY_CN_SOCKS_PORT
 AI_EGRESS_MODE
 CN_EGRESS_MODE
+AI_QUIC_POLICY
+CN_QUIC_POLICY
 AI_XRAY_URI
 CN_XRAY_URI
 AI_XRAY_OUTBOUND_JSON
@@ -2475,6 +2602,31 @@ migrate_config_cmd() {
 
 split_words() {
   tr ' ,;' '\n\n\n' <<<"${1:-}" | sed '/^$/d'
+}
+
+migrate_ai_meta_sample_domains() {
+  local item changed=0 has_meta_ai=0
+  local -a kept=()
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    case "$item" in
+      facebook.com|instagram.com|meta.com|threads.net|whatsapp.com)
+        changed=1
+        continue
+        ;;
+      meta.ai)
+        has_meta_ai=1
+        ;;
+    esac
+    kept+=("$item")
+  done < <(split_words "${AI_SAMPLE_DOMAINS:-}")
+  if [[ "$has_meta_ai" == "0" ]]; then
+    kept+=("meta.ai")
+    changed=1
+  fi
+  if [[ "$changed" == "1" ]]; then
+    AI_SAMPLE_DOMAINS=$(printf '%s\n' "${kept[@]}" | awk '!seen[$0]++' | xargs)
+  fi
 }
 
 rule_set_safe_name() {
@@ -2961,6 +3113,7 @@ write_config_cmd() {
     write_env_var CN_STATIC_A_OVERRIDES "$CN_STATIC_A_OVERRIDES"
     write_env_var CN_OVERRIDE_PROBE_DOMAINS "$CN_OVERRIDE_PROBE_DOMAINS"
     write_env_var CN_OVERRIDE_PROBE_RESOLVERS "$CN_OVERRIDE_PROBE_RESOLVERS"
+    write_env_var LOCAL_DOMAIN_IPV6_POLICY "$LOCAL_DOMAIN_IPV6_POLICY"
     write_env_var SMARTDNS_DEFAULT_PORT "$SMARTDNS_DEFAULT_PORT"
     write_env_var SMARTDNS_AI_PORT "$SMARTDNS_AI_PORT"
     write_env_var SMARTDNS_CN_PORT "$SMARTDNS_CN_PORT"
@@ -2976,6 +3129,8 @@ write_config_cmd() {
     write_env_var XRAY_CN_SOCKS_PORT "$XRAY_CN_SOCKS_PORT"
     write_env_var AI_EGRESS_MODE "$AI_EGRESS_MODE"
     write_env_var CN_EGRESS_MODE "$CN_EGRESS_MODE"
+    write_env_var AI_QUIC_POLICY "$AI_QUIC_POLICY"
+    write_env_var CN_QUIC_POLICY "$CN_QUIC_POLICY"
     write_env_var AI_XRAY_URI "$AI_XRAY_URI"
     write_env_var CN_XRAY_URI "$CN_XRAY_URI"
     write_env_var AI_XRAY_OUTBOUND_JSON "$AI_XRAY_OUTBOUND_JSON"
@@ -3033,6 +3188,9 @@ Commands:
   remove-domain ai|cn DOMAIN_OR_GEOSITE
   set-socks LISTEN PORT
   set-ipsec ai|cn USER PASSWORD
+  set-web-password PASSWORD
+  set-local-host HOST.local IPv4
+  test-local-name HOST.local
   set-egress ai|cn ipsec|xray
   set-xray-uri ai|cn URI
   set-xray-json ai|cn JSON_FILE
@@ -3049,7 +3207,7 @@ Commands:
   routeros-print
   update-software [--channel stable|beta|pinned] [--version VERSION]
   metrics-sample
-  soak [--duration 30m] [--clients 1000] [--dns-qps 50] [--profiles ai,cn,default] [--idle-resume]
+  soak [--duration 30m] [--clients 1000] [--dns-qps 50] [--profiles ai,cn,default] [--idle-resume] [--output-json PATH]
   wizard
   validate-config [--json] ENV_FILE
   render-config [--redacted]
@@ -3081,8 +3239,8 @@ status_cmd() {
   if [[ "${1:-}" == "--verbose" || "${1:-}" == "verbose" ]]; then
     verbose=1
   fi
-  printf 'deploy_mode=%s default_ipv6_mode=%s default_dns_strategy=%s adguard_cache=%s ha_mode=%s primary=%s secondary=%s ai_egress=%s cn_egress=%s update_channel=%s pinned_version=%s github_policy=%s\n' \
-    "$DEPLOY_MODE" "$DEFAULT_IPV6_MODE" "$DEFAULT_DNS_STRATEGY" "$ADGUARD_DNS_CACHE_MODE" "$HA_MODE" "${HA_PRIMARY_IP:-}" "${HA_SECONDARY_IP:-}" "$AI_EGRESS_MODE" "$CN_EGRESS_MODE" "$DNSCOMPLEX_UPDATE_CHANNEL" "${DNSCOMPLEX_PINNED_VERSION:-}" "$GITHUB_RELEASE_POLICY"
+  printf 'deploy_mode=%s default_ipv6_mode=%s default_dns_strategy=%s adguard_cache=%s ha_mode=%s primary=%s secondary=%s ai_egress=%s cn_egress=%s ai_quic=%s cn_quic=%s local_ipv6=%s update_channel=%s pinned_version=%s github_policy=%s\n' \
+    "$DEPLOY_MODE" "$DEFAULT_IPV6_MODE" "$DEFAULT_DNS_STRATEGY" "$ADGUARD_DNS_CACHE_MODE" "$HA_MODE" "${HA_PRIMARY_IP:-}" "${HA_SECONDARY_IP:-}" "$AI_EGRESS_MODE" "$CN_EGRESS_MODE" "$AI_QUIC_POLICY" "$CN_QUIC_POLICY" "$LOCAL_DOMAIN_IPV6_POLICY" "$DNSCOMPLEX_UPDATE_CHANNEL" "${DNSCOMPLEX_PINNED_VERSION:-}" "$GITHUB_RELEASE_POLICY"
   missing=$(config_missing_keys || true)
   if [[ -n "$missing" ]]; then
     printf 'config_missing_keys=%s\n' "$(tr '\n' ',' <<<"$missing" | sed 's/,$//')"
@@ -3166,6 +3324,15 @@ restart_dns_stack() {
   ensure_smartdns_enabled
   systemctl restart smartdns sing-box AdGuardHome
   wait_dns_ready || warn "DNS stack restarted but did not answer readiness probe within 10 seconds"
+}
+
+remove_macbook_air_local_override() {
+  [[ -f /etc/dnscomplex/local-hosts ]] || return 0
+  local tmp
+  tmp=$(mktemp)
+  awk 'tolower($0) !~ /macbook-?air[.]local/' /etc/dnscomplex/local-hosts >"$tmp"
+  install -m 0644 "$tmp" /etc/dnscomplex/local-hosts
+  rm -f "$tmp"
 }
 
 download_geosite_source() {
@@ -3317,6 +3484,7 @@ install_domain_files() {
   {
     [[ -f /etc/dnscomplex/ai.seed-domains ]] && cat /etc/dnscomplex/ai.seed-domains
     [[ -f "$GEO_DIR/ai-support.domains" ]] && cat "$GEO_DIR/ai-support.domains"
+    split_words "${AI_NFTSET_REFRESH_DOMAINS:-}"
   } | sort -u >/etc/dnscomplex/ai.domains
   install -m 0644 "$GEO_DIR/cn-video.domains" /etc/dnscomplex/cn-video.domains
 }
@@ -3328,10 +3496,22 @@ sync_geosite_sources_from_config() {
   split_words "${CN_VIDEO_SOURCES:-}" >"$GEO_DIR/cn-video.sources"
 }
 
+sync_domain_seed_files_from_config() {
+  split_words "${AI_SAMPLE_DOMAINS:-}" >/etc/dnscomplex/ai.seed-domains
+  split_words "${CN_SAMPLE_DOMAINS:-}" >/etc/dnscomplex/cn-video.seed-domains
+}
+
+flush_policy_nftsets_cmd() {
+  nft flush set inet dnscomplex ai4 >/dev/null 2>&1 || true
+  nft flush set inet dnscomplex cn4 >/dev/null 2>&1 || true
+}
+
 update_geosite_cmd() {
   need_root
   mkdir -p "$GEO_DIR"
   sync_geosite_sources_from_config
+  sync_domain_seed_files_from_config
+  write_config_cmd
   download_sing_geosite_ai_rule_sets
   download_geosite_source
   compile_profile ai-support "$GEO_DIR/ai-support.sources" "$GEO_DIR/ai.custom"
@@ -3340,6 +3520,7 @@ update_geosite_cmd() {
   render_adguard_runtime
   sing-box check -c /etc/sing-box/config.json
   restart_dns_stack
+  flush_policy_nftsets_cmd
   refresh_nftsets_cmd || warn "nftset refresh failed after geosite update"
 }
 
@@ -3591,6 +3772,8 @@ refresh_nftset_group() {
   done < <(nftset_refresh_domain_stream "$profile")
 
   log "refreshed $profile nftset: domains=$domains ips_added_or_renewed=$added no_answer=$failed"
+  mkdir -p /var/lib/dnscomplex
+  date +%s >"/var/lib/dnscomplex/nftset-${profile}.last_refresh"
 }
 
 refresh_nftsets_cmd() {
@@ -3600,6 +3783,7 @@ refresh_nftsets_cmd() {
   valid_refresh_timeout || die "DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT must look like 30m, 2h, or 3600s"
   nft list table inet dnscomplex >/dev/null 2>&1 || systemctl restart nftables || true
   nft list table inet dnscomplex >/dev/null 2>&1 || die "nftables dnscomplex table is missing"
+  flush_policy_nftsets_cmd
   refresh_nftset_group ai "$SMARTDNS_AI_PORT" ai4
   refresh_nftset_group cn "$SMARTDNS_CN_PORT" cn4
 }
@@ -3734,7 +3918,7 @@ test_ipsec_cmd() {
 
 mss_calibrate_cmd() {
   need_root
-  local mtu_ai mtu_cn mss_ai mss_cn
+  local mtu_ai mtu_cn mss_ai mss_cn recommended
   mtu_ai=$(ip link show ipsec-ai 2>/dev/null | awk '/mtu/ {for (i=1;i<=NF;i++) if ($i=="mtu") print $(i+1)}' | head -n1)
   mtu_cn=$(ip link show ipsec-cn 2>/dev/null | awk '/mtu/ {for (i=1;i<=NF;i++) if ($i=="mtu") print $(i+1)}' | head -n1)
   mtu_ai=${mtu_ai:-1400}
@@ -3743,7 +3927,24 @@ mss_calibrate_cmd() {
   mss_cn=$((mtu_cn - 60))
   log "AI MSS candidate: $mss_ai"
   log "CN MSS candidate: $mss_cn"
+  recommended=$(mss_recommended_value "$mss_ai" "$mss_cn")
+  IPSEC_TCP_MSS=$recommended
+  write_config_cmd
+  if [[ -f /etc/nftables.d/dnscomplex.nft ]]; then
+    sed -i -E "s/(tcp flags syn tcp option maxseg size set )[0-9]+/\\1$IPSEC_TCP_MSS/" /etc/nftables.d/dnscomplex.nft
+  fi
   systemctl restart nftables
+  refresh_nftsets_cmd || warn "nftset refresh failed after MSS calibration"
+  log "applied IPSEC_TCP_MSS=$IPSEC_TCP_MSS"
+}
+
+mss_recommended_value() {
+  local ai=$1 cn=$2 value
+  value=$ai
+  ((cn < value)) && value=$cn
+  ((value > 1360)) && value=1360
+  ((value < 536)) && value=536
+  printf '%s\n' "$value"
 }
 
 ipsec_ifaces_cmd() {
@@ -3898,6 +4099,7 @@ routes_cmd() {
 fix_cmd() {
   need_root
   migrate_config_cmd
+  remove_macbook_air_local_override
   apply_runtime_network_settings
   if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
     systemctl restart nftables || true
@@ -3925,6 +4127,25 @@ fix_cmd() {
 
 doctor_cmd() {
   local failed=0 missing failed_units
+  local health_output health_status
+  health_output=$(health_checks_json || true)
+  health_status=$(printf '%s\n' "$health_output" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status","unknown"))' 2>/dev/null || printf unknown)
+  printf '[health] status=%s\n' "$health_status"
+  HEALTH_JSON="$health_output" python3 - <<'PY' || true
+import json
+import os
+import sys
+try:
+    data = json.loads(os.environ.get("HEALTH_JSON", "{}"))
+except Exception:
+    sys.exit(0)
+for reason in data.get("failure_reasons", []):
+    print("[health][reason] " + reason)
+for action in data.get("recommended_actions", []):
+    print("[health][action] " + action)
+PY
+  [[ "$health_status" == "unhealthy" ]] && failed=1
+
   missing=$(config_missing_keys || true)
   if [[ -n "$missing" ]]; then
     failed=1
@@ -3979,7 +4200,7 @@ doctor_cmd() {
     failed=1
     printf '[nft] config check failed\n'
   }
-  printf '[quic] UDP/443 is allowed by default unless profile nftset rules mark AI/CN traffic; DoT/DoQ ports are blocked in nftables.\n'
+  printf '[quic] AI_QUIC_POLICY=%s CN_QUIC_POLICY=%s. reject is recommended to force fast TCP fallback for HTTP/3/QUIC when selected egress blackholes UDP/443.\n' "$AI_QUIC_POLICY" "$CN_QUIC_POLICY"
   return "$failed"
 }
 
@@ -4058,54 +4279,272 @@ adguard_cache_diagnostics() {
   return 0
 }
 
+health_checks_json() {
+  python3 - "$CONFIG" <<'PY'
+import json
+import os
+import shutil
+import statistics
+import subprocess
+import sys
+import time
+
+CONFIG = sys.argv[1]
+
+def parse_config():
+    cfg = {}
+    try:
+        with open(CONFIG, "r", encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                cfg[key] = value.strip().strip("'\"")
+    except FileNotFoundError:
+        pass
+    return cfg
+
+def run(cmd, timeout=5):
+    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+
+def service_active(name):
+    return run(["systemctl", "is-active", "--quiet", name], 4).returncode == 0
+
+def dig_query(domain, qtype="A", port="53", timeout=3):
+    start = time.monotonic()
+    proc = run(["dig", "+time=2", "+tries=1", "+short", qtype, domain, "@127.0.0.1", "-p", str(port)], timeout)
+    elapsed = (time.monotonic() - start) * 1000
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return proc.returncode == 0 and bool(lines), lines, elapsed
+
+def test_socks_listener(listen, port):
+    import socket
+    host = listen or "127.0.0.1"
+    if host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    try:
+        with socket.create_connection((host, int(port)), timeout=2):
+            return True, f"{listen}:{port} reachable via {host}:{port}"
+    except Exception as exc:
+        return False, f"{listen}:{port} unreachable: {exc}"
+
+def nft_count(set_name):
+    proc = run(["nft", "list", "set", "inet", "dnscomplex", set_name], 5)
+    if proc.returncode != 0:
+        return -1
+    import re
+    return len(set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", proc.stdout)))
+
+def file_age(path):
+    try:
+        return max(0, int(time.time() - os.stat(path).st_mtime))
+    except FileNotFoundError:
+        return None
+
+def int_file(path, default=0):
+    try:
+        return int(open(path, "r", encoding="utf-8").read().strip())
+    except Exception:
+        return default
+
+def memory_usage_percent():
+    total = available = 0
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    available = int(line.split()[1])
+    except Exception:
+        return 0.0
+    if total <= 0:
+        return 0.0
+    return round(((total - available) / total) * 100, 2)
+
+def add_check(checks, name, ok, severity, detail, action, core=False, value=None):
+    status = "ok" if ok else ("fail" if severity == "critical" else "warn")
+    item = {"name": name, "status": status, "severity": severity, "detail": detail, "recommended_action": action, "core": core}
+    if value is not None:
+        item["value"] = value
+    checks.append(item)
+
+cfg = parse_config()
+checks = []
+services = []
+core_failed = False
+warned = False
+failure_reasons = []
+recommended_actions = []
+
+core_services = ["sing-box.service", "smartdns.service", "AdGuardHome.service", "nftables.service"]
+if cfg.get("XRAY_ENABLED", "1") == "1" or cfg.get("AI_EGRESS_MODE", "ipsec") == "xray" or cfg.get("CN_EGRESS_MODE", "ipsec") == "xray":
+    core_services.append("xray-dnscomplex.service")
+for service in core_services:
+    ok = service_active(service)
+    services.append({"name": service, "ok": ok})
+    add_check(checks, "service-" + service, ok, "critical", f"{service} active={ok}", f"systemctl restart {service}", core=True)
+
+socks_listen = cfg.get("SINGBOX_SOCKS_LISTEN", "127.0.0.1")
+socks_port = cfg.get("SINGBOX_SOCKS_PORT", "1080")
+socks_ok, socks_detail = test_socks_listener(socks_listen, socks_port)
+add_check(checks, "singbox-socks-listener", socks_ok, "critical", socks_detail, "check SINGBOX_SOCKS_LISTEN/SINGBOX_SOCKS_PORT and restart sing-box", core=True)
+
+listener_specs = [
+    ("smartdns-default-listener", "example.com", "A", cfg.get("SMARTDNS_DEFAULT_PORT", "6053")),
+    ("smartdns-ai-listener", "openai.com", "A", cfg.get("SMARTDNS_AI_PORT", "6054")),
+    ("smartdns-cn-listener", "youku.com", "A", cfg.get("SMARTDNS_CN_PORT", "6055")),
+]
+latencies = []
+successes = 0
+for name, domain, qtype, port in listener_specs:
+    ok, _lines, ms = dig_query(domain, qtype, port)
+    latencies.append(ms)
+    successes += 1 if ok else 0
+    add_check(checks, name, ok, "critical", f"{domain} {qtype} via port {port} in {ms:.1f}ms", "restart SmartDNS and check upstream DNS", core=True, value=round(ms, 2))
+
+adguard_cache_ok = True
+try:
+    adguard_yaml = open("/etc/AdGuardHome/AdGuardHome.yaml", "r", encoding="utf-8", errors="replace").read()
+    cache_enabled = "  cache_enabled: true" in adguard_yaml
+    cache_size_match = __import__("re").search(r"(?m)^  cache_size:\s*(\d+)", adguard_yaml)
+    cache_size = int(cache_size_match.group(1)) if cache_size_match else 0
+    adguard_cache_ok = not (cfg.get("ADGUARD_DNS_CACHE_MODE", "off") == "off" and (cache_enabled or cache_size != 0))
+except Exception:
+    adguard_cache_ok = False
+add_check(checks, "adguard-cache-policy", adguard_cache_ok, "warning", f"AdGuard cache policy ok={adguard_cache_ok}", "keep ADGUARD_DNS_CACHE_MODE=off so SmartDNS is the single cache authority")
+
+for name, domain, port in [
+    ("ai-aaaa-suppression", "openai.com", cfg.get("SMARTDNS_AI_PORT", "6054")),
+    ("cn-aaaa-suppression", "youku.com", cfg.get("SMARTDNS_CN_PORT", "6055")),
+]:
+    _ok, lines, _ms = dig_query(domain, "AAAA", port)
+    leaked = any(":" in line for line in lines)
+    add_check(checks, name, not leaked, "critical", f"{domain} AAAA leaked={leaked}", "AI/CN SmartDNS listeners must keep -force-aaaa-soa", core=True)
+
+for profile in ["ai", "cn"]:
+    key = f"{profile.upper()}_QUIC_POLICY"
+    policy = cfg.get(key, "reject")
+    add_check(
+        checks,
+        f"{profile}-quic-policy",
+        policy == "reject",
+        "warning",
+        f"{key}={policy}",
+        f"set {key}=reject to force HTTP/3/QUIC fallback to TCP and avoid selected egress UDP/443 blackholes",
+    )
+
+local_ipv6_policy = cfg.get("LOCAL_DOMAIN_IPV6_POLICY", "ipv4_only")
+smartdns_conf = ""
+try:
+    smartdns_conf = open("/etc/smartdns/smartdns.conf", "r", encoding="utf-8", errors="replace").read()
+except Exception:
+    pass
+add_check(
+    checks,
+    "local-domain-ipv6-policy",
+    local_ipv6_policy == "allow" or "address /local/#6" in smartdns_conf,
+    "warning",
+    f"LOCAL_DOMAIN_IPV6_POLICY={local_ipv6_policy}",
+    "keep LOCAL_DOMAIN_IPV6_POLICY=ipv4_only so iOS/Codex .local callbacks use IPv4 instead of timing out on Mac IPv6",
+)
+
+default_domains = ["example.com", "cloudflare.com", "google.com", "youtube.com", "openai.com"]
+dns_latencies = []
+dns_success = 0
+for domain in default_domains:
+    ok, _lines, ms = dig_query(domain, "A", "53")
+    dns_latencies.append(ms)
+    dns_success += 1 if ok else 0
+dns_p50 = statistics.median(dns_latencies) if dns_latencies else 0.0
+dns_p95 = sorted(dns_latencies)[min(len(dns_latencies) - 1, int(len(dns_latencies) * 0.95))] if dns_latencies else 0.0
+dns_success_ratio = dns_success / max(1, len(default_domains))
+add_check(checks, "dns-success-ratio", dns_success_ratio >= 0.98, "warning", f"success_ratio={dns_success_ratio:.2f}", "check AdGuard, SmartDNS, and upstream DNS", value=round(dns_success_ratio, 4))
+add_check(checks, "dns-p95-latency", dns_p95 < 500, "warning", f"p95={dns_p95:.1f}ms", "inspect SmartDNS upstream latency and cache health", value=round(dns_p95, 2))
+
+nft_ages = {}
+for profile, set_name, freshness_name in [("ai", "ai4", "nftset-ai-freshness"), ("cn", "cn4", "nftset-cn-freshness")]:
+    count = nft_count(set_name)
+    age = file_age(f"/var/lib/dnscomplex/nftset-{profile}.last_refresh")
+    nft_ages[profile] = age
+    add_check(checks, f"nftset-{profile}-count", count > 0, "warning", f"{set_name} entries={count}", "run dnscomplex refresh-nftsets", value=count)
+    stale = age is not None and age <= 7200
+    add_check(checks, freshness_name, stale, "warning", f"last_refresh_age_seconds={age}", "run dnscomplex refresh-nftsets and check timer", value=-1 if age is None else age)
+
+sas = run(["swanctl", "--list-sas"], 8).stdout
+ipsec_ok = True
+for profile in ["ai", "cn"]:
+    mode = cfg.get(f"{profile.upper()}_EGRESS_MODE", "ipsec")
+    if mode == "ipsec":
+        ok = (profile + ":") in sas
+        ipsec_ok = ipsec_ok and ok
+        add_check(checks, f"{profile}-ipsec-selected-egress", ok, "critical", f"{profile} IPsec selected and up={ok}", f"dnscomplex test-ipsec or update {profile.upper()} IPsec credentials", core=True)
+    elif mode == "xray":
+        ok = service_active("xray-dnscomplex.service")
+        add_check(checks, f"{profile}-xray-selected-egress", ok, "critical", f"{profile} Xray selected and service up={ok}", f"dnscomplex test-xray {profile}", core=True)
+
+ipv6_mode = cfg.get("DEFAULT_IPV6_MODE", "auto")
+if ipv6_mode == "off":
+    add_check(checks, "default-ipv6-connectivity", True, "info", "DEFAULT_IPV6_MODE=off", "enable default IPv6 only when RouterOS/default path supports it")
+else:
+    route = run(["ip", "-6", "route", "get", "2606:4700:4700::1111"], 4)
+    add_check(checks, "default-ipv6-connectivity", route.returncode == 0, "warning", "IPv6 route lookup " + ("ok" if route.returncode == 0 else "failed"), "check RouterOS RA/default IPv6 route and VM policy routing")
+
+ct_count = int_file("/proc/sys/net/netfilter/nf_conntrack_count")
+ct_max = max(int_file("/proc/sys/net/netfilter/nf_conntrack_max", 1), 1)
+ct_pct = round((ct_count / ct_max) * 100, 2)
+add_check(checks, "conntrack-capacity", ct_pct < 85, "critical" if ct_pct >= 85 else "warning", f"conntrack={ct_count}/{ct_max} ({ct_pct:.2f}%)", "increase conntrack capacity or reduce stale flows", core=ct_pct >= 85, value=ct_pct)
+
+disk = shutil.disk_usage("/")
+disk_pct = round((disk.used / disk.total) * 100, 2)
+mem_pct = memory_usage_percent()
+add_check(checks, "disk-root-usage", disk_pct < 90, "warning", f"root disk usage={disk_pct:.2f}%", "clean logs/backups or expand disk", value=disk_pct)
+add_check(checks, "memory-usage", mem_pct < 90, "warning", f"memory usage={mem_pct:.2f}%", "inspect service memory and VM sizing", value=mem_pct)
+
+failed_units = run(["systemctl", "--failed", "--plain", "--no-legend"], 5).stdout.strip().splitlines()
+dnscomplex_failed = [line.split()[0] for line in failed_units if line and line.split()[0].startswith(("dnscomplex", "sing-box", "smartdns", "AdGuardHome", "strongswan", "nftables", "xray"))]
+add_check(checks, "failed-systemd-units", not dnscomplex_failed, "warning", "failed_units=" + ",".join(dnscomplex_failed), "systemctl reset-failed; dnscomplex doctor", value=len(dnscomplex_failed))
+
+for item in checks:
+    if item["status"] != "ok":
+        warned = True
+        failure_reasons.append(f"{item['name']}: {item['detail']}")
+        if item["recommended_action"] not in recommended_actions:
+            recommended_actions.append(item["recommended_action"])
+        if item["core"] and item["severity"] == "critical":
+            core_failed = True
+
+status = "unhealthy" if core_failed else ("degraded" if warned else "healthy")
+result = {
+    "status": status,
+    "services": services,
+    "dns_latency_ms": round(dns_p50, 2),
+    "dns_latency_p95_ms": round(dns_p95, 2),
+    "dns_success_ratio": round(dns_success_ratio, 4),
+    "conntrack_usage_percent": ct_pct,
+    "adguard_cache_ok": adguard_cache_ok,
+    "ipsec_ok": ipsec_ok,
+    "ha_mode": cfg.get("HA_MODE", "single"),
+    "ha_primary_ip": cfg.get("HA_PRIMARY_IP", ""),
+    "ha_secondary_ip": cfg.get("HA_SECONDARY_IP", ""),
+    "checks": checks,
+    "failure_reasons": failure_reasons,
+    "recommended_actions": recommended_actions,
+    "nftset_age_seconds": nft_ages,
+    "disk_usage_percent": disk_pct,
+    "memory_usage_percent": mem_pct,
+}
+print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+PY
+}
+
 health_json_cmd() {
-  local failed=0 dns_ms ct_pct service services_json cache_ok ipsec_ok
-  services_json=""
-  for service in sing-box.service smartdns.service AdGuardHome.service nftables.service xray-dnscomplex.service; do
-    if service_ok "$service"; then
-      services_json+="{\"name\":\"$service\",\"ok\":true},"
-    else
-      failed=1
-      services_json+="{\"name\":\"$service\",\"ok\":false},"
-    fi
-  done
-  services_json="[${services_json%,}]"
-  dns_ms=$(dns_latency_ms example.com || true)
-  ct_pct=$(conntrack_usage_percent)
-  cache_ok=true
-  adguard_cache_diagnostics >/dev/null || { cache_ok=false; failed=1; }
-  ipsec_ok=true
-  local sas
-  sas=$(swanctl --list-sas 2>/dev/null || true)
-  if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" ]] && ! grep -Eq '^ai:' <<<"$sas"; then
-    ipsec_ok=false
-    failed=1
-  fi
-  if [[ "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]] && ! grep -Eq '^cn:' <<<"$sas"; then
-    ipsec_ok=false
-    failed=1
-  fi
-  awk -v health="$([[ "$failed" == "0" ]] && printf healthy || printf degraded)" \
-    -v services="$services_json" \
-    -v dns_ms="${dns_ms:-0}" \
-    -v ct_pct="${ct_pct:-0}" \
-    -v cache_ok="$cache_ok" \
-    -v ipsec_ok="$ipsec_ok" \
-    -v ha_mode="$HA_MODE" \
-    -v primary="${HA_PRIMARY_IP:-}" \
-    -v secondary="${HA_SECONDARY_IP:-}" \
-    'BEGIN {
-      printf "{"
-      printf "\"status\":\"%s\",", health
-      printf "\"services\":%s,", services
-      printf "\"dns_latency_ms\":%s,", dns_ms + 0
-      printf "\"conntrack_usage_percent\":%s,", ct_pct + 0
-      printf "\"adguard_cache_ok\":%s,", cache_ok
-      printf "\"ipsec_ok\":%s,", ipsec_ok
-      printf "\"ha_mode\":\"%s\",\"ha_primary_ip\":\"%s\",\"ha_secondary_ip\":\"%s\"", ha_mode, primary, secondary
-      printf "}\n"
-    }'
-  [[ "$failed" == "0" ]]
+  local output status
+  output=$(health_checks_json)
+  printf '%s\n' "$output"
+  status=$(printf '%s\n' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status","unhealthy"))' 2>/dev/null || printf unhealthy)
+  [[ "$status" != "unhealthy" ]]
 }
 
 health_cmd() {
@@ -4172,6 +4611,48 @@ set_update_time_cmd() {
   [[ "$DNSCOMPLEX_UPDATE_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "update time must be HH:MM"
   write_config_cmd
   write_update_timer_cmd
+}
+
+set_web_password_cmd() {
+  need_root
+  [[ $# -eq 1 ]] || die "usage: dnscomplex set-web-password PASSWORD"
+  local pass=$1
+  if [[ "$pass" == "-" ]]; then
+    read -r -s -p "Web password: " pass
+    printf '\n'
+  fi
+  [[ ${#pass} -ge 8 ]] || die "web password must be at least 8 characters"
+  DNSCOMPLEX_WEB_PASSWORD=$pass
+  write_config_cmd
+  log "web password updated; log in again with username admin"
+}
+
+set_local_host_cmd() {
+  need_root
+  [[ $# -eq 2 ]] || die "usage: dnscomplex set-local-host HOST.local IPv4"
+  local host=$1 ip=$2 tmp
+  [[ "$host" == *.local ]] || die "host must end with .local"
+  case "${host,,}" in
+    macbook-air.local|macbookair.local)
+      die "MacBookAir .local addresses should follow mDNS or RouterOS DHCP/DNS, not dnscomplex static local-hosts"
+      ;;
+  esac
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "IPv4 address required"
+  mkdir -p /etc/dnscomplex
+  touch /etc/dnscomplex/local-hosts
+  tmp=$(mktemp)
+  awk -v host="$host" 'tolower($2) != tolower(host)' /etc/dnscomplex/local-hosts >"$tmp" || true
+  printf '%s %s\n' "$ip" "$host" >>"$tmp"
+  install -m 0644 "$tmp" /etc/dnscomplex/local-hosts
+  rm -f "$tmp"
+  restart_dns_stack || true
+  log "local host override applied: $host -> $ip"
+}
+
+test_local_name_cmd() {
+  [[ $# -eq 1 ]] || die "usage: dnscomplex test-local-name HOST.local"
+  local host=$1
+  dig +time=2 +tries=1 "$host" @127.0.0.1 -p 53 A +noall +answer +authority || true
 }
 
 set_socks_cmd() {
@@ -4251,40 +4732,58 @@ write_singbox_egress_cmd() {
 }
 
 runtime_nft_prerouting_rules() {
-  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5 quic_policy=$6
+  local quic_rule=""
+  if [[ "$quic_policy" == "reject" ]]; then
+    quic_rule="    iifname \"$lan_if\" ip daddr @$set_name udp dport 443 counter reject with icmp type port-unreachable comment \"dnscomplex-${profile}-quic-reject\""
+  fi
   if [[ "$mode" == "xray" ]]; then
     cat <<EOF
+$quic_rule
     iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
 EOF
   else
     cat <<EOF
     iifname "$lan_if" ip daddr 255.255.255.255 meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop"
+$quic_rule
     iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } ct mark set $SINGBOX_AUTO_REDIRECT_OUTPUT_MARK meta mark set $mark counter comment "dnscomplex-${profile}-preroute"
 EOF
   fi
 }
 
 runtime_nft_restore_rules() {
-  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5
+  local lan_if=$1 profile=$2 set_name=$3 mark=$4 mode=$5 quic_policy=$6
+  local quic_rule=""
+  if [[ "$quic_policy" == "reject" ]]; then
+    quic_rule="    iifname \"$lan_if\" ip daddr @$set_name udp dport 443 counter reject with icmp type port-unreachable comment \"dnscomplex-${profile}-quic-reject-restore\""
+  fi
   if [[ "$mode" == "xray" ]]; then
     cat <<EOF
+$quic_rule
     iifname "$lan_if" ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-restore"
 EOF
   else
     cat <<EOF
+$quic_rule
     iifname "$lan_if" ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark counter comment "dnscomplex-${profile}-policy-restore"
 EOF
   fi
 }
 
 runtime_nft_output_rules() {
-  local profile=$1 set_name=$2 mark=$3 mode=$4
+  local profile=$1 set_name=$2 mark=$3 mode=$4 quic_policy=$5
+  local quic_rule=""
+  if [[ "$quic_policy" == "reject" ]]; then
+    quic_rule="    ip daddr @$set_name udp dport 443 counter reject with icmp type port-unreachable comment \"dnscomplex-${profile}-quic-reject-output\""
+  fi
   if [[ "$mode" == "xray" ]]; then
     cat <<EOF
+$quic_rule
     ip daddr @$set_name meta l4proto icmp drop comment "dnscomplex-${profile}-xray-icmp-drop-output"
 EOF
   else
     cat <<EOF
+$quic_rule
     ip daddr @$set_name meta l4proto { icmp, tcp, udp } meta mark set $mark
 EOF
   fi
@@ -4327,15 +4826,15 @@ table inet dnscomplex {
     iifname "$lan_if" udp dport { 784, 853, 8853 } drop
     iifname "$lan_if" tcp dport 853 drop
     iifname "$lan_if" ip daddr @known_doh4 tcp dport 443 drop
-$(runtime_nft_prerouting_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
-$(runtime_nft_prerouting_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+$(runtime_nft_prerouting_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE" "$AI_QUIC_POLICY")
+$(runtime_nft_prerouting_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE" "$CN_QUIC_POLICY")
   }
 
   chain prerouting_policy_restore {
     type filter hook prerouting priority filter; policy accept;
     iifname "$lan_if" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
-$(runtime_nft_restore_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
-$(runtime_nft_restore_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+$(runtime_nft_restore_rules "$lan_if" ai ai4 "$AI_MARK" "$AI_EGRESS_MODE" "$AI_QUIC_POLICY")
+$(runtime_nft_restore_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE" "$CN_QUIC_POLICY")
   }
 
   chain forward {
@@ -4346,8 +4845,8 @@ $(runtime_nft_restore_rules "$lan_if" cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
   chain output {
     type route hook output priority mangle; policy accept;
     ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept
-$(runtime_nft_output_rules ai ai4 "$AI_MARK" "$AI_EGRESS_MODE")
-$(runtime_nft_output_rules cn cn4 "$CN_MARK" "$CN_EGRESS_MODE")
+$(runtime_nft_output_rules ai ai4 "$AI_MARK" "$AI_EGRESS_MODE" "$AI_QUIC_POLICY")
+$(runtime_nft_output_rules cn cn4 "$CN_MARK" "$CN_EGRESS_MODE" "$CN_QUIC_POLICY")
   }
 
   chain postrouting {
@@ -4364,11 +4863,18 @@ EOF
   systemctl restart nftables || true
 }
 
+flush_quic_conntrack_cmd() {
+  if [[ "${AI_QUIC_POLICY:-reject}" == "reject" || "${CN_QUIC_POLICY:-reject}" == "reject" ]]; then
+    conntrack -D -p udp --dport 443 >/dev/null 2>&1 || true
+  fi
+}
+
 apply_egress_stack_cmd() {
   need_root
   render_xray_config_cmd
   write_singbox_egress_cmd
   write_nftables_runtime_cmd
+  flush_quic_conntrack_cmd
   systemctl daemon-reload
   systemctl enable --now xray-dnscomplex 2>/dev/null || true
   systemctl restart xray-dnscomplex sing-box || true
@@ -4591,6 +5097,7 @@ validate_loaded_config() {
   case "${ADGUARD_DNS_CACHE_MODE:-off}" in off|small|large) ;; *) printf 'error: ADGUARD_DNS_CACHE_MODE must be off, small, or large\n'; errors=$((errors + 1)) ;; esac
   case "${DNSCOMPLEX_UPDATE_CHANNEL:-stable}" in stable|beta|pinned) ;; *) printf 'error: DNSCOMPLEX_UPDATE_CHANNEL must be stable, beta, or pinned\n'; errors=$((errors + 1)) ;; esac
   case "${GITHUB_RELEASE_POLICY:-latest}" in latest|pinned) ;; *) printf 'error: GITHUB_RELEASE_POLICY must be latest or pinned\n'; errors=$((errors + 1)) ;; esac
+  case "${LOCAL_DOMAIN_IPV6_POLICY:-ipv4_only}" in ipv4_only|allow) ;; *) printf 'error: LOCAL_DOMAIN_IPV6_POLICY must be ipv4_only or allow\n'; errors=$((errors + 1)) ;; esac
   if [[ "${DNSCOMPLEX_UPDATE_CHANNEL:-stable}" == "pinned" || "${GITHUB_RELEASE_POLICY:-latest}" == "pinned" ]]; then
     [[ -n "${DNSCOMPLEX_PINNED_VERSION:-}" ]] || { printf 'error: DNSCOMPLEX_PINNED_VERSION is required for pinned update policy\n'; errors=$((errors + 1)); }
   fi
@@ -4605,6 +5112,8 @@ validate_loaded_config() {
   done
   case "${AI_EGRESS_MODE:-ipsec}" in ipsec|xray) ;; *) printf 'error: AI_EGRESS_MODE must be ipsec or xray\n'; errors=$((errors + 1)) ;; esac
   case "${CN_EGRESS_MODE:-ipsec}" in ipsec|xray) ;; *) printf 'error: CN_EGRESS_MODE must be ipsec or xray\n'; errors=$((errors + 1)) ;; esac
+  case "${AI_QUIC_POLICY:-reject}" in reject|allow) ;; *) printf 'error: AI_QUIC_POLICY must be reject or allow\n'; errors=$((errors + 1)) ;; esac
+  case "${CN_QUIC_POLICY:-reject}" in reject|allow) ;; *) printf 'error: CN_QUIC_POLICY must be reject or allow\n'; errors=$((errors + 1)) ;; esac
   if [[ "${AI_EGRESS_MODE:-ipsec}" == "xray" ]]; then
     [[ -n "${AI_XRAY_URI:-}" || -n "${AI_XRAY_OUTBOUND_JSON:-}" ]] || { printf 'error: AI xray mode requires AI_XRAY_URI or AI_XRAY_OUTBOUND_JSON\n'; errors=$((errors + 1)); }
   fi
@@ -4707,12 +5216,12 @@ wizard_cmd() {
 DNSCOMPLEX_NONINTERACTIVE=1
 DEPLOY_MODE=routeros-policy
 WAN_IFACE=eth0
-ROUTEROS_LAN_IPV4=192.168.8.253
-LINUX_LAN_IPV4=192.168.8.200
-LAN_CLIENT_IPV4_CIDR=192.168.8.0/24
-SINGBOX_SOCKS_LISTEN=192.168.8.200
+ROUTEROS_LAN_IPV4=192.0.2.1
+LINUX_LAN_IPV4=192.0.2.2
+LAN_CLIENT_IPV4_CIDR=192.0.2.0/24
+SINGBOX_SOCKS_LISTEN=192.0.2.2
 SINGBOX_SOCKS_PORT=1080
-DNSCOMPLEX_WEB_LISTEN=192.168.8.200
+DNSCOMPLEX_WEB_LISTEN=192.0.2.2
 DNSCOMPLEX_WEB_PORT=8088
 DNSCOMPLEX_UPDATE_CHANNEL=stable
 GITHUB_RELEASE_POLICY=latest
@@ -4781,7 +5290,11 @@ install_smartdns_release() {
   tmp=$(mktemp -d)
   asset=$(github_latest_asset_url "pymumu/smartdns" "${arch}-debian-all\\.deb$")
   curl -fsSL -o "$tmp/smartdns.deb" "$asset"
-  dpkg -i "$tmp/smartdns.deb" || apt-get -f install -y
+  DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i "$tmp/smartdns.deb" || \
+    DEBIAN_FRONTEND=noninteractive apt-get \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      -f install -y
   fix_smartdns_wrapper
   ensure_smartdns_enabled
   command -v smartdns >/dev/null || die "SmartDNS install did not provide smartdns binary"
@@ -4803,7 +5316,11 @@ install_singbox_release() {
   tmp=$(mktemp -d)
   asset=$(github_latest_asset_url "SagerNet/sing-box" "sing-box_.*_linux_${arch}\\.deb$")
   curl -fsSL -o "$tmp/sing-box.deb" "$asset"
-  dpkg -i "$tmp/sing-box.deb" || apt-get -f install -y
+  DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i "$tmp/sing-box.deb" || \
+    DEBIAN_FRONTEND=noninteractive apt-get \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      -f install -y
   command -v sing-box >/dev/null || die "sing-box install did not provide sing-box binary"
   rm -rf "$tmp"
 }
@@ -4871,7 +5388,10 @@ update_software_impl() {
   update_software_stage "Debian apt update"
   apt-get update
   update_software_stage "Debian apt upgrade"
-  apt-get upgrade -y
+  apt-get \
+    -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold \
+    upgrade -y
   update_software_stage "GitHub release metadata and asset verification channel=${DNSCOMPLEX_UPDATE_CHANNEL:-stable} policy=${GITHUB_RELEASE_POLICY:-latest} pinned=${DNSCOMPLEX_PINNED_VERSION:-}"
   update_release_if_needed sing-box SagerNet/sing-box sing-box install_singbox_release
   update_release_if_needed smartdns pymumu/smartdns smartdns install_smartdns_release
@@ -4975,6 +5495,50 @@ metrics_sample_cmd() {
   fi
 }
 
+soak_trace_expect() {
+  local domain=$1
+  local expected=$2
+  local output profile
+  output=$("$0" trace-domain "$domain" 2>&1) || {
+    printf 'trace failed domain=%s expected=%s\n%s\n' "$domain" "$expected" "$output"
+    return 1
+  }
+  profile=$(awk -F= '$1 == "profile" {print $2; exit}' <<<"$output")
+  if [[ "$profile" != "$expected" ]]; then
+    printf 'trace mismatch domain=%s expected=%s actual=%s\n%s\n' "$domain" "$expected" "${profile:-missing}" "$output"
+    return 1
+  fi
+  printf 'trace ok domain=%s profile=%s\n' "$domain" "$profile"
+}
+
+soak_local_hosts_check() {
+  local host failures=0
+  [[ -f /etc/dnscomplex/local-hosts ]] || return 0
+  while IFS= read -r host; do
+    [[ -n "$host" ]] || continue
+    if ! dig +time=2 +tries=1 +short A "$host" @127.0.0.1 -p 53 | grep -Eq '^[0-9]+(\.[0-9]+){3}$'; then
+      printf 'local-hosts idle-resume failed host=%s\n' "$host"
+      failures=$((failures + 1))
+    fi
+  done < <(awk '$1 ~ /^[0-9]+(\.[0-9]+){3}$/ && $2 ~ /\./ {print $2}' /etc/dnscomplex/local-hosts)
+  [[ "$failures" == "0" ]]
+}
+
+soak_idle_resume_check() {
+  printf 'idle-resume nftset recovery start\n'
+  flush_policy_nftsets_cmd
+  refresh_nftsets_cmd
+  soak_trace_expect chatgpt.com AI
+  soak_trace_expect claude.ai AI
+  soak_trace_expect meta.ai AI
+  soak_trace_expect youku.com CN
+  soak_trace_expect facebook.com default
+  soak_trace_expect instagram.com default
+  soak_trace_expect youtube.com default
+  soak_local_hosts_check
+  printf 'idle-resume nftset recovery done\n'
+}
+
 duration_to_seconds() {
   local value=$1 number unit
   if [[ "$value" =~ ^([0-9]+)([smhd]?)$ ]]; then
@@ -4992,7 +5556,7 @@ duration_to_seconds() {
 }
 
 soak_cmd() {
-  local duration=30m clients=1000 dns_qps=50 profiles=ai,cn,default idle_resume=0
+  local duration=30m clients=1000 dns_qps=50 profiles=ai,cn,default idle_resume=0 output_json=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --duration) duration=$2; shift 2 ;;
@@ -5000,36 +5564,17 @@ soak_cmd() {
       --dns-qps) dns_qps=$2; shift 2 ;;
       --profiles) profiles=$2; shift 2 ;;
       --idle-resume) idle_resume=1; shift ;;
+      --output-json) output_json=$2; shift 2 ;;
       *) die "unknown soak option: $1" ;;
     esac
   done
   [[ "$clients" =~ ^[0-9]+$ ]] || die "--clients must be numeric"
   [[ "$dns_qps" =~ ^[0-9]+$ ]] || die "--dns-qps must be numeric"
-  local seconds deadline log_file summary_file iter=0 failures=0 domains=(example.com openai.com claude.ai bilibili.com youku.com youtube.com)
-  seconds=$(duration_to_seconds "$duration")
   mkdir -p /var/log/dnscomplex
-  log_file="/var/log/dnscomplex/soak-$(date +%Y%m%d-%H%M%S).log"
-  summary_file="${log_file%.log}.json"
-  deadline=$((SECONDS + seconds))
-  {
-    printf 'start=%s duration=%s clients=%s dns_qps=%s profiles=%s idle_resume=%s\n' "$(date -Is)" "$duration" "$clients" "$dns_qps" "$profiles" "$idle_resume"
-    while ((SECONDS < deadline)); do
-      iter=$((iter + 1))
-      if ! "$0" health --json; then
-        failures=$((failures + 1))
-      fi
-      for domain in "${domains[@]}"; do
-        dig +time=2 +tries=1 +short A "$domain" @127.0.0.1 -p 53 >/dev/null 2>&1 || failures=$((failures + 1))
-      done
-      metrics_sample_cmd >/dev/null 2>&1 || true
-      sleep 10
-    done
-    printf 'end=%s iterations=%s failures=%s\n' "$(date -Is)" "$iter" "$failures"
-  } | tee "$log_file"
-  printf '{"duration":"%s","clients":%s,"dns_qps":%s,"profiles":"%s","idle_resume":%s,"iterations":%s,"failures":%s,"log":"%s"}\n' \
-    "$duration" "$clients" "$dns_qps" "$profiles" "$idle_resume" "$iter" "$failures" "$log_file" >"$summary_file"
-  log "soak summary: $summary_file"
-  [[ "$failures" == "0" ]]
+  local args=(/usr/local/lib/dnscomplex-soak/runner.py --duration "$duration" --clients "$clients" --dns-qps "$dns_qps" --profiles "$profiles")
+  [[ "$idle_resume" == "1" ]] && args+=(--idle-resume)
+  [[ -n "$output_json" ]] && args+=(--output-json "$output_json")
+  "${args[@]}"
 }
 
 backup_cmd() {
@@ -5086,6 +5631,9 @@ main() {
     remove-domain) remove_domain_cmd "$@" ;;
     set-socks) set_socks_cmd "$@" ;;
     set-ipsec) set_ipsec_cmd "$@" ;;
+    set-web-password) set_web_password_cmd "$@" ;;
+    set-local-host) set_local_host_cmd "$@" ;;
+    test-local-name) test_local_name_cmd "$@" ;;
     set-egress) set_egress_cmd "$@" ;;
     set-xray-uri) set_xray_uri_cmd "$@" ;;
     set-xray-json) set_xray_json_cmd "$@" ;;
@@ -5121,6 +5669,175 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 fi
 MANAGER
   chmod_target 0755 /usr/local/sbin/dnscomplex
+}
+
+render_soak_runner() {
+  write_file /usr/local/lib/dnscomplex-soak/runner.py <<'PY'
+#!/usr/bin/env python3
+import argparse
+import concurrent.futures
+import json
+import os
+import statistics
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+DNSCOMPLEX = "/usr/local/sbin/dnscomplex"
+DOMAINS = {
+    "ai": ["chatgpt.com", "openai.com", "claude.ai", "meta.ai"],
+    "cn": ["youku.com", "bilibili.com", "iqiyi.com"],
+    "default": ["example.com", "cloudflare.com", "youtube.com", "google.com"],
+}
+
+def parse_duration(value):
+    unit = value[-1]
+    number = value[:-1] if unit in "smhd" else value
+    if not number.isdigit():
+        raise SystemExit(f"invalid duration: {value}")
+    n = int(number)
+    if unit == "m":
+        return n * 60
+    if unit == "h":
+        return n * 3600
+    if unit == "d":
+        return n * 86400
+    return n
+
+def run(cmd, timeout=10):
+    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+
+def dig_domain(domain):
+    start = time.monotonic()
+    proc = run(["dig", "+time=2", "+tries=1", "+short", "A", domain, "@127.0.0.1", "-p", "53"], 5)
+    latency = (time.monotonic() - start) * 1000
+    ok = proc.returncode == 0 and any(line.strip() for line in proc.stdout.splitlines())
+    return {"domain": domain, "ok": ok, "latency_ms": latency}
+
+def percentile(values, pct):
+    if not values:
+        return 0.0
+    values = sorted(values)
+    idx = min(len(values) - 1, int((len(values) - 1) * pct))
+    return values[idx]
+
+def profile_for_domain(domain):
+    for profile, domains in DOMAINS.items():
+        if domain in domains:
+            return profile
+    return "default"
+
+def health_status():
+    proc = run([DNSCOMPLEX, "health", "--json"], 20)
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return {"status": "unhealthy", "raw": proc.stdout, "stderr": proc.stderr}
+
+def idle_resume():
+    result = {"ran": True, "ok": True, "checks": []}
+    run([DNSCOMPLEX, "refresh-nftsets"], 120)
+    for domain, expected in [("chatgpt.com", "AI"), ("claude.ai", "AI"), ("meta.ai", "AI"), ("youku.com", "CN"), ("youtube.com", "default")]:
+        proc = run([DNSCOMPLEX, "trace-domain", domain], 60)
+        ok = f"profile={expected}" in proc.stdout
+        result["checks"].append({"domain": domain, "expected": expected, "ok": ok})
+        result["ok"] = result["ok"] and ok
+    return result
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--duration", default="30m")
+    parser.add_argument("--clients", type=int, default=1000)
+    parser.add_argument("--dns-qps", type=int, default=50)
+    parser.add_argument("--profiles", default="ai,cn,default")
+    parser.add_argument("--idle-resume", action="store_true")
+    parser.add_argument("--output-json", default="")
+    args = parser.parse_args()
+
+    seconds = parse_duration(args.duration)
+    profiles = [p.strip() for p in args.profiles.split(",") if p.strip()]
+    domains = [domain for profile in profiles for domain in DOMAINS.get(profile, [])]
+    if not domains:
+        domains = DOMAINS["default"]
+
+    os.makedirs("/var/log/dnscomplex", exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    summary_path = args.output_json or f"/var/log/dnscomplex/soak-{stamp}.json"
+    log_path = summary_path[:-5] + ".log" if summary_path.endswith(".json") else f"/var/log/dnscomplex/soak-{stamp}.log"
+
+    idle_result = idle_resume() if args.idle_resume else {"ran": False, "ok": True, "checks": []}
+    deadline = time.monotonic() + seconds
+    max_workers = max(1, min(args.clients, 256))
+    qps = max(1, args.dns_qps)
+    interval = 1 / qps
+    requests = successes = failures = 0
+    profile_failures = {profile: 0 for profile in profiles}
+    latencies = []
+    health_consecutive = 0
+    health_consecutive_unhealthy_max = 0
+    futures = []
+
+    with open(log_path, "w", encoding="utf-8") as log, concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        log.write(f"start={datetime.now().isoformat()} duration={args.duration} clients={args.clients} dns_qps={args.dns_qps} profiles={args.profiles}\n")
+        next_health = time.monotonic()
+        domain_index = 0
+        while time.monotonic() < deadline:
+            domain = domains[domain_index % len(domains)]
+            domain_index += 1
+            futures.append(pool.submit(dig_domain, domain))
+            requests += 1
+            now = time.monotonic()
+            if now >= next_health:
+                h = health_status()
+                if h.get("status") == "unhealthy":
+                    health_consecutive += 1
+                    health_consecutive_unhealthy_max = max(health_consecutive_unhealthy_max, health_consecutive)
+                else:
+                    health_consecutive = 0
+                next_health = now + 10
+            time.sleep(interval)
+
+        for future in concurrent.futures.as_completed(futures):
+            item = future.result()
+            latencies.append(item["latency_ms"])
+            if item["ok"]:
+                successes += 1
+            else:
+                failures += 1
+                profile_failures[profile_for_domain(item["domain"])] = profile_failures.get(profile_for_domain(item["domain"]), 0) + 1
+            log.write(json.dumps(item, ensure_ascii=False) + "\n")
+        log.write(f"end={datetime.now().isoformat()} requests={requests} successes={successes} failures={failures}\n")
+
+    summary = {
+        "duration": args.duration,
+        "clients": args.clients,
+        "dns_qps": args.dns_qps,
+        "profiles": args.profiles,
+        "idle_resume": args.idle_resume,
+        "idle_resume_result": idle_result,
+        "requests": requests,
+        "successes": successes,
+        "failures": failures,
+        "success_ratio": round(successes / max(1, requests), 6),
+        "latency_p50_ms": round(statistics.median(latencies), 2) if latencies else 0,
+        "latency_p95_ms": round(percentile(latencies, 0.95), 2),
+        "profile_failures": profile_failures,
+        "health_consecutive_unhealthy_max": health_consecutive_unhealthy_max,
+        "log": log_path,
+        "summary": summary_path,
+        "limitation": "synthetic DNS/profile load test; not a full emulation of 1000 real mobile devices or all app traffic",
+    }
+    with open(summary_path, "w", encoding="utf-8") as fh:
+        json.dump(summary, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    print(json.dumps(summary, ensure_ascii=False))
+    return 0 if failures == 0 and idle_result.get("ok", True) and health_consecutive_unhealthy_max < 3 else 1
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+  chmod_target 0755 /usr/local/lib/dnscomplex-soak/runner.py
 }
 
 render_metrics_exporter() {
@@ -5179,9 +5896,38 @@ def dns_latency(domain):
                 return 0.0
     return 0.0
 
+def dns_sample(domains=None):
+    domains = domains or ["example.com", "cloudflare.com", "google.com", "youtube.com", "openai.com"]
+    latencies = []
+    successes = 0
+    for domain in domains:
+        proc = run(["dig", "+time=2", "+tries=1", "+stats", "A", domain, "@127.0.0.1", "-p", "53"], 5)
+        ok = proc.returncode == 0 and bool(proc.stdout.strip())
+        if ok:
+            successes += 1
+        latency = 0.0
+        for line in proc.stdout.splitlines():
+            if "Query time:" in line:
+                try:
+                    latency = float(line.split()[3])
+                except Exception:
+                    latency = 0.0
+        latencies.append(latency)
+    latencies = sorted(latencies)
+    p50 = latencies[len(latencies) // 2] if latencies else 0.0
+    p95 = latencies[min(len(latencies) - 1, int((len(latencies) - 1) * 0.95))] if latencies else 0.0
+    return {"success_ratio": successes / max(1, len(domains)), "p50": p50, "p95": p95}
+
 def nft_count(set_name):
     proc = run(["nft", "list", "set", "inet", "dnscomplex", set_name], 5)
     return len(set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", proc.stdout)))
+
+def nftset_age(profile):
+    path = f"/var/lib/dnscomplex/nftset-{profile}.last_refresh"
+    try:
+        return max(0, int(time.time() - os.stat(path).st_mtime))
+    except FileNotFoundError:
+        return -1
 
 def ipsec_up(child):
     return 1 if child + ":" in run(["swanctl", "--list-sas"], 5).stdout else 0
@@ -5200,50 +5946,120 @@ def adguard_cache_enabled():
         return 0
     return 1 if enabled or size > 0 else 0
 
+def health_status_value():
+    proc = run([DNSCOMPLEX, "health", "--json"], 20)
+    try:
+        status = json.loads(proc.stdout or "{}").get("status", "unhealthy")
+    except Exception:
+        status = "unhealthy"
+    return {"healthy": 0, "degraded": 1, "unhealthy": 2}.get(status, 2)
+
+def active_connection_metrics():
+    proc = run(["conntrack", "-L"], 10)
+    profile_counts = {"ai": 0, "cn": 0, "default": 0}
+    ipv4 = ipv6 = 0
+    for line in proc.stdout.splitlines():
+        if "ipv6" in line:
+            ipv6 += 1
+        else:
+            ipv4 += 1
+        if "mark=0x301" in line:
+            profile_counts["ai"] += 1
+        elif "mark=0x351" in line:
+            profile_counts["cn"] += 1
+        else:
+            profile_counts["default"] += 1
+    total = ipv4 + ipv6
+    return {
+        "profile_connections_ai": profile_counts["ai"],
+        "profile_connections_cn": profile_counts["cn"],
+        "profile_connections_default": profile_counts["default"],
+        "ipv6_connection_ratio": ipv6 / total if total else 0.0,
+    }
+
+def service_restart_count(name):
+    proc = run(["systemctl", "show", name, "-p", "NRestarts", "--value"], 5)
+    try:
+        return int((proc.stdout or "0").strip() or "0")
+    except Exception:
+        return 0
+
 def collect():
     cfg = parse_config()
     count = read_int("/proc/sys/net/netfilter/nf_conntrack_count")
     max_count = max(read_int("/proc/sys/net/netfilter/nf_conntrack_max", 1), 1)
+    dns = dns_sample()
+    connections = active_connection_metrics()
     data = {
         "ts": int(time.time()),
         "conntrack_count": count,
         "conntrack_max": max_count,
         "conntrack_usage_ratio": count / max_count,
-        "dns_latency_ms": dns_latency("example.com"),
+        "dns_latency_ms": dns["p50"],
+        "dns_latency_p95_ms": dns["p95"],
+        "dns_success_ratio": dns["success_ratio"],
         "ai_nftset_count": nft_count("ai4"),
         "cn_nftset_count": nft_count("cn4"),
+        "ai_nftset_age_seconds": nftset_age("ai"),
+        "cn_nftset_age_seconds": nftset_age("cn"),
         "ipsec_ai_up": ipsec_up("ai"),
         "ipsec_cn_up": ipsec_up("cn"),
+        "xray_up": service_up("xray-dnscomplex.service"),
+        "health_status": health_status_value(),
         "adguard_cache_enabled": adguard_cache_enabled(),
         "ha_mode": cfg.get("HA_MODE", "single"),
     }
+    data.update(connections)
     for service in SERVICES:
         data["service_" + service.replace(".", "_").replace("-", "_")] = service_up(service)
+        data["service_restarts_" + service.replace(".", "_").replace("-", "_")] = service_restart_count(service)
     return data
 
 def ensure_db():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
+    columns = {
+        "ts": "integer primary key",
+        "conntrack_usage_ratio": "real",
+        "dns_latency_ms": "real",
+        "dns_latency_p95_ms": "real",
+        "dns_success_ratio": "real",
+        "ai_nftset_count": "integer",
+        "cn_nftset_count": "integer",
+        "ai_nftset_age_seconds": "integer",
+        "cn_nftset_age_seconds": "integer",
+        "ipsec_ai_up": "integer",
+        "ipsec_cn_up": "integer",
+        "xray_up": "integer",
+        "health_status": "integer",
+        "adguard_cache_enabled": "integer",
+        "profile_connections_ai": "integer",
+        "profile_connections_cn": "integer",
+        "profile_connections_default": "integer",
+        "ipv6_connection_ratio": "real",
+        "schema_version": "integer",
+    }
     with sqlite3.connect(DB) as con:
-        con.execute(
-            "create table if not exists samples (ts integer primary key, conntrack_usage_ratio real, dns_latency_ms real, ai_nftset_count integer, cn_nftset_count integer, ipsec_ai_up integer, ipsec_cn_up integer, adguard_cache_enabled integer)"
-        )
+        con.execute("create table if not exists samples (ts integer primary key)")
+        existing = {row[1] for row in con.execute("pragma table_info(samples)")}
+        for name, kind in columns.items():
+            if name not in existing and name != "ts":
+                con.execute(f"alter table samples add column {name} {kind}")
 
 def sample():
     ensure_db()
     data = collect()
+    data["schema_version"] = 2
+    columns = [
+        "ts", "conntrack_usage_ratio", "dns_latency_ms", "dns_latency_p95_ms", "dns_success_ratio",
+        "ai_nftset_count", "cn_nftset_count", "ai_nftset_age_seconds", "cn_nftset_age_seconds",
+        "ipsec_ai_up", "ipsec_cn_up", "xray_up", "health_status", "adguard_cache_enabled",
+        "profile_connections_ai", "profile_connections_cn", "profile_connections_default",
+        "ipv6_connection_ratio", "schema_version",
+    ]
     with sqlite3.connect(DB) as con:
         con.execute(
-            "insert or replace into samples values (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                data["ts"],
-                data["conntrack_usage_ratio"],
-                data["dns_latency_ms"],
-                data["ai_nftset_count"],
-                data["cn_nftset_count"],
-                data["ipsec_ai_up"],
-                data["ipsec_cn_up"],
-                data["adguard_cache_enabled"],
-            ),
+            "insert or replace into samples (" + ",".join(columns) + ") values (" + ",".join(["?"] * len(columns)) + ")",
+            tuple(data.get(column, 0) for column in columns),
         )
         con.execute("delete from samples where ts < ?", (data["ts"] - 7 * 86400,))
     return data
@@ -5257,11 +6073,25 @@ def prometheus_text():
         "# HELP dnscomplex_dns_latency_ms Local DNS latency in milliseconds.",
         "# TYPE dnscomplex_dns_latency_ms gauge",
         f"dnscomplex_dns_latency_ms {data['dns_latency_ms']}",
+        "# HELP dnscomplex_dns_latency_p95_ms Local DNS p95 latency in milliseconds.",
+        "# TYPE dnscomplex_dns_latency_p95_ms gauge",
+        f"dnscomplex_dns_latency_p95_ms {data['dns_latency_p95_ms']}",
+        "# HELP dnscomplex_dns_success_ratio Local DNS synthetic success ratio.",
+        "# TYPE dnscomplex_dns_success_ratio gauge",
+        f"dnscomplex_dns_success_ratio {data['dns_success_ratio']}",
         f"dnscomplex_nftset_entries{{profile=\"ai\"}} {data['ai_nftset_count']}",
         f"dnscomplex_nftset_entries{{profile=\"cn\"}} {data['cn_nftset_count']}",
+        f"dnscomplex_nftset_age_seconds{{profile=\"ai\"}} {data['ai_nftset_age_seconds']}",
+        f"dnscomplex_nftset_age_seconds{{profile=\"cn\"}} {data['cn_nftset_age_seconds']}",
         f"dnscomplex_ipsec_up{{profile=\"ai\"}} {data['ipsec_ai_up']}",
         f"dnscomplex_ipsec_up{{profile=\"cn\"}} {data['ipsec_cn_up']}",
+        f"dnscomplex_xray_up {data['xray_up']}",
+        f"dnscomplex_health_status {data['health_status']}",
         f"dnscomplex_adguard_cache_enabled {data['adguard_cache_enabled']}",
+        f"dnscomplex_profile_connections{{profile=\"ai\"}} {data['profile_connections_ai']}",
+        f"dnscomplex_profile_connections{{profile=\"cn\"}} {data['profile_connections_cn']}",
+        f"dnscomplex_profile_connections{{profile=\"default\"}} {data['profile_connections_default']}",
+        f"dnscomplex_ipv6_connection_ratio {data['ipv6_connection_ratio']}",
     ]
     for service in SERVICES:
         key = "service_" + service.replace(".", "_").replace("-", "_")
@@ -5372,12 +6202,40 @@ groups:
         annotations:
           summary: dnscomplex conntrack usage is critical
       - alert: DnscomplexDnsLatencyHigh
-        expr: dnscomplex_dns_latency_ms > 500
+        expr: dnscomplex_dns_latency_p95_ms > 500
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: dnscomplex DNS latency is high
+          summary: dnscomplex DNS p95 latency is high
+      - alert: DnscomplexDnsSuccessLow
+        expr: dnscomplex_dns_success_ratio < 0.98
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: dnscomplex DNS synthetic success ratio is low
+      - alert: DnscomplexNftsetStale
+        expr: dnscomplex_nftset_age_seconds > 7200
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: dnscomplex AI/CN nftset refresh is stale
+      - alert: DnscomplexHealthUnhealthy
+        expr: dnscomplex_health_status >= 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: dnscomplex health is unhealthy
+      - alert: DnscomplexDefaultIpv6Broken
+        expr: dnscomplex_ipv6_connection_ratio == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: dnscomplex has no observed IPv6 default traffic
       - alert: DnscomplexIpsecDown
         expr: dnscomplex_ipsec_up == 0
         for: 3m
@@ -5445,10 +6303,13 @@ CONFIG_KEYS = [
     "AI_SUPPORT_DOMAINS",
     "AI_NFTSET_REFRESH_DOMAINS",
     "CN_VIDEO_SOURCES",
+    "AI_SAMPLE_DOMAINS",
+    "CN_SAMPLE_DOMAINS",
     "CN_NFTSET_REFRESH_DOMAINS",
     "CN_STATIC_A_OVERRIDES",
     "CN_OVERRIDE_PROBE_DOMAINS",
     "CN_OVERRIDE_PROBE_RESOLVERS",
+    "LOCAL_DOMAIN_IPV6_POLICY",
     "SINGBOX_SOCKS_LISTEN",
     "SINGBOX_SOCKS_PORT",
     "SINGBOX_HTTP_LISTEN",
@@ -5459,6 +6320,8 @@ CONFIG_KEYS = [
     "XRAY_CN_SOCKS_PORT",
     "AI_EGRESS_MODE",
     "CN_EGRESS_MODE",
+    "AI_QUIC_POLICY",
+    "CN_QUIC_POLICY",
     "AI_XRAY_URI",
     "CN_XRAY_URI",
     "AI_XRAY_OUTBOUND_JSON",
@@ -5517,6 +6380,9 @@ HTML = r"""<!doctype html>
     label { color:var(--muted); font-size:12px; }
     input, textarea, select { width:100%; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--text); padding:8px; }
     textarea { min-height:74px; resize:vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .config-input-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px 16px; margin-top:12px; }
+    .config-input-grid .field { margin-bottom:0; }
+    .config-input-grid label { overflow-wrap:anywhere; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
     th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top; }
     th { color:var(--muted); font-weight:600; }
@@ -5589,6 +6455,15 @@ HTML = r"""<!doctype html>
       <section>
         <div class="section-head"><h2>需要處理</h2><button onclick="runAction('doctor')">執行 Doctor</button></div>
         <div id="warningList" class="warning-list"></div>
+      </section>
+      <section>
+        <div class="section-head"><h2>營運健康中心</h2><button onclick="loadOpsHealth()">刷新</button></div>
+        <div id="opsHealth" class="warning-list"></div>
+        <div class="row" style="margin-top:12px">
+          <button onclick="runSmokeSoak()">執行 1 分鐘 smoke soak</button>
+          <button onclick="loadSoakStatus()">查看最近 soak summary</button>
+        </div>
+        <pre id="soakSummary"></pre>
       </section>
       <section>
         <h2>我想做...</h2>
@@ -5685,7 +6560,7 @@ HTML = r"""<!doctype html>
         <h2>Domain / Geosite</h2>
         <div class="help-card">
           <h3>點樣用</h3>
-          <p>輸入 <b>domain</b> 例如 <code>example.com</code> 會加入自訂分流；輸入 <b>geosite source</b> 例如 <code>openai</code>、<code>anthropic</code>、<code>meta</code>、<code>bilibili</code> 會加入或移除內建來源。移除後會自動重建 SRS 並刷新 IP 快取。</p>
+          <p>輸入 <b>domain</b> 例如 <code>example.com</code> 會加入自訂分流；輸入 <b>geosite source</b> 例如 <code>openai</code>、<code>anthropic</code>、<code>bilibili</code> 會加入或移除內建來源。Meta AI 預設只用 <code>meta.ai</code>；不要加入 <code>meta</code>，否則 Facebook/Instagram 也會走 AI 出口。</p>
           <ul class="mini-list">
             <li>AI：OpenAI / Claude / Meta 等，只回 IPv4，按出口模式走 IPsec 或 Xray。</li>
             <li>CN：Youku / Bilibili / iQiyi 等，只回 IPv4，按出口模式走 IPsec 或 Xray。</li>
@@ -5694,7 +6569,7 @@ HTML = r"""<!doctype html>
         </div>
         <div class="grid">
           <div class="field"><label>分類</label><select id="domainProfile"><option value="ai">AI</option><option value="cn">CN</option></select></div>
-          <div class="field"><label>SRS source / geosite / domain</label><textarea id="domainValue" placeholder="例如 meta 或 example.com；可逐行批量貼上"></textarea><div class="form-hint">想移除 Meta：分類揀 AI，輸入 meta，按「移除」。</div></div>
+          <div class="field"><label>SRS source / geosite / domain</label><textarea id="domainValue" placeholder="例如 meta.ai 或 example.com；可逐行批量貼上"></textarea><div class="form-hint">Meta AI 用 meta.ai；如果見到 AI 內建來源有 meta，建議移除。</div></div>
         </div>
         <div class="row"><button class="primary" onclick="rulesDomain('add')">新增</button><button class="danger" onclick="rulesDomain('remove')">移除</button><button onclick="rulesRebuild()">只重建並套用 SRS</button><button onclick="traceDomainValue(domainValue.value.split(/\\s+/)[0])">Trace 生效路徑</button></div>
         <div class="output-note">操作結果會顯示在下方；成功後會自動刷新「目前清單」。</div>
@@ -5733,13 +6608,32 @@ HTML = r"""<!doctype html>
             <div class="field"><label>每日時間 HH:MM</label><input id="updateTime"></div>
             <button onclick="setUpdateTime()">更新時間</button>
           </div>
+          <div>
+            <h2>管理界面帳號密碼</h2>
+            <p class="muted">用戶名固定為 admin；修改後下一次操作需要重新登入。</p>
+            <div class="field"><label>新密碼</label><input id="webPassword" type="password" autocomplete="new-password"></div>
+            <button onclick="setWebPassword()">更新管理密碼</button>
+          </div>
+          <div>
+            <h2>MSS 狀態</h2>
+            <p class="muted">MSS 會寫入 config.env 及 nftables；按校準後兩邊會同步。</p>
+            <div class="field"><label>目前 IPSEC_TCP_MSS</label><input id="mssCurrent" readonly></div>
+            <button onclick="mssCalibrate()">校準並套用 MSS</button>
+          </div>
+          <div>
+            <h2>本機 .local / Codex 連線</h2>
+            <p class="muted">MacBookAir .local 應跟 mDNS 或 RouterOS DHCP/DNS；此處只適合固定基建主機，不要用來寫死會改 IP 的 Mac。</p>
+            <div class="field"><label>Host.local</label><input id="localHostName" placeholder="example-host.local"></div>
+            <div class="field"><label>IPv4</label><input id="localHostIp" placeholder="192.0.2.10"></div>
+            <div class="row"><button onclick="setLocalHost()">套用本機名稱</button><button onclick="testLocalName()">測試本機名稱</button></div>
+          </div>
         </div>
       </section>
       <section><h2>操作結果</h2><pre id="configOutput"></pre></section>
       <section class="config-advanced">
         <details>
           <summary>進階原始 config.env</summary>
-          <div id="configForm" class="grid"></div>
+          <div id="configGroups" class="config-groups"></div>
         </details>
       </section>
     </div>
@@ -5889,6 +6783,29 @@ function renderWarnings(warnings) {
   }
   host.innerHTML = warnings.map(w => `<div class="warning-item"><b>${escapeHtml(w.title)}</b><br><span>${escapeHtml(w.detail)}</span>${w.next ? `<br><small><b>建議下一步：</b>${escapeHtml(w.next)}</small>` : ''}</div>`).join('');
 }
+function renderOpsHealth(data) {
+  const host = document.getElementById('opsHealth');
+  if (!host) return;
+  const checks = data.checks || [];
+  const failed = checks.filter(c => c.status !== 'ok').slice(0, 8);
+  if (!failed.length) {
+    host.innerHTML = `<div class="summary-card ok"><small>Health</small><strong>${escapeHtml(data.status || 'healthy')}</strong><small>所有核心檢查暫時正常。</small></div>`;
+    return;
+  }
+  host.innerHTML = failed.map(c => `<div class="warning-item"><b>${escapeHtml(c.name)}</b> <span class="badge ${badgeClass(c.status === 'fail' ? 'bad' : 'warn')}">${escapeHtml(c.status)}</span><br><span>${escapeHtml(c.detail || '')}</span><br><small><b>建議：</b>${escapeHtml(c.recommended_action || '')}</small></div>`).join('');
+}
+async function loadOpsHealth() {
+  const data = await api('/api/ops/health');
+  renderOpsHealth(data);
+}
+async function loadSoakStatus() {
+  const data = await api('/api/ops/soak/status');
+  document.getElementById('soakSummary').textContent = outputText(data);
+}
+async function runSmokeSoak() {
+  await runWithOutput('soakSummary', () => api('/api/ops/soak/run', {method:'POST', body: JSON.stringify({duration:'1m', clients:50, dns_qps:20, profiles:'ai,cn,default'})}));
+  await loadSoakStatus();
+}
 function renderProfiles(profiles, target='profileCards') {
   const host = document.getElementById(target);
   if (!host) return;
@@ -5955,9 +6872,9 @@ async function loadMetrics() {
   const data = await api('/api/metrics/history');
   const points = data.samples || [];
   drawChart('conntrackChart', points, 'conntrack_usage_ratio', 'conntrack usage', '#0b5cad');
-  drawChart('latencyChart', points, 'dns_latency_ms', 'DNS latency ms', '#9a6700');
-  drawChart('profileChart', points, 'ai_nftset_count', 'AI nftset entries', '#137a3a');
-  drawChart('ipsecChart', points, 'ipsec_ai_up', 'AI IPsec up', '#b42318');
+  drawChart('latencyChart', points, 'dns_latency_p95_ms', 'DNS p95 latency ms', '#9a6700');
+  drawChart('profileChart', points, 'profile_connections_ai', 'AI active connections', '#137a3a');
+  drawChart('ipsecChart', points, 'health_status', 'health status 0/1/2', '#b42318');
 }
 async function loadConnections() {
   const data = await api('/api/connections');
@@ -5966,27 +6883,65 @@ async function loadConnections() {
 }
 async function loadConfig() {
   const data = await api('/api/config');
-  const form = document.getElementById('configForm');
-  form.innerHTML = '';
-  configKeys.forEach(k => {
-    const wrap = document.createElement('div');
-    wrap.className = 'field';
-    const input = document.createElement((data[k] || '').length > 70 ? 'textarea' : 'input');
-    input.id = 'cfg_' + k;
-    input.value = data[k] || '';
-    wrap.innerHTML = `<label>${k}</label>`;
-    wrap.appendChild(input);
-    form.appendChild(wrap);
-  });
+  renderConfigGroups(data);
   document.getElementById('socksListen').value = data.SINGBOX_SOCKS_LISTEN || '';
   document.getElementById('socksPort').value = data.SINGBOX_SOCKS_PORT || '';
   document.getElementById('updateTime').value = data.DNSCOMPLEX_UPDATE_TIME || '';
+  document.getElementById('mssCurrent').value = data.IPSEC_TCP_MSS || '';
   aiEgressMode.value = data.AI_EGRESS_MODE || 'ipsec';
   cnEgressMode.value = data.CN_EGRESS_MODE || 'ipsec';
   aiXrayUri.value = data.AI_XRAY_URI || '';
   cnXrayUri.value = data.CN_XRAY_URI || '';
   aiXrayJson.value = data.AI_XRAY_OUTBOUND_JSON || '';
   cnXrayJson.value = data.CN_XRAY_OUTBOUND_JSON || '';
+}
+function configGroupName(key) {
+  if (key.includes('IPSEC') || key.includes('MSS')) return 'IPsec / MSS';
+  if (key.includes('DNS') || key.includes('SMARTDNS') || key.includes('ADGUARD')) return 'DNS / 去廣告';
+  if (key.includes('XRAY') || key.includes('EGRESS')) return 'Xray / 出口模式';
+  if (key.includes('GEOSITE') || key.includes('NFTSET') || key.includes('SAMPLE') || key.includes('SUPPORT')) return '分流清單';
+  if (key.includes('SOCKS') || key.includes('HTTP') || key.includes('WEB')) return '接入 / 管理界面';
+  if (key.includes('UPDATE') || key.includes('GITHUB')) return '更新';
+  if (key.includes('HA_') || key.includes('PROMETHEUS') || key.includes('METRICS')) return 'HA / 監控';
+  if (key.includes('LAN') || key.includes('WAN') || key.includes('ROUTEROS') || key.includes('TRANSIT')) return '網絡 / RouterOS';
+  return '進階';
+}
+function renderConfigGroups(data) {
+  const host = document.getElementById('configGroups');
+  if (!host) return;
+  const groups = {};
+  configKeys.forEach(key => {
+    const group = configGroupName(key);
+    if (!groups[group]) groups[group] = [];
+    groups[group].push(key);
+  });
+  host.innerHTML = '';
+  Object.entries(groups).forEach(([name, keys]) => {
+    const details = document.createElement('details');
+    details.className = 'domain-box';
+    const summary = document.createElement('summary');
+    summary.textContent = name;
+    details.appendChild(summary);
+
+    const grid = document.createElement('div');
+    grid.className = 'config-input-grid';
+    keys.forEach(key => {
+      const wrap = document.createElement('div');
+      wrap.className = 'field';
+      const label = document.createElement('label');
+      label.textContent = key;
+      const value = data[key] || '';
+      const input = document.createElement(value.length > 70 ? 'textarea' : 'input');
+      input.id = 'cfg_' + key;
+      input.setAttribute('data-config-key', key);
+      input.value = value;
+      wrap.appendChild(label);
+      wrap.appendChild(input);
+      grid.appendChild(wrap);
+    });
+    details.appendChild(grid);
+    host.appendChild(details);
+  });
 }
 async function loadDomains() {
   const data = await api('/api/domains');
@@ -6003,7 +6958,9 @@ function renderDomainSections(sections) {
 }
 async function saveConfig() {
   const payload = {};
-  configKeys.forEach(k => payload[k] = document.getElementById('cfg_' + k).value);
+  document.querySelectorAll('[data-config-key]').forEach(input => {
+    payload[input.getAttribute('data-config-key')] = input.value;
+  });
   await runWithOutput('configOutput', () => api('/api/config', {method:'POST', body: JSON.stringify(payload)}));
   await refreshAll();
 }
@@ -6052,6 +7009,20 @@ async function setUpdateTime() {
   await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'set-update-time', value:updateTime.value})}));
   await refreshAll();
 }
+async function setWebPassword() {
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'set-web-password', password:webPassword.value})}));
+  webPassword.value = '';
+}
+async function mssCalibrate() {
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'mss-calibrate'})}));
+  await refreshAll();
+}
+async function setLocalHost() {
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'set-local-host', host:localHostName.value, ip:localHostIp.value})}));
+}
+async function testLocalName() {
+  await runWithOutput('configOutput', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'test-local-name', host:localHostName.value})}));
+}
 async function traceDomainAction() {
   await runWithOutput('output', () => api('/api/action', {method:'POST', body: JSON.stringify({action:'trace-domain', value:traceDomain.value})}));
 }
@@ -6083,7 +7054,7 @@ async function runUpdate() {
 async function supportBundle() {
   await runWithOutput('diagnosticsOutput', () => api('/api/support-bundle', {method:'POST', body: JSON.stringify({include_logs:bundleLogs.value})}));
 }
-async function refreshAll() { await Promise.all([loadUiSummary(), loadStatus(), loadTraffic(), loadConnections(), loadConfig(), loadDomains(), loadMetrics()]); }
+async function refreshAll() { await Promise.all([loadUiSummary(), loadOpsHealth(), loadSoakStatus(), loadStatus(), loadTraffic(), loadConnections(), loadConfig(), loadDomains(), loadMetrics()]); }
 refreshAll().catch(err => showOutput(String(err)));
 </script>
 </body>
@@ -6322,7 +7293,7 @@ def domains_model():
         "sections": [
             {
                 "title": "AI 內建來源",
-                "help": "例如 openai、anthropic、meta；輸入同名 source 後按移除會更新 config。",
+                "help": "例如 openai、anthropic；Meta AI 使用 AI 支援 domain 的 meta.ai，避免 Facebook/Instagram 走 AI。",
                 "items": read_list_file("/var/lib/dnscomplex/geosite/ai.sources"),
             },
             {
@@ -6567,11 +7538,12 @@ def metrics_history(limit=720):
     path = "/var/lib/dnscomplex/metrics.sqlite3"
     if not os.path.exists(path):
         return []
+    metrics_current()
     try:
         with sqlite3.connect(path) as con:
             con.row_factory = sqlite3.Row
             rows = con.execute(
-                "select ts, conntrack_usage_ratio, dns_latency_ms, ai_nftset_count, cn_nftset_count, ipsec_ai_up, ipsec_cn_up, adguard_cache_enabled from samples order by ts desc limit ?",
+                "select ts, conntrack_usage_ratio, dns_latency_ms, dns_latency_p95_ms, dns_success_ratio, ai_nftset_count, cn_nftset_count, ai_nftset_age_seconds, cn_nftset_age_seconds, ipsec_ai_up, ipsec_cn_up, xray_up, health_status, adguard_cache_enabled, profile_connections_ai, profile_connections_cn, profile_connections_default, ipv6_connection_ratio, schema_version from samples order by ts desc limit ?",
                 (limit,),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
@@ -6636,6 +7608,27 @@ def ui_summary():
         "cache_state": "ok" if cfg.get("ADGUARD_DNS_CACHE_MODE", "off") == "off" else "warn",
     }
     return {"cards": cards, "warnings": warnings, "profiles": profiles, "dns": dns}
+
+def ops_health():
+    raw = shell_output([DNSCOMPLEX, "health", "--json"], 20)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"status": "unhealthy", "failure_reasons": [raw], "recommended_actions": ["run dnscomplex doctor"]}
+
+def latest_soak_summary():
+    import glob
+    files = sorted(glob.glob("/var/log/dnscomplex/soak-*.json"), key=os.path.getmtime, reverse=True)
+    if not files:
+        return {"ok": True, "latest": None, "message": "no soak summary found"}
+    path = files[0]
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            data = json.load(fh)
+        data["path"] = path
+        return {"ok": True, "latest": data}
+    except Exception as exc:
+        return {"ok": False, "latest": {"path": path, "error": str(exc)}}
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -6808,6 +7801,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/ui/summary":
             self.send_json(ui_summary())
             return
+        if self.path == "/api/ops/health":
+            self.send_json(ops_health())
+            return
+        if self.path == "/api/ops/soak/status":
+            self.send_json(latest_soak_summary())
+            return
         if self.path == "/api/wizard/schema":
             self.send_json(wizard_schema())
             return
@@ -6889,6 +7888,21 @@ class Handler(BaseHTTPRequestHandler):
                 result["output"] = redact_text(result.get("output", ""))
                 self.send_json(result)
                 return
+            if self.path == "/api/ops/soak/run":
+                args = [
+                    DNSCOMPLEX,
+                    "soak",
+                    "--duration", str(payload.get("duration", "1m")),
+                    "--clients", str(payload.get("clients", 50)),
+                    "--dns-qps", str(payload.get("dns_qps", 20)),
+                    "--profiles", str(payload.get("profiles", "ai,cn,default")),
+                ]
+                if payload.get("idle_resume"):
+                    args.append("--idle-resume")
+                result = run(args, 7200)
+                result["output"] = redact_text(result.get("output", ""))
+                self.send_json(result)
+                return
             if self.path == "/api/action":
                 action = payload.get("action", "")
                 if action in {"test", "fix", "doctor", "test-dns", "test-ipsec", "refresh-nftsets", "refresh-cn-overrides", "update-geosite", "update-software", "backup", "mss-calibrate"}:
@@ -6926,6 +7940,16 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_json({"ok": False, "output": "invalid profile"}, 400)
                         return
                     self.send_json(run([DNSCOMPLEX, "set-ipsec", profile, payload.get("user", ""), payload.get("password", "")], 180))
+                    return
+                if action == "set-web-password":
+                    password = payload.get("password", "")
+                    self.send_json(run([DNSCOMPLEX, "set-web-password", password], 120))
+                    return
+                if action == "set-local-host":
+                    self.send_json(run([DNSCOMPLEX, "set-local-host", payload.get("host", ""), payload.get("ip", "")], 120))
+                    return
+                if action == "test-local-name":
+                    self.send_json(run([DNSCOMPLEX, "test-local-name", payload.get("host", "")], 120))
                     return
                 if action == "set-update-time":
                     value = payload.get("value", "")
@@ -7019,14 +8043,17 @@ enable_services() {
 
 render_all() {
   save_runtime_config
+  disable_systemd_ssh_generator
   render_network
   apply_runtime_network_settings
   resolve_default_ipv6_mode
   render_geosite_seeds
+  render_local_hosts
   render_smartdns
   render_adguard
   render_adguard_service
   render_swanctl
+  render_strongswan_resolve_plugin
   render_ipsec_ca_store
   render_xray_support
   render_singbox
@@ -7034,6 +8061,7 @@ render_all() {
   render_ipsec_services
   render_routeros
   render_management_script
+  render_soak_runner
   render_metrics_exporter
   render_web_interface
 }

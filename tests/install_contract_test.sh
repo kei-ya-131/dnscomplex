@@ -10,6 +10,13 @@ assert_file() {
   [[ -f "$1" ]] || fail "missing file: $1"
 }
 
+assert_symlink_target() {
+  local path=$1
+  local expected=$2
+  [[ -L "$path" ]] || fail "missing symlink: $path"
+  [[ "$(readlink "$path")" == "$expected" ]] || fail "unexpected symlink target for $path: $(readlink "$path")"
+}
+
 assert_contains() {
   local file=$1
   local needle=$2
@@ -58,10 +65,17 @@ EOF
 
 DNSCOMPLEX_ROOT="$tmpdir/root" bash "$repo_root/install.sh" --dry-run --config "$tmpdir/config.env"
 
+cat "$tmpdir/config.env" >"$tmpdir/old-ai-samples.env"
+cat >>"$tmpdir/old-ai-samples.env" <<'EOF'
+AI_SAMPLE_DOMAINS='openai.com anthropic.com claude.ai meta.com facebook.com instagram.com whatsapp.com threads.net'
+EOF
+DNSCOMPLEX_ROOT="$tmpdir/root-old-ai-samples" bash "$repo_root/install.sh" --dry-run --config "$tmpdir/old-ai-samples.env"
+
 assert_file "$tmpdir/root/etc/sing-box/config.json"
 assert_file "$tmpdir/root/etc/smartdns/smartdns.conf"
 assert_file "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml"
 assert_file "$tmpdir/root/etc/swanctl/swanctl.conf"
+assert_file "$tmpdir/root/etc/strongswan.d/charon/resolve.conf"
 assert_file "$tmpdir/root/etc/nftables.d/dnscomplex.nft"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.timer"
@@ -72,10 +86,12 @@ assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.timer"
 assert_file "$tmpdir/root/etc/systemd/system/xray-dnscomplex.service"
+assert_symlink_target "$tmpdir/root/etc/systemd/system-generators/systemd-ssh-generator" /dev/null
 assert_file "$tmpdir/root/usr/local/sbin/dnscomplex"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-xray/render.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py"
+assert_file "$tmpdir/root/usr/local/lib/dnscomplex-soak/runner.py"
 assert_file "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml"
 assert_file "$tmpdir/root/usr/local/etc/xray/config.json"
 assert_file "$tmpdir/root/var/lib/dnscomplex/routeros.rsc"
@@ -108,7 +124,7 @@ assert_contains "$tmpdir/root/etc/sing-box/config.json" '"mask-h2.icloud.com"'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" '"gateway.icloud.com"'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-ai-openai.srs'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-ai-anthropic.srs'
-assert_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-ai-meta.srs'
+assert_not_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-ai-meta.srs'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-ai-support.srs'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" 'geosite-cn-video.srs'
 assert_not_contains "$tmpdir/root/etc/sing-box/config.json" '"strategy": "ipv6_only"'
@@ -154,6 +170,9 @@ assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'cache-checkpoint-time
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'serve-expired-ttl 259200'
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'serve-expired-reply-ttl 3'
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'serve-expired-prefetch-time 21600'
+assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'mdns-lookup yes'
+assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'hosts-file /etc/dnscomplex/local-hosts'
+assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'address /local/#6'
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'address /-.youku.com/47.246.99.254'
 assert_not_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'address /youku.com/47.246.99.254'
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_OVERRIDE_PROBE_DOMAINS='youku.com=youku.com,www.youku.com'"
@@ -180,6 +199,7 @@ assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'eap-mschapv2'
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'dpd_delay'
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'local_addrs ='
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'id = pointtoserver.com'
+assert_contains "$tmpdir/root/etc/strongswan.d/charon/resolve.conf" 'load = no'
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "IPSEC_REMOTE_ID='pointtoserver.com'"
 assert_file "$tmpdir/root/etc/swanctl/x509ca/README.dnscomplex"
 
@@ -187,10 +207,12 @@ assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'type nat hook prer
 assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'tcp option maxseg size set 1200'
 assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } accept'
 assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'udp dport { 784, 853, 8853 } drop'
-assert_not_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'dnscomplex-ai-block-quic'
-assert_not_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'dnscomplex-cn-block-quic'
-assert_not_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'dnscomplex-ai-output-block-quic'
-assert_not_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'dnscomplex-cn-output-block-quic'
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_QUIC_POLICY='reject'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_QUIC_POLICY='reject'"
+assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'udp dport 443 counter reject with icmp type port-unreachable comment "dnscomplex-ai-quic-reject"'
+assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'udp dport 443 counter reject with icmp type port-unreachable comment "dnscomplex-cn-quic-reject"'
+assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'udp dport 443 counter reject with icmp type port-unreachable comment "dnscomplex-ai-quic-reject-output"'
+assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'udp dport 443 counter reject with icmp type port-unreachable comment "dnscomplex-cn-quic-reject-output"'
 assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'ct mark set 0x2024 meta mark set 0x301 counter comment "dnscomplex-ai-preroute"'
 assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'ct mark set 0x2024 meta mark set 0x351 counter comment "dnscomplex-cn-preroute"'
 assert_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'chain prerouting_policy_restore'
@@ -224,13 +246,41 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set Xray URI/JSON befo
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'AI/CN egress are not using IPsec; skipping IPsec test'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'AI_EGRESS_MODE:-ipsec'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'CN_EGRESS_MODE:-ipsec'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'AI_QUIC_POLICY:=reject'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'CN_QUIC_POLICY:=reject'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'LOCAL_DOMAIN_IPV6_POLICY:=ipv4_only'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'xray run -test -format=json'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'write_nftables_runtime_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nft -c -f /etc/nftables.conf'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'flush_quic_conntrack_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'conntrack -D -p udp --dport 443'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'systemctl restart xray-dnscomplex sing-box'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'migrate_config_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'config_missing_keys'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'doctor_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'health_json_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'health_checks_json'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '"checks"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '"failure_reasons"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '"recommended_actions"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'test_socks_listener'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'singbox-socks-listener'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'smartdns-ai-listener'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nftset-ai-freshness'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'default-ipv6-connectivity'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'metrics_sample_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'soak_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '--output-json'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '/usr/local/lib/dnscomplex-soak/runner.py'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'soak_trace_expect chatgpt.com AI'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'soak_trace_expect youku.com CN'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'soak_trace_expect facebook.com default'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'idle-resume nftset recovery'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'local-hosts idle-resume'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-soak/runner.py" '"success_ratio"'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-soak/runner.py" '"latency_p95_ms"'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-soak/runner.py" '"profile_failures"'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-soak/runner.py" 'synthetic DNS/profile load test'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'wizard_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'validate_config_file_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'render_config_cmd'
@@ -251,9 +301,19 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'status_cmd "$@" ;;'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'status [--verbose]'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set_socks_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set_ipsec_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set_web_password_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set_update_time_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'refresh_cn_overrides_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'refresh_nftsets_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'mss_recommended_value'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'applied IPSEC_TCP_MSS'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nftset refresh failed after MSS calibration'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set-local-host'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'test-local-name'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'remove_macbook_air_local_override'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'MacBookAir .local addresses should follow mDNS or RouterOS DHCP/DNS'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'Dpkg::Options::=--force-confold'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'public_ipv4'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'remove_list_item'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'add_list_item'
@@ -300,6 +360,12 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'domain_regex'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'write_env_var DEFAULT_DNS_STRATEGY "$DEFAULT_DNS_STRATEGY"'
 # shellcheck disable=SC2016
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'write_env_var DEFAULT_IPV6_MODE "$DEFAULT_IPV6_MODE"'
+# shellcheck disable=SC2016
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'write_env_var AI_QUIC_POLICY "$AI_QUIC_POLICY"'
+# shellcheck disable=SC2016
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'write_env_var CN_QUIC_POLICY "$CN_QUIC_POLICY"'
+# shellcheck disable=SC2016
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'write_env_var LOCAL_DOMAIN_IPV6_POLICY "$LOCAL_DOMAIN_IPV6_POLICY"'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'systemctl reset-failed dnscomplex-update.service'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '/var/log/dnscomplex/update-'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'github_latest_release_tag'
@@ -336,6 +402,9 @@ assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "PROMETHEUS_MODE='expor
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "XRAY_ENABLED='1'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_EGRESS_MODE='ipsec'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_EGRESS_MODE='ipsec'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_QUIC_POLICY='reject'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_QUIC_POLICY='reject'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "LOCAL_DOMAIN_IPV6_POLICY='ipv4_only'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "XRAY_LISTEN_HOST='127.0.0.1'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "XRAY_AI_SOCKS_PORT='16054'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "XRAY_CN_SOCKS_PORT='16055'"
@@ -344,18 +413,45 @@ assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_XRAY_URI=''"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_XRAY_OUTBOUND_JSON=''"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_XRAY_OUTBOUND_JSON=''"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_NFTSET_REFRESH_DOMAINS='chatgpt.com ios.chat.openai.com openai.com api.openai.com oaistatic.com oaiusercontent.com files.oaiusercontent.com cdn.oaistatic.com persistent.oaistatic.com cdn.openai.com anthropic.com claude.ai claude.com meta.ai'"
-assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_NFTSET_REFRESH_DOMAINS='bilibili.com iqiyi.com youku.com douyin.com kuaishou.com acfun.cn mgtv.com v.qq.com qq.com tv.cctv.com'"
-assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_SUPPORT_DOMAINS=''"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_NFTSET_REFRESH_DOMAINS='bilibili.com iqiyi.com youku.com douyin.com kuaishou.com acfun.cn mgtv.com v.qq.com tv.cctv.com'"
+assert_not_contains "$tmpdir/root/etc/dnscomplex/config.env" " v.qq.com qq.com "
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_SUPPORT_DOMAINS='meta.ai'"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "AI_SAMPLE_DOMAINS='openai.com anthropic.com claude.ai meta.ai'"
+assert_contains "$tmpdir/root/etc/dnscomplex/ai.seed-domains" 'meta.ai'
+assert_contains "$tmpdir/root/etc/dnscomplex/ai.domains" 'meta.ai'
+assert_contains "$tmpdir/root/etc/dnscomplex/ai.domains" 'chatgpt.com'
+assert_not_contains "$tmpdir/root/etc/dnscomplex/ai.seed-domains" 'facebook.com'
+assert_not_contains "$tmpdir/root/etc/dnscomplex/ai.seed-domains" 'instagram.com'
+assert_not_contains "$tmpdir/root/etc/dnscomplex/ai.domains" 'facebook.com'
+assert_not_contains "$tmpdir/root/etc/dnscomplex/ai.domains" 'instagram.com'
+assert_contains "$tmpdir/root-old-ai-samples/etc/dnscomplex/config.env" "AI_SAMPLE_DOMAINS='openai.com anthropic.com claude.ai meta.ai'"
+assert_not_contains "$tmpdir/root-old-ai-samples/etc/dnscomplex/config.env" 'facebook.com'
+assert_not_contains "$tmpdir/root-old-ai-samples/etc/dnscomplex/ai.seed-domains" 'facebook.com'
+assert_not_contains "$tmpdir/root-old-ai-samples/etc/dnscomplex/ai.domains" 'instagram.com'
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "SING_GEOSITE_RULESET_BASE_URL='https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set'"
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'SagerNet/sing-box'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'AdguardTeam/AdGuardHome'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'pymumu/smartdns'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'XTLS/Xray-core'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'github_latest_asset_url'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'migrate_ai_meta_sample_domains'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'sync_domain_seed_files_from_config'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'flush_policy_nftsets_cmd'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nft flush set inet dnscomplex ai4'
+refresh_nftsets_body=$(awk '
+  /^refresh_nftsets_cmd\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$tmpdir/root/usr/local/sbin/dnscomplex")
+case "$refresh_nftsets_body" in
+  *flush_policy_nftsets_cmd*refresh_nftset_group*) ;;
+  *) fail "refresh-nftsets must flush policy nftsets before repopulating them" ;;
+esac
 
 assert_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources" 'openai'
 assert_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources" 'anthropic'
-assert_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources" 'meta'
+assert_not_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources" 'meta'
+assert_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai-support.sources" 'meta.ai'
 assert_not_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai-support.sources" 'api.revenuecat.com'
 assert_not_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai-support.sources" 'api.statsig.com'
 assert_not_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai-support.sources" 'events.statsigapi.net'
@@ -386,7 +482,8 @@ assert_contains "$repo_root/install.sh" 'systemctl enable --now smartdns AdGuard
 assert_contains "$repo_root/install.sh" 'systemctl enable --now dnscomplex-web'
 assert_contains "$repo_root/install.sh" 'systemctl enable --now dnscomplex-metrics'
 assert_contains "$repo_root/install.sh" 'dnscomplex-metrics-sample.timer'
-assert_contains "$repo_root/install.sh" 'apt-get upgrade -y'
+assert_contains "$repo_root/install.sh" 'Dpkg::Options::=--force-confold'
+assert_contains "$repo_root/install.sh" 'upgrade -y'
 assert_contains "$repo_root/install.sh" 'update_release_if_needed'
 assert_contains "$repo_root/install.sh" 'conntrack'
 assert_contains "$repo_root/install.sh" 'dnscomplex update-geosite'
@@ -405,6 +502,8 @@ assert_not_contains "$repo_root/install.sh" 'systemd-resolved cron dnsutils'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'ThreadingHTTPServer'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'CONFIG_KEYS'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'AI_EGRESS_MODE'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'AI_QUIC_POLICY'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'LOCAL_DOMAIN_IPV6_POLICY'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'AI_XRAY_URI'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'set-egress'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'set-xray-uri'
@@ -445,6 +544,20 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/connect
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'active_connections'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'dns_answer_ips'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'set-update-time'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'set-web-password'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '管理界面帳號密碼'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'MSS 狀態'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '校準並套用 MSS'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '本機 .local / Codex 連線'
+assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '可把 Mac 的 LAN IP 綁定到 .local 名稱'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'renderConfigGroups'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'config-groups'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'data-config-key'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'config-input-grid'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" "querySelectorAll('[data-config-key]')"
+assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'id="configForm"'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '"AI_SAMPLE_DOMAINS"'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '"CN_SAMPLE_DOMAINS"'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'update-software'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'last_update_log'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'domain_source'
@@ -463,6 +576,10 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '進階'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '上網測試'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'DNS 去廣告'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '服務狀態'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '營運健康中心'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/ops/health'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/ops/soak/status'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '/api/ops/soak/run'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'summaryCards'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'taskGrid'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'profileCards'
@@ -486,6 +603,13 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'self.send_he
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'send_auth_challenge'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'drawChart'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '<canvas'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 'dnscomplex_health_status'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 'dnscomplex_dns_latency_p95_ms'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 'dnscomplex_dns_success_ratio'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 'dnscomplex_nftset_age_seconds'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 'dnscomplex_profile_connections'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 'dnscomplex_ipv6_connection_ratio'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 'schema_version'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-web.service" 'ExecStart=/usr/bin/python3 /usr/local/lib/dnscomplex-web/app.py'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics.service" 'ExecStart=/usr/bin/python3 /usr/local/lib/dnscomplex-metrics/exporter.py'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.service" 'ExecStart=/usr/local/sbin/dnscomplex metrics-sample'
@@ -493,6 +617,10 @@ assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.timer
 assert_contains "$tmpdir/root/etc/systemd/system/xray-dnscomplex.service" 'ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json'
 assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexConntrackHigh'
 assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexAdGuardCacheEnabled'
+assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexHealthUnhealthy'
+assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexDnsSuccessLow'
+assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexNftsetStale'
+assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexDefaultIpv6Broken'
 
 secret_probe="$tmpdir/secret-probe.txt"
 cat >"$secret_probe" <<'EOF'
@@ -501,7 +629,7 @@ AI_IPSEC_USERNAME=secret-user
 CN_IPSEC_PASSWORD=cn-super-secret
 AI_XRAY_OUTBOUND_JSON={"password":"json-secret","server":"203.0.113.8"}
 AI_XRAY_URI=vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls#ai
-GITHUB_TOKEN=ghp_1234567890abcdef1234567890abcdef123456
+GITHUB_TOKEN=redaction-probe-token-value
 LAN=192.168.88.1 203.0.113.8 fd00:88::1 hostname router.local
 EOF
 redacted_probe=$(bash -c '
@@ -509,7 +637,7 @@ redacted_probe=$(bash -c '
   redact_stream <"$2"
 ' _ "$tmpdir/root/usr/local/sbin/dnscomplex" "$secret_probe")
 case "$redacted_probe" in
-  *super-secret-pass*|*secret-user*|*cn-super-secret*|*json-secret*|*123e4567-e89b-12d3-a456-426614174000*|*ghp_1234567890abcdef1234567890abcdef123456*|*192.168.88.1*|*203.0.113.8*|*fd00:88::1*|*router.local*)
+  *super-secret-pass*|*secret-user*|*cn-super-secret*|*json-secret*|*123e4567-e89b-12d3-a456-426614174000*|*redaction-probe-token-value*|*192.168.88.1*|*203.0.113.8*|*fd00:88::1*|*router.local*)
     fail "support redaction leaked sensitive probe: $redacted_probe"
     ;;
 esac
@@ -563,6 +691,8 @@ assert_not_contains "$policy_tmp/root/var/lib/dnscomplex/routeros.rsc" '/ip/dhcp
 assert_not_contains "$policy_tmp/root/var/lib/dnscomplex/routeros.rsc" 'src-address=192.168.50.0/24'
 assert_not_contains "$policy_tmp/root/var/lib/dnscomplex/routeros.rsc" '/interface/vlan/add'
 assert_contains "$repo_root/install.sh" 'disable_conflicting_lan_services'
+assert_contains "$repo_root/install.sh" 'disable_systemd_ssh_generator'
+assert_contains "$repo_root/install.sh" 'systemctl stop sshd-unix-local.socket sshd-vsock.socket sshd-unix-export.socket'
 assert_contains "$repo_root/install.sh" 'systemctl reset-failed dnsmasq radvd systemd-resolved'
 # shellcheck disable=SC2016
 assert_contains "$repo_root/install.sh" 'if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then'
