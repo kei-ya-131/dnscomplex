@@ -398,7 +398,7 @@ assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.servi
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.timer" 'OnUnitActiveSec=5m'
 assert_contains "$repo_root/install.sh" 'dnscomplex-cn-overrides.timer'
 assert_contains "$repo_root/install.sh" 'dnscomplex-nftset-refresh.timer'
-assert_contains "$repo_root/install.sh" 'dhcpcd --rebind "$WAN_IFACE"'
+assert_not_contains "$repo_root/install.sh" 'dhcpcd --rebind "$WAN_IFACE"'
 assert_contains "$repo_root/install.sh" 'systemctl restart dnscomplex-health.timer'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'apply_runtime_network_settings'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'resolve_default_ipv6_mode'

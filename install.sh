@@ -8613,9 +8613,6 @@ enable_services() {
     dnscomplex-cn-overrides.timer \
     dnscomplex-nftset-refresh.timer \
     dnscomplex-metrics-sample.timer
-  if [[ "$DEPLOY_MODE" == "routeros-policy" ]] && command -v dhcpcd >/dev/null 2>&1; then
-    dhcpcd --rebind "$WAN_IFACE" || warn "dhcpcd could not reload nohook resolv.conf"
-  fi
   for ipsec_unit in strongswan-swanctl strongswan-starter strongswan ipsec; do
     if systemctl list-unit-files "${ipsec_unit}.service" >/dev/null 2>&1; then
       systemctl enable --now "$ipsec_unit" && ipsec_enabled=1 && break
