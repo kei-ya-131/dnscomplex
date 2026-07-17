@@ -5783,6 +5783,76 @@ restore_release_binaries() {
   [[ -f "$dir/AdGuardHome" ]] && install -m 0755 "$dir/AdGuardHome" /opt/AdGuardHome/AdGuardHome
 }
 
+acquire_maintenance_lock() {
+  local lock_dir old_umask
+  if [[ "${DNSCOMPLEX_MAINTENANCE_LOCK_HELD:-0}" == "1" ]]; then
+    if ( : >&8 ) 2>/dev/null; then
+      return 0
+    fi
+    die "maintenance lock state is set without an inherited lock descriptor"
+  fi
+
+  command -v flock >/dev/null 2>&1 || die "flock is required for maintenance operations"
+  lock_dir=$(dirname "$MAINTENANCE_LOCK")
+  mkdir -p "$lock_dir"
+  old_umask=$(umask)
+  umask 077
+  if ! exec 8>"$MAINTENANCE_LOCK"; then
+    umask "$old_umask"
+    die "could not open maintenance lock: $MAINTENANCE_LOCK"
+  fi
+  umask "$old_umask"
+  chmod 0600 "$MAINTENANCE_LOCK"
+  if ! flock -n 8; then
+    exec 8>&-
+    die "another dnscomplex backup, restore, or update is already running"
+  fi
+  DNSCOMPLEX_MAINTENANCE_LOCK_HELD=1
+}
+
+fs_path() {
+  local path=$1
+  [[ "$path" == /* ]] || die "fs_path requires an absolute path"
+  if [[ -z "$FS_ROOT" || "$FS_ROOT" == "/" ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s%s\n' "${FS_ROOT%/}" "$path"
+  fi
+}
+
+snapshot_copy() {
+  local stage=$1 rel=$2 src dst
+  src=$(fs_path "/$rel")
+  dst="$stage/$rel"
+  [[ -e "$src" || -L "$src" ]] || return 0
+  mkdir -p "$(dirname "$dst")"
+  cp -a "$src" "$dst"
+}
+
+sqlite_backup() {
+  local source=$1 destination=$2
+  python3 - "$source" "$destination" <<'PY'
+import os
+import sqlite3
+import sys
+import urllib.parse
+
+source, destination = sys.argv[1:3]
+os.makedirs(os.path.dirname(destination), exist_ok=True)
+uri = "file:" + urllib.parse.quote(source) + "?mode=ro"
+src = sqlite3.connect(uri, uri=True, timeout=30)
+dst = sqlite3.connect(destination, timeout=30)
+try:
+    with dst:
+        src.backup(dst)
+    if dst.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+        raise SystemExit("SQLite backup integrity check failed")
+finally:
+    dst.close()
+    src.close()
+PY
+}
+
 update_software_impl() {
   need_root
   local before
@@ -5836,6 +5906,7 @@ update_software_impl() {
 
 update_software_cmd() {
   need_root
+  acquire_maintenance_lock
   local requested_channel="" requested_version=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -5986,21 +6057,80 @@ soak_cmd() {
 backup_cmd() {
   need_root
   local output=${1:-"/var/backups/dnscomplex-$(date +%Y%m%d-%H%M%S).tar.gz"}
-  mkdir -p "$(dirname "$output")"
-  tar -czf "$output" \
-    /etc/dnscomplex \
-    /etc/sing-box \
-    /etc/smartdns \
-    /etc/AdGuardHome \
-    /etc/swanctl \
-    /etc/nftables.d/dnscomplex.nft \
-    /var/lib/dnscomplex
+  local output_dir output_base
+  acquire_maintenance_lock
+  output_dir=$(dirname "$output")
+  output_base=$(basename "$output")
+  mkdir -p "$output_dir"
+
+  (
+    set -e
+    local stage="" verify="" temp_output="" rel live_db archived_db
+    cleanup_backup_stage() {
+      [[ -z "$stage" ]] || rm -rf -- "$stage"
+      [[ -z "$verify" ]] || rm -rf -- "$verify"
+      [[ -z "$temp_output" ]] || rm -f -- "$temp_output"
+    }
+    trap cleanup_backup_stage EXIT
+    trap 'exit 1' HUP INT TERM
+
+    stage=$(mktemp -d)
+    verify=$(mktemp -d)
+    temp_output=$(mktemp "$output_dir/.${output_base}.XXXXXX")
+
+    for rel in \
+      etc/dnscomplex \
+      etc/sing-box \
+      etc/smartdns \
+      etc/AdGuardHome \
+      etc/swanctl \
+      etc/nftables.d/dnscomplex.nft \
+      var/lib/dnscomplex; do
+      snapshot_copy "$stage" "$rel"
+    done
+
+    rm -f \
+      "$stage/var/lib/dnscomplex/metrics.sqlite3-wal" \
+      "$stage/var/lib/dnscomplex/metrics.sqlite3-shm" \
+      "$stage/var/lib/dnscomplex/metrics.sqlite3-journal"
+    live_db=$(fs_path /var/lib/dnscomplex/metrics.sqlite3)
+    archived_db="$stage/var/lib/dnscomplex/metrics.sqlite3"
+    if [[ -f "$live_db" ]]; then
+      rm -f "$archived_db"
+      sqlite_backup "$live_db" "$archived_db"
+    fi
+
+    tar -czf "$temp_output" -C "$stage" .
+    tar -tzf "$temp_output" >/dev/null
+    if tar -tzf "$temp_output" | grep -Eq 'metrics[.]sqlite3-(wal|shm|journal)$'; then
+      die "backup archive contains transient SQLite sidecar files"
+    fi
+    if [[ -f "$archived_db" ]]; then
+      tar -xzf "$temp_output" -C "$verify" ./var/lib/dnscomplex/metrics.sqlite3
+      python3 - "$verify/var/lib/dnscomplex/metrics.sqlite3" <<'PY'
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+try:
+    result = db.execute("PRAGMA integrity_check").fetchone()[0]
+finally:
+    db.close()
+if result != "ok":
+    raise SystemExit("archived SQLite integrity check failed")
+PY
+    fi
+    chmod 0600 "$temp_output"
+    mv -f "$temp_output" "$output"
+    temp_output=""
+  )
   log "backup written: $output"
 }
 
 restore_cmd() {
   need_root
   [[ $# -eq 1 ]] || die "usage: dnscomplex restore INPUT_TAR_GZ"
+  acquire_maintenance_lock
   tar -xzf "$1" -C /
   fix_cmd
 }

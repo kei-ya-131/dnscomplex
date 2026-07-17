@@ -852,5 +852,40 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'FS_ROOT=${DNSCOMPLEX_FS_ROOT:-$DNSCOMPLEX_ROOT}'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'MAINTENANCE_LOCK=${DNSCOMPLEX_MAINTENANCE_LOCK:-${FS_ROOT}/run/lock/dnscomplex-maintenance.lock}'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'acquire_maintenance_lock'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'snapshot_copy'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'sqlite_backup'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'src.backup(dst)'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'PRAGMA integrity_check'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'metrics.sqlite3-wal'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'metrics.sqlite3-shm'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'metrics.sqlite3-journal'
+backup_body=$(awk '
+  /^backup_cmd\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$tmpdir/root/usr/local/sbin/dnscomplex")
+case "$backup_body" in
+  *acquire_maintenance_lock*sqlite_backup*'tar -czf'*) ;;
+  *) fail "backup must lock, snapshot SQLite, then create the archive" ;;
+esac
+update_software_body=$(awk '
+  /^update_software_cmd\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$tmpdir/root/usr/local/sbin/dnscomplex")
+case "$update_software_body" in
+  *acquire_maintenance_lock*write_config_cmd*update_software_impl*) ;;
+  *) fail "software update must acquire maintenance lock before mutation" ;;
+esac
+restore_body=$(awk '
+  /^restore_cmd\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$tmpdir/root/usr/local/sbin/dnscomplex")
+case "$restore_body" in
+  *acquire_maintenance_lock*) ;;
+  *) fail "restore must share the maintenance lock" ;;
+esac
 
 printf 'install contract test: ok\n'

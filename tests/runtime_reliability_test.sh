@@ -32,7 +32,17 @@ monotonic_millis() {
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 tmpdir=$(mktemp -d)
+writer_pid=""
+maintenance_pid=""
 cleanup() {
+  if [[ -n "$writer_pid" ]]; then
+    kill "$writer_pid" 2>/dev/null || true
+    wait "$writer_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$maintenance_pid" ]]; then
+    kill "$maintenance_pid" 2>/dev/null || true
+    wait "$maintenance_pid" 2>/dev/null || true
+  fi
   rm -rf "$tmpdir"
 }
 trap cleanup EXIT
@@ -52,6 +62,7 @@ restart_monotonic="$tmpdir/restart.monotonic"
 blocking="$tmpdir/blocking"
 probe_pids="$tmpdir/probe-pids"
 nft_race="$tmpdir/nft-race"
+tar_blocking="$tmpdir/tar-blocking"
 mkdir -p "$state" "$run_dir" "$fake_root" "$fakebin"
 
 cat >"$config" <<'EOF'
@@ -330,6 +341,19 @@ wait "$killer" 2>/dev/null || true
 exit "$status"
 EOF
 
+cat >"$fakebin/tar" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${DNS_TEST_TAR_FAIL:-0}" == "1" && "${1:-}" == "-czf" ]]; then
+  printf 'partial archive\n' >"$2"
+  exit 9
+fi
+if [[ "${DNS_TEST_TAR_DELAY:-0}" == "1" && "${1:-}" == "-czf" ]]; then
+  : >"$DNS_TEST_TAR_BLOCKING"
+  /bin/sleep 2
+fi
+exec /usr/bin/tar "$@"
+EOF
+
 cat >"$fakebin/dig" <<'EOF'
 #!/usr/bin/env bash
 printf 'dig %s\n' "$*" >>"$DNS_TEST_CALLS"
@@ -408,6 +432,9 @@ run_manager() {
   DNS_TEST_NFT_BATCH_FAIL_PROFILE="${DNS_TEST_NFT_BATCH_FAIL_PROFILE:-}" \
   DNS_TEST_NFT_RACE_PROFILE="${DNS_TEST_NFT_RACE_PROFILE:-}" \
   DNS_TEST_NFT_RACE_STATE="$nft_race" \
+  DNS_TEST_TAR_DELAY="${DNS_TEST_TAR_DELAY:-0}" \
+  DNS_TEST_TAR_FAIL="${DNS_TEST_TAR_FAIL:-0}" \
+  DNS_TEST_TAR_BLOCKING="$tar_blocking" \
   DNS_TEST_REAL_SLEEP="${DNS_TEST_REAL_SLEEP:-0}" \
   DNS_TEST_NOW="${DNS_TEST_NOW:-}" \
   DNSCOMPLEX_CONFIG="${DNS_TEST_CONFIG:-$config}" \
@@ -417,7 +444,7 @@ run_manager() {
 reset_state() {
   : >"$calls"
   rm -f "$counter" "$second_round" "$restarted" "$restart_epoch" \
-    "$restart_monotonic" "$blocking" "$probe_pids" "$nft_race"
+    "$restart_monotonic" "$blocking" "$probe_pids" "$nft_race" "$tar_blocking"
 }
 
 run_watchdog() {
@@ -714,6 +741,146 @@ fi
   fail "AI temporary-file failure prevented independent CN refresh"
 if compgen -G "$run_dir/.nftset-*" >/dev/null; then
   fail "nftset refresh left a temporary file"
+fi
+
+for rel in \
+  etc/dnscomplex \
+  etc/sing-box \
+  etc/smartdns \
+  etc/AdGuardHome \
+  etc/swanctl \
+  etc/nftables.d \
+  var/lib/dnscomplex; do
+  mkdir -p "$fake_root/$rel"
+done
+printf 'fixture\n' >"$fake_root/etc/dnscomplex/config.env"
+printf 'fixture\n' >"$fake_root/etc/nftables.d/dnscomplex.nft"
+
+live_db="$fake_root/var/lib/dnscomplex/metrics.sqlite3"
+python3 - "$live_db" <<'PY'
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+db.execute("PRAGMA journal_mode=WAL")
+db.execute("CREATE TABLE samples(ts INTEGER NOT NULL, value REAL NOT NULL)")
+db.execute("INSERT INTO samples VALUES (1, 1.0)")
+db.commit()
+db.close()
+PY
+
+python3 - "$live_db" <<'PY' &
+import sqlite3
+import sys
+import time
+
+db = sqlite3.connect(sys.argv[1])
+for value in range(2, 1000):
+    db.execute("INSERT INTO samples VALUES (?, ?)", (value, float(value)))
+    db.commit()
+    time.sleep(0.002)
+db.close()
+PY
+writer_pid=$!
+
+archive="$tmpdir/live-backup.tar.gz"
+extract="$tmpdir/extracted"
+mkdir -p "$extract"
+run_manager backup "$archive"
+kill "$writer_pid" 2>/dev/null || true
+wait "$writer_pid" 2>/dev/null || true
+writer_pid=""
+
+tar -tzf "$archive" | grep -Fxq './var/lib/dnscomplex/metrics.sqlite3' ||
+  fail "backup archive is missing the SQLite snapshot"
+if tar -tzf "$archive" | grep -Eq 'metrics[.]sqlite3-(wal|shm|journal)$'; then
+  fail "backup contains transient SQLite sidecar files"
+fi
+tar -xzf "$archive" -C "$extract"
+python3 - "$extract/var/lib/dnscomplex/metrics.sqlite3" <<'PY'
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+assert db.execute("SELECT COUNT(*) FROM samples").fetchone()[0] > 0
+db.close()
+PY
+[[ "$(file_mode "$archive")" == "600" ]] ||
+  fail "backup archive mode is not 0600"
+
+first_archive="$tmpdir/first-locked-backup.tar.gz"
+second_archive="$tmpdir/second-locked-backup.tar.gz"
+rm -f "$tar_blocking"
+DNS_TEST_TAR_DELAY=1 run_manager backup "$first_archive" \
+  >"$tmpdir/first-locked-backup.log" 2>&1 &
+maintenance_pid=$!
+for _ in $(seq 1 100); do
+  [[ -f "$tar_blocking" ]] && break
+  /bin/sleep 0.05
+done
+[[ -f "$tar_blocking" ]] || fail "delayed backup did not reach tar stage"
+lock_started=$(monotonic_millis)
+if run_manager backup "$second_archive" >"$tmpdir/second-locked-backup.log" 2>&1; then
+  fail "overlapping backup bypassed the maintenance lock"
+fi
+lock_elapsed=$(( $(monotonic_millis) - lock_started ))
+((lock_elapsed <= 1000)) ||
+  fail "overlapping backup did not fail promptly: ${lock_elapsed}ms"
+assert_contains "$tmpdir/second-locked-backup.log" \
+  'another dnscomplex backup, restore, or update is already running'
+wait "$maintenance_pid"
+maintenance_pid=""
+[[ -f "$first_archive" ]] || fail "locked backup did not complete"
+rm -f "$tar_blocking"
+run_manager backup "$second_archive" >"$tmpdir/backup-lock-release.log" 2>&1
+[[ -f "$second_archive" ]] || fail "maintenance lock was not released after backup"
+
+nested_archive="$tmpdir/nested-lock-backup.tar.gz"
+PATH="$fakebin:$PATH" \
+DNSCOMPLEX_CONFIG="$config" \
+DNSCOMPLEX_BASE="$state" \
+DNSCOMPLEX_RUN_DIR="$run_dir" \
+DNSCOMPLEX_FS_ROOT="$fake_root" \
+DNSCOMPLEX_MAINTENANCE_LOCK="$tmpdir/maintenance.lock" \
+DNS_TEST_CALLS="$calls" \
+DNS_TEST_TAR_DELAY=0 \
+DNS_TEST_TAR_FAIL=0 \
+DNS_TEST_TAR_BLOCKING="$tar_blocking" \
+bash -c '
+  source "$1"
+  load_config
+  acquire_maintenance_lock
+  backup_cmd "$2"
+' _ "$manager" "$nested_archive"
+[[ -f "$nested_archive" ]] || fail "nested backup did not reuse maintenance lock"
+
+if PATH="$fakebin:$PATH" \
+   DNSCOMPLEX_CONFIG="$config" \
+   DNSCOMPLEX_FS_ROOT="$fake_root" \
+   DNSCOMPLEX_MAINTENANCE_LOCK="$tmpdir/maintenance.lock" \
+   DNS_TEST_CALLS="$calls" \
+   bash -c '
+     source "$1"
+     load_config
+     DNSCOMPLEX_MAINTENANCE_LOCK_HELD=1
+     acquire_maintenance_lock
+   ' _ "$manager" >"$tmpdir/forged-maintenance-lock.log" 2>&1; then
+  fail "forged maintenance-lock state bypassed descriptor validation"
+fi
+assert_contains "$tmpdir/forged-maintenance-lock.log" \
+  'maintenance lock state is set without an inherited lock descriptor'
+
+failed_archive="$tmpdir/preserved-on-failure.tar.gz"
+printf 'known-good-archive\n' >"$failed_archive"
+if DNS_TEST_TAR_FAIL=1 run_manager backup "$failed_archive" \
+   >"$tmpdir/failed-archive.log" 2>&1; then
+  fail "failed tar operation was reported as a successful backup"
+fi
+[[ "$(cat "$failed_archive")" == "known-good-archive" ]] ||
+  fail "failed backup replaced the existing archive"
+if compgen -G "$tmpdir/.preserved-on-failure.tar.gz.*" >/dev/null; then
+  fail "failed backup left a temporary archive"
 fi
 
 reset_state
