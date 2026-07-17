@@ -569,7 +569,7 @@ smartdns_upstream_line() {
       printf 'server-h3 %s -group %s\n' "$upstream" "$group"
       ;;
     https://*|http://*)
-      printf 'server-https %s -group %s\n' "$upstream" "$group"
+      printf 'server-https %s -group %s -alpn http/1.1\n' "$upstream" "$group"
       ;;
     tls://*)
       printf 'server-tls %s -group %s\n' "$upstream" "$group"
@@ -1241,6 +1241,20 @@ interface $lan_if
   RDNSS $LAN_IPV6_GATEWAY {};
 };
 EOF
+}
+
+configure_dhcpcd_resolver_ownership() {
+  [[ "$DEPLOY_MODE" == "routeros-policy" ]] || return 0
+  local target
+  target=$(target_path /etc/dhcpcd.conf)
+  mkdir -p "$(dirname "$target")"
+  touch "$target"
+  if ! grep -Eq '^[[:space:]]*nohook[[:space:]]+([^#]*,[[:space:]]*)?resolv[.]conf([[:space:]],|[[:space:]]*$)' "$target"; then
+    {
+      printf '\n# dnscomplex owns /etc/resolv.conf in routeros-policy mode.\n'
+      printf 'nohook resolv.conf\n'
+    } >>"$target"
+  fi
 }
 
 apply_runtime_network_settings() {
@@ -2132,6 +2146,17 @@ EOF
 }
 
 render_ipsec_services() {
+  write_file /etc/systemd/system/smartdns.service.d/dnscomplex.conf <<'EOF'
+[Unit]
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Restart=always
+RestartSec=2s
+TimeoutStopSec=5s
+EOF
+
   write_file /etc/systemd/system/dnscomplex-ipsec-ifaces.service <<EOF
 [Unit]
 Description=dnscomplex route-based IPsec XFRM interfaces
@@ -2227,8 +2252,7 @@ EOF
 Description=Run dnscomplex CN override refresh periodically
 
 [Timer]
-OnBootSec=5m
-OnUnitActiveSec=6h
+OnCalendar=*-*-* 00/6:00:00
 RandomizedDelaySec=10m
 Persistent=true
 Unit=dnscomplex-cn-overrides.service
@@ -8050,6 +8074,14 @@ enable_services() {
   fi
   systemctl restart nftables || true
   systemctl enable --now dnscomplex-ipsec-ifaces dnscomplex-routing dnscomplex-health.timer dnscomplex-update.timer dnscomplex-cn-overrides.timer dnscomplex-nftset-refresh.timer dnscomplex-metrics-sample.timer
+  systemctl restart dnscomplex-health.timer \
+    dnscomplex-update.timer \
+    dnscomplex-cn-overrides.timer \
+    dnscomplex-nftset-refresh.timer \
+    dnscomplex-metrics-sample.timer
+  if [[ "$DEPLOY_MODE" == "routeros-policy" ]] && command -v dhcpcd >/dev/null 2>&1; then
+    dhcpcd --rebind "$WAN_IFACE" || warn "dhcpcd could not reload nohook resolv.conf"
+  fi
   for ipsec_unit in strongswan-swanctl strongswan-starter strongswan ipsec; do
     if systemctl list-unit-files "${ipsec_unit}.service" >/dev/null 2>&1; then
       systemctl enable --now "$ipsec_unit" && ipsec_enabled=1 && break
@@ -8067,6 +8099,7 @@ render_all() {
   save_runtime_config
   disable_systemd_ssh_generator
   render_network
+  configure_dhcpcd_resolver_ownership
   apply_runtime_network_settings
   resolve_default_ipv6_mode
   render_geosite_seeds
