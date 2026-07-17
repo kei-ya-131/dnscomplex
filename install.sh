@@ -5911,7 +5911,7 @@ update_software_impl() {
   apt-get \
     -o Dpkg::Options::=--force-confdef \
     -o Dpkg::Options::=--force-confold \
-    upgrade -y
+    upgrade -y --with-new-pkgs
   update_software_stage "GitHub release metadata and asset verification channel=${DNSCOMPLEX_UPDATE_CHANNEL:-stable} policy=${GITHUB_RELEASE_POLICY:-latest} pinned=${DNSCOMPLEX_PINNED_VERSION:-}"
   update_release_if_needed sing-box SagerNet/sing-box sing-box install_singbox_release
   update_release_if_needed smartdns pymumu/smartdns smartdns install_smartdns_release
