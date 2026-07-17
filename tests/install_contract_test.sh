@@ -86,6 +86,7 @@ assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.timer"
 assert_file "$tmpdir/root/etc/systemd/system/xray-dnscomplex.service"
+assert_file "$tmpdir/root/etc/systemd/system/smartdns.service.d/dnscomplex.conf"
 assert_symlink_target "$tmpdir/root/etc/systemd/system-generators/systemd-ssh-generator" /dev/null
 assert_file "$tmpdir/root/usr/local/sbin/dnscomplex"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-xray/render.py"
@@ -175,6 +176,10 @@ assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'hosts-file /etc/dnsco
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'address /local/#6'
 assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'address /-.youku.com/47.246.99.254'
 assert_not_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'address /youku.com/47.246.99.254'
+assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" \
+  'server-https https://cloudflare-dns.com/dns-query -group default -alpn http/1.1'
+assert_contains "$tmpdir/root/etc/smartdns/smartdns.conf" \
+  'server-https https://dns.alidns.com/dns-query -group cn -alpn http/1.1'
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_OVERRIDE_PROBE_DOMAINS='youku.com=youku.com,www.youku.com'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "CN_OVERRIDE_PROBE_RESOLVERS='223.5.5.5 119.29.29.29 1.1.1.1 8.8.8.8'"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DEFAULT_DNS_STRATEGY='prefer_ipv6'"
@@ -383,11 +388,17 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nft add element inet d
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nft list table inet dnscomplex >/dev/null 2>&1 || systemctl restart nftables || true'
 assert_contains "$repo_root/install.sh" 'systemctl restart nftables || true'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.service" 'ExecStart=/usr/local/sbin/dnscomplex refresh-cn-overrides'
-assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.timer" 'OnUnitActiveSec=6h'
+assert_contains "$tmpdir/root/etc/systemd/system/smartdns.service.d/dnscomplex.conf" 'Restart=always'
+assert_contains "$tmpdir/root/etc/systemd/system/smartdns.service.d/dnscomplex.conf" 'RestartSec=2s'
+assert_contains "$tmpdir/root/etc/systemd/system/smartdns.service.d/dnscomplex.conf" 'TimeoutStopSec=5s'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.timer" 'OnCalendar=*-*-* 00/6:00:00'
+assert_not_contains "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.timer" 'OnUnitActiveSec=6h'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.service" 'ExecStart=/usr/local/sbin/dnscomplex refresh-nftsets'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.timer" 'OnUnitActiveSec=5m'
 assert_contains "$repo_root/install.sh" 'dnscomplex-cn-overrides.timer'
 assert_contains "$repo_root/install.sh" 'dnscomplex-nftset-refresh.timer'
+assert_contains "$repo_root/install.sh" 'dhcpcd --rebind "$WAN_IFACE"'
+assert_contains "$repo_root/install.sh" 'systemctl restart dnscomplex-health.timer'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'apply_runtime_network_settings'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'resolve_default_ipv6_mode'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'ipv6_tcp_available'
@@ -718,6 +729,7 @@ assert_file "$policy_tmp/root/etc/sing-box/config.json"
 assert_file "$policy_tmp/root/etc/nftables.d/dnscomplex.nft"
 assert_file "$policy_tmp/root/var/lib/dnscomplex/routeros.rsc"
 assert_contains "$policy_tmp/root/etc/dnscomplex/config.env" "DEPLOY_MODE='routeros-policy'"
+assert_contains "$policy_tmp/root/etc/dhcpcd.conf" 'nohook resolv.conf'
 assert_contains "$policy_tmp/root/etc/sing-box/config.json" '"include_interface": ['
 assert_contains "$policy_tmp/root/etc/sing-box/config.json" '"ens18"'
 assert_contains "$policy_tmp/root/etc/sing-box/config.json" '"listen": "192.168.50.200"'
@@ -750,6 +762,8 @@ assert_contains "$repo_root/install.sh" 'systemctl reset-failed dnsmasq radvd sy
 assert_contains "$repo_root/install.sh" 'if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then'
 [[ ! -f "$policy_tmp/root/etc/systemd/network/10-dnscomplex-vlans.netdev" ]] || fail "routeros-policy must not render VLAN netdev"
 [[ ! -f "$policy_tmp/root/etc/dnsmasq.d/dnscomplex.conf" ]] || fail "routeros-policy must not enable Linux DHCP"
+DNSCOMPLEX_ROOT="$policy_tmp/root" bash "$repo_root/install.sh" --dry-run --config "$policy_tmp/config.env"
+[[ "$(grep -Ec '^[[:space:]]*nohook[[:space:]]+resolv[.]conf[[:space:]]*$' "$policy_tmp/root/etc/dhcpcd.conf")" == "1" ]] || fail "routeros-policy dhcpcd nohook must be idempotent"
 rm -rf "$policy_tmp"
 
 single_policy_tmp=$(mktemp -d)
