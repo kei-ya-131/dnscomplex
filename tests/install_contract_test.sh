@@ -384,7 +384,8 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'refresh_nftset_group a
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'refresh_nftset_group cn "$SMARTDNS_CN_PORT" cn4'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nft add element inet dnscomplex cn4'
 # shellcheck disable=SC2016
-assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nft add element inet dnscomplex "$set_name"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  "printf 'add element inet dnscomplex %s { %s timeout %s }"
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nft list table inet dnscomplex >/dev/null 2>&1 || systemctl restart nftables || true'
 assert_contains "$repo_root/install.sh" 'systemctl restart nftables || true'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.service" 'ExecStart=/usr/local/sbin/dnscomplex refresh-cn-overrides'
@@ -499,17 +500,31 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'XTLS/Xray-core'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'github_latest_asset_url'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'migrate_ai_meta_sample_domains'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'sync_domain_seed_files_from_config'
-assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'flush_policy_nftsets_cmd'
-assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nft flush set inet dnscomplex ai4'
+assert_not_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'flush_policy_nftsets_cmd'
+assert_not_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nft flush set inet dnscomplex ai4'
+assert_not_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nft flush set inet dnscomplex cn4'
+assert_not_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'nft delete element inet dnscomplex "$set_name"'
 refresh_nftsets_body=$(awk '
   /^refresh_nftsets_cmd\(\) \{/ { inside=1 }
   inside { print }
   inside && /^}/ { exit }
 ' "$tmpdir/root/usr/local/sbin/dnscomplex")
 case "$refresh_nftsets_body" in
-  *flush_policy_nftsets_cmd*refresh_nftset_group*) ;;
-  *) fail "refresh-nftsets must flush policy nftsets before repopulating them" ;;
+  *flush_policy_nftsets_cmd*) fail "refresh-nftsets must keep last-known-good policy sets" ;;
 esac
+update_geosite_body=$(awk '
+  /^update_geosite_cmd\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$tmpdir/root/usr/local/sbin/dnscomplex")
+case "$update_geosite_body" in
+  *flush_policy_nftsets_cmd*) fail "update-geosite must keep last-known-good policy sets" ;;
+esac
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'zero usable answers; keeping last-known-good'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  '"$BASE/nftset-${profile}.last_refresh"'
 
 assert_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources" 'openai'
 assert_contains "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources" 'anthropic'

@@ -3551,11 +3551,6 @@ sync_domain_seed_files_from_config() {
   split_words "${CN_SAMPLE_DOMAINS:-}" >/etc/dnscomplex/cn-video.seed-domains
 }
 
-flush_policy_nftsets_cmd() {
-  nft flush set inet dnscomplex ai4 >/dev/null 2>&1 || true
-  nft flush set inet dnscomplex cn4 >/dev/null 2>&1 || true
-}
-
 update_geosite_cmd() {
   need_root
   mkdir -p "$GEO_DIR"
@@ -3570,7 +3565,6 @@ update_geosite_cmd() {
   render_adguard_runtime
   sing-box check -c /etc/sing-box/config.json
   restart_dns_stack
-  flush_policy_nftsets_cmd
   refresh_nftsets_cmd || warn "nftset refresh failed after geosite update"
 }
 
@@ -3748,9 +3742,16 @@ public_ipv4() {
   [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ && "$c" =~ ^[0-9]+$ && "$d" =~ ^[0-9]+$ ]] || return 1
   ((a >= 1 && a <= 223 && b >= 0 && b <= 255 && c >= 0 && c <= 255 && d >= 0 && d <= 255)) || return 1
   ((a == 10 || a == 127)) && return 1
+  ((a == 100 && b >= 64 && b <= 127)) && return 1
   ((a == 169 && b == 254)) && return 1
   ((a == 172 && b >= 16 && b <= 31)) && return 1
+  ((a == 192 && b == 0 && c == 0)) && return 1
+  ((a == 192 && b == 0 && c == 2)) && return 1
   ((a == 192 && b == 168)) && return 1
+  ((a == 192 && b == 88 && c == 99)) && return 1
+  ((a == 198 && (b == 18 || b == 19))) && return 1
+  ((a == 198 && b == 51 && c == 100)) && return 1
+  ((a == 203 && b == 0 && c == 113)) && return 1
   return 0
 }
 
@@ -3797,34 +3798,85 @@ nftset_refresh_domain_stream() {
   ' | sort -u
 }
 
-refresh_nftset_group() {
+refresh_nftset_group() (
   local profile=$1
   local port=$2
   local set_name=$3
-  local domain output ip domains=0 added=0 failed=0
+  local domain output ip domains=0 answered=0 added=0 no_answer=0
+  local candidates="" batch="" all_present
+
+  cleanup_nftset_refresh() {
+    [[ -z "$candidates" ]] || rm -f -- "$candidates"
+    [[ -z "$batch" ]] || rm -f -- "$batch"
+  }
+  trap cleanup_nftset_refresh EXIT HUP INT TERM
+
+  if ! mkdir -p "$RUN_DIR" "$BASE"; then
+    warn "$profile nftset refresh could not prepare state directories"
+    return 1
+  fi
+  if ! candidates=$(mktemp "$RUN_DIR/.nftset-${profile}.candidates.XXXXXX"); then
+    warn "$profile nftset refresh could not allocate candidate state"
+    return 1
+  fi
+  if ! batch=$(mktemp "$RUN_DIR/.nftset-${profile}.batch.XXXXXX"); then
+    warn "$profile nftset refresh could not allocate transaction state"
+    return 1
+  fi
 
   while IFS= read -r domain; do
     [[ -n "$domain" ]] || continue
     domains=$((domains + 1))
     output=$(dig +time=2 +tries=1 +short "@127.0.0.1" -p "$port" A "$domain" 2>/dev/null | grep -E '^[0-9]+(\.[0-9]+){3}$' || true)
     if [[ -z "$output" ]]; then
-      failed=$((failed + 1))
+      no_answer=$((no_answer + 1))
       continue
     fi
+    answered=$((answered + 1))
     while IFS= read -r ip; do
       [[ -n "$ip" ]] || continue
       public_ipv4 "$ip" || continue
-      nft delete element inet dnscomplex "$set_name" "{ $ip }" >/dev/null 2>&1 || true
-      if nft add element inet dnscomplex "$set_name" "{ $ip timeout $DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT }" >/dev/null 2>&1; then
-        added=$((added + 1))
-      fi
+      printf '%s\n' "$ip" >>"$candidates" || return 1
     done <<<"$output"
   done < <(nftset_refresh_domain_stream "$profile")
 
-  log "refreshed $profile nftset: domains=$domains ips_added_or_renewed=$added no_answer=$failed"
-  mkdir -p /var/lib/dnscomplex
-  date +%s >"/var/lib/dnscomplex/nftset-${profile}.last_refresh"
-}
+  if ! sort -u -o "$candidates" "$candidates"; then
+    warn "$profile nftset candidates could not be sorted"
+    return 1
+  fi
+  if [[ "$answered" == "0" || ! -s "$candidates" ]]; then
+    warn "$profile nftset refresh had zero usable answers; keeping last-known-good elements"
+    return 1
+  fi
+
+  while IFS= read -r ip; do
+    if ! nft get element inet dnscomplex "$set_name" "{ $ip }" >/dev/null 2>&1; then
+      printf 'add element inet dnscomplex %s { %s timeout %s }\n' \
+        "$set_name" "$ip" "$DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT" >>"$batch" || return 1
+      added=$((added + 1))
+    fi
+  done <"$candidates"
+
+  if [[ -s "$batch" ]] && ! nft -f "$batch"; then
+    all_present=1
+    while IFS= read -r ip; do
+      if ! nft get element inet dnscomplex "$set_name" "{ $ip }" >/dev/null 2>&1; then
+        all_present=0
+        break
+      fi
+    done <"$candidates"
+    if [[ "$all_present" == "0" ]]; then
+      warn "$profile nftset transaction failed; keeping existing elements"
+      return 1
+    fi
+  fi
+
+  if ! date +%s >"$BASE/nftset-${profile}.last_refresh"; then
+    warn "$profile nftset freshness state could not be updated"
+    return 1
+  fi
+  log "refreshed $profile nftset: domains=$domains answered=$answered new_ips=$added no_answer=$no_answer"
+)
 
 refresh_nftsets_cmd() {
   need_root
@@ -3833,9 +3885,10 @@ refresh_nftsets_cmd() {
   valid_refresh_timeout || die "DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT must look like 30m, 2h, or 3600s"
   nft list table inet dnscomplex >/dev/null 2>&1 || systemctl restart nftables || true
   nft list table inet dnscomplex >/dev/null 2>&1 || die "nftables dnscomplex table is missing"
-  flush_policy_nftsets_cmd
-  refresh_nftset_group ai "$SMARTDNS_AI_PORT" ai4
-  refresh_nftset_group cn "$SMARTDNS_CN_PORT" cn4
+  local failed=0
+  refresh_nftset_group ai "$SMARTDNS_AI_PORT" ai4 || failed=1
+  refresh_nftset_group cn "$SMARTDNS_CN_PORT" cn4 || failed=1
+  return "$failed"
 }
 
 replace_cn_static_override() {
@@ -5880,7 +5933,6 @@ soak_local_hosts_check() {
 
 soak_idle_resume_check() {
   printf 'idle-resume nftset recovery start\n'
-  flush_policy_nftsets_cmd
   refresh_nftsets_cmd
   soak_trace_expect chatgpt.com AI
   soak_trace_expect claude.ai AI
