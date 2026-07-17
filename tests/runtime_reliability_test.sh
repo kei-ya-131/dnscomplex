@@ -51,6 +51,7 @@ restart_epoch="$tmpdir/restart.epoch"
 restart_monotonic="$tmpdir/restart.monotonic"
 blocking="$tmpdir/blocking"
 probe_pids="$tmpdir/probe-pids"
+nft_race="$tmpdir/nft-race"
 mkdir -p "$state" "$run_dir" "$fake_root" "$fakebin"
 
 cat >"$config" <<'EOF'
@@ -74,6 +75,23 @@ DNSCOMPLEX_ROOT="$render_root" \
   bash "$repo_root/install.sh" --dry-run --config "$config" >/dev/null
 manager="$render_root/usr/local/sbin/dnscomplex"
 [[ -x "$manager" ]] || fail "manager was not rendered"
+
+for reserved_ip in \
+  0.1.2.3 10.0.0.1 100.64.0.1 100.127.255.254 127.0.0.1 \
+  169.254.1.1 172.16.0.1 172.31.255.254 192.0.0.1 192.0.2.1 \
+  192.88.99.1 192.168.1.1 198.18.0.1 198.19.255.254 \
+  198.51.100.1 203.0.113.1 224.0.0.1 240.0.0.1 255.255.255.255; do
+  if bash -c 'source "$1"; public_ipv4 "$2"' _ "$manager" "$reserved_ip"; then
+    fail "reserved IPv4 was accepted for nftset refresh: $reserved_ip"
+  fi
+done
+for public_ip in \
+  1.1.1.1 100.63.255.254 100.128.0.1 172.15.255.254 \
+  172.32.0.1 198.17.255.254 198.20.0.1 203.0.114.1 223.255.255.254; do
+  if ! bash -c 'source "$1"; public_ipv4 "$2"' _ "$manager" "$public_ip"; then
+    fail "public IPv4 was rejected for nftset refresh: $public_ip"
+  fi
+done
 
 cat >"$fakebin/id" <<'EOF'
 #!/usr/bin/env bash
@@ -133,9 +151,36 @@ cat >"$fakebin/nft" <<'EOF'
 printf 'nft %s\n' "$*" >>"$DNS_TEST_CALLS"
 case "${1:-} ${2:-}" in
   "list table") exit 0 ;;
-  "get element") exit 1 ;;
+  "get element")
+    [[ "${DNS_TEST_NFT_EXISTING:-0}" == "1" ]] && exit 0
+    if [[ -f "$DNS_TEST_NFT_RACE_STATE" ]]; then
+      case "${DNS_TEST_NFT_RACE_PROFILE:-}" in
+        ai) [[ "${5:-}" == "ai4" ]] && exit 0 ;;
+        cn) [[ "${5:-}" == "cn4" ]] && exit 0 ;;
+      esac
+    fi
+    exit 1
+    ;;
   "-f "*)
     sed 's/^/nft-batch /' "$2" >>"$DNS_TEST_CALLS"
+    if [[ "${DNS_TEST_NFT_RACE_PROFILE:-}" == "ai" ]] &&
+       grep -Fq ' dnscomplex ai4 ' "$2"; then
+      : >"$DNS_TEST_NFT_RACE_STATE"
+      exit 9
+    fi
+    if [[ "${DNS_TEST_NFT_RACE_PROFILE:-}" == "cn" ]] &&
+       grep -Fq ' dnscomplex cn4 ' "$2"; then
+      : >"$DNS_TEST_NFT_RACE_STATE"
+      exit 9
+    fi
+    if [[ "${DNS_TEST_NFT_BATCH_FAIL_PROFILE:-}" == "ai" ]] &&
+       grep -Fq ' dnscomplex ai4 ' "$2"; then
+      exit 9
+    fi
+    if [[ "${DNS_TEST_NFT_BATCH_FAIL_PROFILE:-}" == "cn" ]] &&
+       grep -Fq ' dnscomplex cn4 ' "$2"; then
+      exit 9
+    fi
     exit 0
     ;;
 esac
@@ -160,6 +205,12 @@ EOF
 cat >"$fakebin/mktemp" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${DNS_TEST_MKTEMP_FAIL:-}" == "probe" && " $* " == *".smartdns-probe."* ]]; then
+  exit 9
+fi
+if [[ "${DNS_TEST_MKTEMP_FAIL:-}" == "nftset-ai" && " $* " == *".nftset-ai."* ]]; then
+  exit 9
+fi
+if [[ "${DNS_TEST_MKTEMP_FAIL:-}" == "nftset-cn" && " $* " == *".nftset-cn."* ]]; then
   exit 9
 fi
 exec /usr/bin/mktemp "$@"
@@ -304,6 +355,14 @@ case "$DNS_TEST_SCENARIO" in
     fi
     ;;
   external_down) exit 9 ;;
+  nft_success) printf '93.184.216.34\n' ;;
+  nft_ai_down)
+    if [[ " $* " == *" -p 6054 "* ]]; then
+      exit 9
+    fi
+    printf '93.184.216.34\n'
+    ;;
+  nft_private) printf '100.64.0.1\n' ;;
   post_restart_blocking)
     if [[ "$is_direct" == "1" ]]; then
       printf '93.184.216.34\n'
@@ -345,6 +404,10 @@ run_manager() {
   DNS_TEST_RESTART_FAIL_UNIT="${DNS_TEST_RESTART_FAIL_UNIT:-}" \
   DNS_TEST_MKTEMP_FAIL="${DNS_TEST_MKTEMP_FAIL:-}" \
   DNS_TEST_STATE_WRITE_FAIL="${DNS_TEST_STATE_WRITE_FAIL:-0}" \
+  DNS_TEST_NFT_EXISTING="${DNS_TEST_NFT_EXISTING:-0}" \
+  DNS_TEST_NFT_BATCH_FAIL_PROFILE="${DNS_TEST_NFT_BATCH_FAIL_PROFILE:-}" \
+  DNS_TEST_NFT_RACE_PROFILE="${DNS_TEST_NFT_RACE_PROFILE:-}" \
+  DNS_TEST_NFT_RACE_STATE="$nft_race" \
   DNS_TEST_REAL_SLEEP="${DNS_TEST_REAL_SLEEP:-0}" \
   DNS_TEST_NOW="${DNS_TEST_NOW:-}" \
   DNSCOMPLEX_CONFIG="${DNS_TEST_CONFIG:-$config}" \
@@ -354,7 +417,7 @@ run_manager() {
 reset_state() {
   : >"$calls"
   rm -f "$counter" "$second_round" "$restarted" "$restart_epoch" \
-    "$restart_monotonic" "$blocking" "$probe_pids"
+    "$restart_monotonic" "$blocking" "$probe_pids" "$nft_race"
 }
 
 run_watchdog() {
@@ -554,6 +617,104 @@ assert_contains "$calls" 'ip route replace default dev ipsec-ai table 301'
 assert_not_contains "$calls" 'ip rule add fwmark 0x351 table 351'
 assert_not_contains "$calls" 'ip route replace default dev ipsec-cn table 351'
 assert_not_contains "$calls" 'dnscomplex-cn-snat'
+
+printf 'ai-last-known-good\n' >"$state/nftset-ai.last_refresh"
+printf 'cn-last-known-good\n' >"$state/nftset-cn.last_refresh"
+reset_state
+if DNS_TEST_SCENARIO=external_down run_manager refresh-nftsets \
+   >"$tmpdir/nftset-zero-answer.log" 2>&1; then
+  fail "zero-answer nftset refresh was reported as healthy"
+fi
+[[ "$(cat "$state/nftset-ai.last_refresh")" == "ai-last-known-good" ]] ||
+  fail "zero-answer AI refresh changed freshness timestamp"
+[[ "$(cat "$state/nftset-cn.last_refresh")" == "cn-last-known-good" ]] ||
+  fail "zero-answer CN refresh changed freshness timestamp"
+assert_not_contains "$calls" 'nft flush set'
+
+rm -f "$state/nftset-ai.last_refresh" "$state/nftset-cn.last_refresh"
+reset_state
+DNS_TEST_SCENARIO=nft_success run_manager refresh-nftsets
+assert_contains "$calls" 'nft-batch add element inet dnscomplex ai4'
+assert_contains "$calls" 'nft-batch add element inet dnscomplex cn4'
+[[ "$(cat "$state/nftset-ai.last_refresh")" =~ ^[0-9]+$ ]] ||
+  fail "successful AI refresh did not update freshness"
+[[ "$(cat "$state/nftset-cn.last_refresh")" =~ ^[0-9]+$ ]] ||
+  fail "successful CN refresh did not update freshness"
+assert_not_contains "$calls" 'nft flush set'
+
+printf 'ai-before-partial\n' >"$state/nftset-ai.last_refresh"
+printf 'cn-before-partial\n' >"$state/nftset-cn.last_refresh"
+reset_state
+if DNS_TEST_SCENARIO=nft_ai_down run_manager refresh-nftsets \
+   >"$tmpdir/nftset-ai-down.log" 2>&1; then
+  fail "one-profile nftset failure was reported as healthy"
+fi
+[[ "$(cat "$state/nftset-ai.last_refresh")" == "ai-before-partial" ]] ||
+  fail "failed AI profile changed freshness timestamp"
+[[ "$(cat "$state/nftset-cn.last_refresh")" =~ ^[0-9]+$ ]] ||
+  fail "healthy CN profile was not refreshed independently"
+assert_not_contains "$calls" 'nft-batch add element inet dnscomplex ai4'
+assert_contains "$calls" 'nft-batch add element inet dnscomplex cn4'
+
+printf 'ai-before-private\n' >"$state/nftset-ai.last_refresh"
+printf 'cn-before-private\n' >"$state/nftset-cn.last_refresh"
+reset_state
+if DNS_TEST_SCENARIO=nft_private run_manager refresh-nftsets \
+   >"$tmpdir/nftset-private.log" 2>&1; then
+  fail "reserved-address nftset refresh was reported as healthy"
+fi
+[[ "$(cat "$state/nftset-ai.last_refresh")" == "ai-before-private" ]] ||
+  fail "reserved AI answer changed freshness timestamp"
+[[ "$(cat "$state/nftset-cn.last_refresh")" == "cn-before-private" ]] ||
+  fail "reserved CN answer changed freshness timestamp"
+assert_not_contains "$calls" 'nft-batch add element'
+
+printf 'ai-before-batch-failure\n' >"$state/nftset-ai.last_refresh"
+printf 'cn-before-batch-failure\n' >"$state/nftset-cn.last_refresh"
+reset_state
+if DNS_TEST_SCENARIO=nft_success DNS_TEST_NFT_BATCH_FAIL_PROFILE=ai \
+   run_manager refresh-nftsets >"$tmpdir/nftset-batch-failure.log" 2>&1; then
+  fail "failed AI nft transaction was reported as healthy"
+fi
+[[ "$(cat "$state/nftset-ai.last_refresh")" == "ai-before-batch-failure" ]] ||
+  fail "failed AI nft transaction changed freshness timestamp"
+[[ "$(cat "$state/nftset-cn.last_refresh")" =~ ^[0-9]+$ ]] ||
+  fail "AI transaction failure prevented independent CN refresh"
+
+rm -f "$state/nftset-ai.last_refresh" "$state/nftset-cn.last_refresh"
+reset_state
+DNS_TEST_SCENARIO=nft_success DNS_TEST_NFT_EXISTING=1 \
+  run_manager refresh-nftsets
+assert_not_contains "$calls" 'nft-batch add element'
+[[ "$(cat "$state/nftset-ai.last_refresh")" =~ ^[0-9]+$ ]] ||
+  fail "existing AI candidates did not update freshness"
+[[ "$(cat "$state/nftset-cn.last_refresh")" =~ ^[0-9]+$ ]] ||
+  fail "existing CN candidates did not update freshness"
+
+rm -f "$state/nftset-ai.last_refresh" "$state/nftset-cn.last_refresh"
+reset_state
+DNS_TEST_SCENARIO=nft_success DNS_TEST_NFT_RACE_PROFILE=ai \
+  run_manager refresh-nftsets
+[[ -f "$nft_race" ]] || fail "AI nft race scenario did not execute"
+[[ "$(cat "$state/nftset-ai.last_refresh")" =~ ^[0-9]+$ ]] ||
+  fail "concurrent AI insertion was not accepted"
+[[ "$(cat "$state/nftset-cn.last_refresh")" =~ ^[0-9]+$ ]] ||
+  fail "AI insertion race prevented CN refresh"
+
+printf 'ai-before-temp-failure\n' >"$state/nftset-ai.last_refresh"
+rm -f "$state/nftset-cn.last_refresh"
+reset_state
+if DNS_TEST_SCENARIO=nft_success DNS_TEST_MKTEMP_FAIL=nftset-ai \
+   run_manager refresh-nftsets >"$tmpdir/nftset-temp-failure.log" 2>&1; then
+  fail "nftset temporary-file failure was reported as healthy"
+fi
+[[ "$(cat "$state/nftset-ai.last_refresh")" == "ai-before-temp-failure" ]] ||
+  fail "AI temporary-file failure changed freshness timestamp"
+[[ "$(cat "$state/nftset-cn.last_refresh")" =~ ^[0-9]+$ ]] ||
+  fail "AI temporary-file failure prevented independent CN refresh"
+if compgen -G "$run_dir/.nftset-*" >/dev/null; then
+  fail "nftset refresh left a temporary file"
+fi
 
 reset_state
 rm -f "$run_dir/smartdns.last_restart"
