@@ -707,7 +707,7 @@ install_packages() {
     install -y \
     ca-certificates curl jq tar unzip iproute2 nftables conntrack dnsmasq radvd \
     strongswan-swanctl strongswan-charon libcharon-extra-plugins \
-    cron dnsutils python3
+    cron dnsutils python3 coreutils util-linux
   if [[ "$PROMETHEUS_MODE" == "local" ]]; then
     apt-get \
       -o Dpkg::Options::=--force-confdef \
@@ -4598,17 +4598,76 @@ health_json_cmd() {
 }
 
 smartdns_probe() {
-  local domain=$1 port=$2
-  dig +time=2 +tries=1 +short A "$domain" @127.0.0.1 -p "$port" 2>/dev/null |
+  local domain=$1 port=$2 timeout_seconds=${3:-2}
+  timeout --signal=TERM --kill-after=1 "${timeout_seconds}s" \
+    dig "+time=${timeout_seconds}" +tries=1 +short A "$domain" @127.0.0.1 -p "$port" 2>/dev/null |
     grep -Eq '^[0-9]+([.][0-9]+){3}$'
 }
 
 smartdns_listener_round() {
-  local failed=0
-  smartdns_probe example.com "$SMARTDNS_DEFAULT_PORT" || failed=1
-  smartdns_probe openai.com "$SMARTDNS_AI_PORT" || failed=1
-  smartdns_probe youku.com "$SMARTDNS_CN_PORT" || failed=1
-  return "$failed"
+  local deadline_ms=${1:-0} now remaining_ms probe_timeout=2 temp success=0 running pid
+  local -a pids=()
+  if ((deadline_ms > 0)); then
+    now=$(monotonic_millis)
+    ((now < deadline_ms)) || return 2
+    remaining_ms=$((deadline_ms - now))
+    probe_timeout=$(((remaining_ms + 999) / 1000))
+    ((probe_timeout > 2)) && probe_timeout=2
+  fi
+
+  temp=$(mktemp -d "$RUN_DIR/.smartdns-probe.XXXXXX")
+  (
+    if smartdns_probe example.com "$SMARTDNS_DEFAULT_PORT" "$probe_timeout"; then
+      printf 'ok\n' >"$temp/default"
+    else
+      printf 'failed\n' >"$temp/default"
+    fi
+  ) &
+  pids+=("$!")
+  (
+    if smartdns_probe openai.com "$SMARTDNS_AI_PORT" "$probe_timeout"; then
+      printf 'ok\n' >"$temp/ai"
+    else
+      printf 'failed\n' >"$temp/ai"
+    fi
+  ) &
+  pids+=("$!")
+  (
+    if smartdns_probe youku.com "$SMARTDNS_CN_PORT" "$probe_timeout"; then
+      printf 'ok\n' >"$temp/cn"
+    else
+      printf 'failed\n' >"$temp/cn"
+    fi
+  ) &
+  pids+=("$!")
+
+  while :; do
+    running=0
+    for pid in "${pids[@]}"; do
+      kill -0 "$pid" 2>/dev/null && running=1
+    done
+    [[ "$running" == "0" ]] && break
+    if ((deadline_ms > 0)) && (( $(monotonic_millis) >= deadline_ms )); then
+      for pid in "${pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+      done
+      break
+    fi
+    sleep 0.05
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+
+  for profile in default ai cn; do
+    [[ -r "$temp/$profile" ]] && grep -Fxq ok "$temp/$profile" && success=$((success + 1))
+  done
+  rm -rf "$temp"
+  case "$success" in
+    3) return 0 ;;
+    0) return 2 ;;
+    *) return 1 ;;
+  esac
 }
 
 direct_dns_available() {
@@ -4623,20 +4682,70 @@ direct_dns_available() {
 }
 
 wait_smartdns_listeners() {
-  local attempt
-  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    smartdns_listener_round && return 0
-    sleep 1
+  local deadline_ms
+  deadline_ms=$(( $(monotonic_millis) + 15000 ))
+  while (( $(monotonic_millis) < deadline_ms )); do
+    if smartdns_listener_round "$deadline_ms"; then
+      return 0
+    fi
+    sleep 0.05
   done
   return 1
 }
 
+monotonic_millis() {
+  python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'
+}
+
+read_smartdns_restart_epoch() {
+  local value=""
+  REPLY=0
+  [[ -r "$RUN_DIR/smartdns.last_restart" ]] || return 0
+  IFS= read -r value <"$RUN_DIR/smartdns.last_restart" || value=""
+  if [[ ! "$value" =~ ^[0-9]{1,10}$ ]]; then
+    warn "ignoring invalid SmartDNS restart timestamp"
+    return 0
+  fi
+  REPLY=$((10#$value))
+}
+
+write_smartdns_restart_epoch() {
+  local timestamp=$1 temp
+  (
+    umask 077
+    temp=$(mktemp "$RUN_DIR/.smartdns.last_restart.XXXXXX") || exit 1
+    printf '%s\n' "$timestamp" >"$temp"
+    chmod 0600 "$temp"
+    mv -f "$temp" "$RUN_DIR/smartdns.last_restart"
+  )
+}
+
 repair_policy_routes_if_needed() {
   command -v ip >/dev/null 2>&1 || return 0
-  local rules
+  local profile mode mark table device rules repair_needed=0
   rules=$(ip rule show 2>/dev/null || true)
-  if ! grep -Eq "fwmark ${AI_MARK}.*lookup ${AI_TABLE}" <<<"$rules" ||
-     ! grep -Eq "fwmark ${CN_MARK}.*lookup ${CN_TABLE}" <<<"$rules"; then
+  for profile in ai cn; do
+    case "$profile" in
+      ai)
+        mode=${AI_EGRESS_MODE:-ipsec}
+        mark=$AI_MARK
+        table=$AI_TABLE
+        device=ipsec-ai
+        ;;
+      cn)
+        mode=${CN_EGRESS_MODE:-ipsec}
+        mark=$CN_MARK
+        table=$CN_TABLE
+        device=ipsec-cn
+        ;;
+    esac
+    [[ "$mode" == "ipsec" ]] || continue
+    if ! grep -Eq "fwmark ${mark}.*lookup ${table}" <<<"$rules" ||
+       ! ip route show table "$table" 2>/dev/null | grep -Eq "^default .*dev ${device}([[:space:]]|$)"; then
+      repair_needed=1
+    fi
+  done
+  if [[ "$repair_needed" == "1" ]]; then
     "$0" routes up || warn "policy routes are missing and could not be repaired"
   fi
 }
@@ -4658,11 +4767,8 @@ repair_ipsec_children_if_needed() {
   done
 }
 
-watchdog_cmd() {
-  need_root
-  local unit now last=0
-  mkdir -p "$RUN_DIR"
-
+watchdog_locked_cmd() {
+  local unit now last first_round second_round
   for unit in nftables smartdns AdGuardHome sing-box; do
     systemctl is-active --quiet "$unit" || systemctl restart "$unit"
   done
@@ -4674,10 +4780,18 @@ watchdog_cmd() {
 
   if smartdns_listener_round; then
     return 0
+  else
+    first_round=$?
   fi
   sleep 2
   if smartdns_listener_round; then
     return 0
+  else
+    second_round=$?
+  fi
+  if [[ "$first_round" != "2" || "$second_round" != "2" ]]; then
+    warn "SmartDNS listeners are partially unavailable or changing state; skipping resolver restart"
+    return 1
   fi
   if ! direct_dns_available; then
     warn "SmartDNS listeners and direct DNS positive controls are unavailable; external outage suspected"
@@ -4685,20 +4799,52 @@ watchdog_cmd() {
   fi
 
   now=$(date +%s)
-  [[ -r "$RUN_DIR/smartdns.last_restart" ]] && read -r last <"$RUN_DIR/smartdns.last_restart"
-  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  read_smartdns_restart_epoch
+  last=$REPLY
+  if ((last > now)); then
+    warn "future SmartDNS restart timestamp clamped to the current time"
+    last=$now
+    write_smartdns_restart_epoch "$last" || return 1
+  fi
   if ((now - last < 600)); then
     warn "SmartDNS remains unresponsive inside the 600-second restart cooldown"
     return 1
   fi
 
-  printf '%s\n' "$now" >"$RUN_DIR/smartdns.last_restart"
-  systemctl restart smartdns
+  write_smartdns_restart_epoch "$now" || return 1
+  if ! systemctl restart smartdns; then
+    warn "SmartDNS restart command failed; retaining cooldown timestamp"
+    return 1
+  fi
   wait_smartdns_listeners || {
     warn "SmartDNS restart did not restore all listeners"
     return 1
   }
   systemctl start --no-block dnscomplex-nftset-refresh.service || true
+}
+
+watchdog_cmd() {
+  need_root
+  local watchdog_lock old_umask rc
+  mkdir -p "$RUN_DIR"
+  command -v flock >/dev/null 2>&1 || die "flock is required for the SmartDNS watchdog"
+  watchdog_lock="$RUN_DIR/smartdns-watchdog.lock"
+  old_umask=$(umask)
+  umask 077
+  exec 9>"$watchdog_lock"
+  umask "$old_umask"
+  if ! flock -n 9; then
+    warn "SmartDNS watchdog is already running; coalescing invocation"
+    exec 9>&-
+    return 0
+  fi
+  if watchdog_locked_cmd; then
+    rc=0
+  else
+    rc=$?
+  fi
+  exec 9>&-
+  return "$rc"
 }
 
 health_cmd() {
