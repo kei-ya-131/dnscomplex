@@ -802,6 +802,14 @@ case "$watchdog_body" in
     fail "watchdog contains unconditional heavy repair work"
     ;;
 esac
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'flock -n 9'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'future SmartDNS restart timestamp clamped to the current time'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'write_smartdns_restart_epoch'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'mktemp "$RUN_DIR/.smartdns.last_restart.XXXXXX"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'chmod 0600 "$temp"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'mv -f "$temp" "$RUN_DIR/smartdns.last_restart"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'monotonic_millis) + 15000'
+assert_contains "$repo_root/install.sh" 'cron dnsutils python3 coreutils util-linux'
 health_body=$(awk '
   /^health_cmd\(\) \{/ { inside=1 }
   inside { print }
