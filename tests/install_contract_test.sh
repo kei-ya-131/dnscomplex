@@ -787,4 +787,44 @@ assert_contains "$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc" '/ip/f
 assert_contains "$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc" '/ip/firewall/nat/disable [find where comment~\"dnscomplex-force-dns\"]'
 rm -rf "$single_policy_tmp"
 
+bash "$repo_root/tests/runtime_reliability_test.sh"
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-health.service" \
+  'ExecStart=/usr/local/sbin/dnscomplex watchdog'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'SmartDNS listeners and direct DNS positive controls are unavailable'
+watchdog_body=$(awk '
+  /^watchdog_cmd\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$tmpdir/root/usr/local/sbin/dnscomplex")
+case "$watchdog_body" in
+  *'swanctl --load-all'*|*migrate_config_cmd*|*apply_runtime_network_settings*)
+    fail "watchdog contains unconditional heavy repair work"
+    ;;
+esac
+health_body=$(awk '
+  /^health_cmd\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$tmpdir/root/usr/local/sbin/dnscomplex")
+case "$health_body" in
+  *watchdog_cmd*) ;;
+  *) fail "plain health does not delegate to watchdog" ;;
+esac
+case "$health_body" in
+  *migrate_config_cmd*|*apply_runtime_network_settings*|*swanctl*|*routes*)
+    fail "plain health retains timer repair work"
+    ;;
+esac
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'CONFIG=${DNSCOMPLEX_CONFIG:-${FS_ROOT}/etc/dnscomplex/config.env}'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'BASE=${DNSCOMPLEX_BASE:-${FS_ROOT}/var/lib/dnscomplex}'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'RUN_DIR=${DNSCOMPLEX_RUN_DIR:-${FS_ROOT}/run/dnscomplex}'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'FS_ROOT=${DNSCOMPLEX_FS_ROOT:-$DNSCOMPLEX_ROOT}'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'MAINTENANCE_LOCK=${DNSCOMPLEX_MAINTENANCE_LOCK:-${FS_ROOT}/run/lock/dnscomplex-maintenance.lock}'
+
 printf 'install contract test: ok\n'

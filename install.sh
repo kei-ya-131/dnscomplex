@@ -2195,7 +2195,7 @@ Description=dnscomplex health check and self-heal
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/dnscomplex health
+ExecStart=/usr/local/sbin/dnscomplex watchdog
 EOF
 
   write_file /etc/systemd/system/dnscomplex-health.timer <<'EOF'
@@ -2406,9 +2406,12 @@ set -euo pipefail
 IFS=$'\n\t'
 
 DNSCOMPLEX_ROOT=${DNSCOMPLEX_ROOT:-}
-CONFIG="${DNSCOMPLEX_ROOT}/etc/dnscomplex/config.env"
-BASE="${DNSCOMPLEX_ROOT}/var/lib/dnscomplex"
-LOCAL_HOSTS="${DNSCOMPLEX_ROOT}/etc/dnscomplex/local-hosts"
+FS_ROOT=${DNSCOMPLEX_FS_ROOT:-$DNSCOMPLEX_ROOT}
+CONFIG=${DNSCOMPLEX_CONFIG:-${FS_ROOT}/etc/dnscomplex/config.env}
+BASE=${DNSCOMPLEX_BASE:-${FS_ROOT}/var/lib/dnscomplex}
+RUN_DIR=${DNSCOMPLEX_RUN_DIR:-${FS_ROOT}/run/dnscomplex}
+MAINTENANCE_LOCK=${DNSCOMPLEX_MAINTENANCE_LOCK:-${FS_ROOT}/run/lock/dnscomplex-maintenance.lock}
+LOCAL_HOSTS="${FS_ROOT}/etc/dnscomplex/local-hosts"
 GEO_DIR=$BASE/geosite
 DLC_DIR=$GEO_DIR/domain-list-community
 
@@ -2435,6 +2438,9 @@ load_config() {
   : "${DEFAULT_IPV6_MODE:=auto}"
   : "${AI_DNS_UPSTREAMS:=https://cloudflare-dns.com/dns-query tls://1.1.1.1 https://dns.google/dns-query tls://dns.google}"
   : "${CN_DNS_UPSTREAMS:=https://dns.alidns.com/dns-query tls://dns.alidns.com https://doh.pub/dns-query tls://dot.pub}"
+  : "${SMARTDNS_DEFAULT_PORT:=6053}"
+  : "${SMARTDNS_AI_PORT:=6054}"
+  : "${SMARTDNS_CN_PORT:=6055}"
   : "${SINGBOX_SOCKS_LISTEN:=0.0.0.0}"
   : "${SINGBOX_SOCKS_PORT:=1080}"
   : "${SINGBOX_DNS_LISTEN:=127.0.0.1}"
@@ -3224,6 +3230,7 @@ Commands:
   status [--verbose]
   test
   health [--json]
+  watchdog
   fix
   doctor
   update-geosite
@@ -4590,40 +4597,116 @@ health_json_cmd() {
   [[ "$status" != "unhealthy" ]]
 }
 
+smartdns_probe() {
+  local domain=$1 port=$2
+  dig +time=2 +tries=1 +short A "$domain" @127.0.0.1 -p "$port" 2>/dev/null |
+    grep -Eq '^[0-9]+([.][0-9]+){3}$'
+}
+
+smartdns_listener_round() {
+  local failed=0
+  smartdns_probe example.com "$SMARTDNS_DEFAULT_PORT" || failed=1
+  smartdns_probe openai.com "$SMARTDNS_AI_PORT" || failed=1
+  smartdns_probe youku.com "$SMARTDNS_CN_PORT" || failed=1
+  return "$failed"
+}
+
+direct_dns_available() {
+  local server
+  for server in 1.1.1.1 223.5.5.5; do
+    if dig +time=2 +tries=1 +short A example.com "@$server" 2>/dev/null |
+      grep -Eq '^[0-9]+([.][0-9]+){3}$'; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+wait_smartdns_listeners() {
+  local attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    smartdns_listener_round && return 0
+    sleep 1
+  done
+  return 1
+}
+
+repair_policy_routes_if_needed() {
+  command -v ip >/dev/null 2>&1 || return 0
+  local rules
+  rules=$(ip rule show 2>/dev/null || true)
+  if ! grep -Eq "fwmark ${AI_MARK}.*lookup ${AI_TABLE}" <<<"$rules" ||
+     ! grep -Eq "fwmark ${CN_MARK}.*lookup ${CN_TABLE}" <<<"$rules"; then
+    "$0" routes up || warn "policy routes are missing and could not be repaired"
+  fi
+}
+
+repair_ipsec_children_if_needed() {
+  command -v swanctl >/dev/null 2>&1 || return 0
+  local child mode
+  for child in ai cn; do
+    case "$child" in
+      ai) mode=${AI_EGRESS_MODE:-ipsec} ;;
+      cn) mode=${CN_EGRESS_MODE:-ipsec} ;;
+    esac
+    [[ "$mode" == "ipsec" ]] || continue
+    if ! timeout 5 swanctl --list-sas 2>/dev/null |
+      grep -Eq "^${child}: #[0-9]+, ESTABLISHED"; then
+      timeout 15 swanctl --initiate --child "$child" >/dev/null 2>&1 ||
+        warn "$child IPsec child is not established"
+    fi
+  done
+}
+
+watchdog_cmd() {
+  need_root
+  local unit now last=0
+  mkdir -p "$RUN_DIR"
+
+  for unit in nftables smartdns AdGuardHome sing-box; do
+    systemctl is-active --quiet "$unit" || systemctl restart "$unit"
+  done
+  if [[ "${XRAY_ENABLED:-1}" == "1" ]]; then
+    systemctl is-active --quiet xray-dnscomplex || systemctl restart xray-dnscomplex
+  fi
+  repair_policy_routes_if_needed
+  repair_ipsec_children_if_needed
+
+  if smartdns_listener_round; then
+    return 0
+  fi
+  sleep 2
+  if smartdns_listener_round; then
+    return 0
+  fi
+  if ! direct_dns_available; then
+    warn "SmartDNS listeners and direct DNS positive controls are unavailable; external outage suspected"
+    return 1
+  fi
+
+  now=$(date +%s)
+  [[ -r "$RUN_DIR/smartdns.last_restart" ]] && read -r last <"$RUN_DIR/smartdns.last_restart"
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  if ((now - last < 600)); then
+    warn "SmartDNS remains unresponsive inside the 600-second restart cooldown"
+    return 1
+  fi
+
+  printf '%s\n' "$now" >"$RUN_DIR/smartdns.last_restart"
+  systemctl restart smartdns
+  wait_smartdns_listeners || {
+    warn "SmartDNS restart did not restore all listeners"
+    return 1
+  }
+  systemctl start --no-block dnscomplex-nftset-refresh.service || true
+}
+
 health_cmd() {
   if [[ "${1:-}" == "--json" ]]; then
     health_json_cmd
     return $?
   fi
-  need_root
-  migrate_config_cmd || true
-  apply_runtime_network_settings
-  nft list table inet dnscomplex >/dev/null 2>&1 || systemctl restart nftables || true
-  fix_smartdns_wrapper || true
-  ensure_smartdns_enabled || true
-  systemctl is-active --quiet smartdns || systemctl restart smartdns || true
-  systemctl is-active --quiet AdGuardHome || systemctl restart AdGuardHome || true
-  systemctl is-active --quiet sing-box || systemctl restart sing-box || true
-  systemctl is-active --quiet xray-dnscomplex || systemctl restart xray-dnscomplex || true
-  if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" || "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
-    systemctl is-active --quiet strongswan-starter || systemctl is-active --quiet strongswan-swanctl || restart_ipsec_service || true
-  fi
-  "$0" ipsec-ifaces up || true
-  "$0" routes up || true
-  timeout 8 swanctl --load-all --noprompt >/dev/null 2>&1 || true
-  local child
-  for child in ai cn; do
-    if [[ "$child" == "ai" && "${AI_EGRESS_MODE:-ipsec}" != "ipsec" ]]; then
-      continue
-    fi
-    if [[ "$child" == "cn" && "${CN_EGRESS_MODE:-ipsec}" != "ipsec" ]]; then
-      continue
-    fi
-    if ! timeout 5 swanctl --list-sas 2>/dev/null | grep -Eq "^${child}: #[0-9]+, ESTABLISHED"; then
-      timeout 15 swanctl --initiate --child "$child" >/dev/null 2>&1 || true
-    fi
-  done
-  "$0" routes up || true
+  watchdog_cmd
 }
 
 write_update_timer_cmd() {
@@ -5670,6 +5753,7 @@ main() {
     status) status_cmd "$@" ;;
     test) test_cmd "$@" ;;
     health) health_cmd "$@" ;;
+    watchdog) watchdog_cmd "$@" ;;
     fix) fix_cmd "$@" ;;
     doctor) doctor_cmd "$@" ;;
     update-geosite) update_geosite_cmd "$@" ;;
