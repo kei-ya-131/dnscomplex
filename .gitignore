@@ -11,3 +11,6 @@ __pycache__/
 *.swp
 *.swo
 *.tmp
+
+# Isolated Codex implementation worktrees
+.worktrees/
