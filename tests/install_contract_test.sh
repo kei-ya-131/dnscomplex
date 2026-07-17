@@ -312,6 +312,58 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set-local-host'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'test-local-name'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'remove_macbook_air_local_override'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'MacBookAir .local addresses should follow mDNS or RouterOS DHCP/DNS'
+
+manager_root="$tmpdir/manager-behavior"
+manager="$tmpdir/root/usr/local/sbin/dnscomplex"
+mkdir -p "$manager_root/etc/dnscomplex"
+: >"$manager_root/etc/dnscomplex/config.env"
+
+run_rendered_manager() {
+  DNSCOMPLEX_ROOT="$manager_root" MANAGER="$manager" bash -c '
+    source "$MANAGER"
+    need_root() { :; }
+    main "$@"
+  ' _ "$@"
+}
+
+assert_local_host_rejected() {
+  local label=$1 host=$2 ip=$3 before after
+  printf '192.0.2.10 existing.local\n' >"$manager_root/etc/dnscomplex/local-hosts"
+  before=$(mktemp)
+  cp "$manager_root/etc/dnscomplex/local-hosts" "$before"
+  if run_rendered_manager set-local-host "$host" "$ip" >"$tmpdir/${label}.log" 2>&1; then
+    rm -f "$before"
+    fail "$label: invalid local host was accepted"
+  fi
+  after=$(cat "$manager_root/etc/dnscomplex/local-hosts")
+  cmp -s "$before" "$manager_root/etc/dnscomplex/local-hosts" || {
+    rm -f "$before"
+    fail "$label: local-hosts changed after rejected input"
+  }
+  rm -f "$before"
+  [[ "$after" == "192.0.2.10 existing.local" ]] || fail "$label: unexpected local-hosts contents"
+}
+
+printf '192.0.2.20 printer.local\n' >"$manager_root/etc/dnscomplex/local-hosts"
+run_rendered_manager set-local-host printer.local 192.0.2.21 >/dev/null 2>&1 || true
+assert_contains "$manager_root/etc/dnscomplex/local-hosts" '192.0.2.21 printer.local'
+assert_local_host_rejected 'reject-macbookair' 'macbookair.local' '192.0.2.30'
+assert_local_host_rejected 'reject-macbook-air' 'macbook-air.local' '192.0.2.31'
+assert_local_host_rejected 'reject-host-injection' $'safe.local\nmacbookair.local' '192.0.2.32'
+assert_local_host_rejected 'reject-out-of-range-ipv4' 'router.local' '256.1.1.1'
+
+wizard_output=$(run_rendered_manager wizard)
+for wizard_value in \
+  'ROUTEROS_LAN_IPV4=192.168.8.253' \
+  'LINUX_LAN_IPV4=192.168.8.200' \
+  'LAN_CLIENT_IPV4_CIDR=192.168.8.0/24' \
+  'SINGBOX_SOCKS_LISTEN=192.168.8.200' \
+  'SINGBOX_SOCKS_PORT=10800' \
+  'DNSCOMPLEX_WEB_LISTEN=192.168.8.200' \
+  'LAN_IPV6_PREFIX=fd00:88::/64' \
+  'DEFAULT_IPV6_MODE=auto'; do
+  grep -Fqx "$wizard_value" <<<"$wizard_output" || fail "wizard output missing $wizard_value"
+done
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'Dpkg::Options::=--force-confold'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'public_ipv4'
@@ -721,4 +773,4 @@ assert_contains "$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc" '/ip/f
 assert_contains "$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc" '/ip/firewall/nat/disable [find where comment~\"dnscomplex-force-dns\"]'
 rm -rf "$single_policy_tmp"
 
-printf 'install contract ok\n'
+printf 'install contract test: ok\n'

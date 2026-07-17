@@ -2381,8 +2381,10 @@ render_management_script() {
 set -euo pipefail
 IFS=$'\n\t'
 
-CONFIG=/etc/dnscomplex/config.env
-BASE=/var/lib/dnscomplex
+DNSCOMPLEX_ROOT=${DNSCOMPLEX_ROOT:-}
+CONFIG="${DNSCOMPLEX_ROOT}/etc/dnscomplex/config.env"
+BASE="${DNSCOMPLEX_ROOT}/var/lib/dnscomplex"
+LOCAL_HOSTS="${DNSCOMPLEX_ROOT}/etc/dnscomplex/local-hosts"
 GEO_DIR=$BASE/geosite
 DLC_DIR=$GEO_DIR/domain-list-community
 
@@ -2635,6 +2637,23 @@ rule_set_safe_name() {
 
 need_root() {
   [[ "$(id -u)" == "0" ]] || die "run as root"
+}
+
+valid_local_hostname() {
+  local host
+  host=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  [[ "$host" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.local$ ]]
+}
+
+valid_ipv4() {
+  local ip=$1 octet
+  local -a octets=()
+  [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  IFS=. read -r -a octets <<<"$ip"
+  (( ${#octets[@]} == 4 )) || return 1
+  for octet in "${octets[@]}"; do
+    (( 10#$octet <= 255 )) || return 1
+  done
 }
 
 write_adguard_upstream_rules() {
@@ -4630,20 +4649,21 @@ set_web_password_cmd() {
 set_local_host_cmd() {
   need_root
   [[ $# -eq 2 ]] || die "usage: dnscomplex set-local-host HOST.local IPv4"
-  local host=$1 ip=$2 tmp
-  [[ "$host" == *.local ]] || die "host must end with .local"
-  case "${host,,}" in
+  local host=$1 ip=$2 tmp normalized_host
+  normalized_host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  valid_local_hostname "$host" || die "host must be a single valid .local DNS hostname"
+  case "$normalized_host" in
     macbook-air.local|macbookair.local)
       die "MacBookAir .local addresses should follow mDNS or RouterOS DHCP/DNS, not dnscomplex static local-hosts"
       ;;
   esac
-  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "IPv4 address required"
-  mkdir -p /etc/dnscomplex
-  touch /etc/dnscomplex/local-hosts
+  valid_ipv4 "$ip" || die "IPv4 address required with octets in range 0-255"
+  mkdir -p "$(dirname "$LOCAL_HOSTS")"
+  touch "$LOCAL_HOSTS"
   tmp=$(mktemp)
-  awk -v host="$host" 'tolower($2) != tolower(host)' /etc/dnscomplex/local-hosts >"$tmp" || true
+  awk -v host="$host" 'tolower($2) != tolower(host)' "$LOCAL_HOSTS" >"$tmp" || true
   printf '%s %s\n' "$ip" "$host" >>"$tmp"
-  install -m 0644 "$tmp" /etc/dnscomplex/local-hosts
+  install -m 0644 "$tmp" "$LOCAL_HOSTS"
   rm -f "$tmp"
   restart_dns_stack || true
   log "local host override applied: $host -> $ip"
@@ -5216,12 +5236,14 @@ wizard_cmd() {
 DNSCOMPLEX_NONINTERACTIVE=1
 DEPLOY_MODE=routeros-policy
 WAN_IFACE=eth0
-ROUTEROS_LAN_IPV4=192.0.2.1
-LINUX_LAN_IPV4=192.0.2.2
-LAN_CLIENT_IPV4_CIDR=192.0.2.0/24
-SINGBOX_SOCKS_LISTEN=192.0.2.2
-SINGBOX_SOCKS_PORT=1080
-DNSCOMPLEX_WEB_LISTEN=192.0.2.2
+ROUTEROS_LAN_IPV4=192.168.8.253
+LINUX_LAN_IPV4=192.168.8.200
+LAN_CLIENT_IPV4_CIDR=192.168.8.0/24
+LAN_IPV6_PREFIX=fd00:88::/64
+DEFAULT_IPV6_MODE=auto
+SINGBOX_SOCKS_LISTEN=192.168.8.200
+SINGBOX_SOCKS_PORT=10800
+DNSCOMPLEX_WEB_LISTEN=192.168.8.200
 DNSCOMPLEX_WEB_PORT=8088
 DNSCOMPLEX_UPDATE_CHANNEL=stable
 GITHUB_RELEASE_POLICY=latest
