@@ -4436,6 +4436,7 @@ health_checks_json() {
 import json
 import os
 import shutil
+import socket
 import statistics
 import subprocess
 import sys
@@ -4471,7 +4472,6 @@ def dig_query(domain, qtype="A", port="53", timeout=3):
     return proc.returncode == 0 and bool(lines), lines, elapsed
 
 def test_socks_listener(listen, port):
-    import socket
     host = listen or "127.0.0.1"
     if host in ("0.0.0.0", "::"):
         host = "127.0.0.1"
@@ -4480,6 +4480,20 @@ def test_socks_listener(listen, port):
             return True, f"{listen}:{port} reachable via {host}:{port}"
     except Exception as exc:
         return False, f"{listen}:{port} unreachable: {exc}"
+
+def tcp_connectivity(host, family, timeout=3.0):
+    sock = None
+    try:
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        address = (host, 443, 0, 0) if family == socket.AF_INET6 else (host, 443)
+        sock.connect(address)
+        return True
+    except OSError:
+        return False
+    finally:
+        if sock is not None:
+            sock.close()
 
 def nft_count(set_name):
     proc = run(["nft", "list", "set", "inet", "dnscomplex", set_name], 5)
@@ -4636,12 +4650,41 @@ for profile in ["ai", "cn"]:
         ok = service_active("xray-dnscomplex.service")
         add_check(checks, f"{profile}-xray-selected-egress", ok, "critical", f"{profile} Xray selected and service up={ok}", f"dnscomplex test-xray {profile}", core=True)
 
+ipv4_targets = ["93.184.216.34", "104.16.132.229"]
+ipv4_reachable = next(
+    (host for host in ipv4_targets if tcp_connectivity(host, socket.AF_INET)),
+    None,
+)
+add_check(
+    checks,
+    "default-ipv4-connectivity",
+    ipv4_reachable is not None,
+    "critical",
+    f"TCP/443 reachable={ipv4_reachable is not None} target={ipv4_reachable or ','.join(ipv4_targets)}",
+    "check RouterOS/default IPv4 route, firewall, and upstream Internet connectivity",
+    core=True,
+)
+
 ipv6_mode = cfg.get("DEFAULT_IPV6_MODE", "auto")
 if ipv6_mode == "off":
     add_check(checks, "default-ipv6-connectivity", True, "info", "DEFAULT_IPV6_MODE=off", "enable default IPv6 only when RouterOS/default path supports it")
 else:
-    route = run(["ip", "-6", "route", "get", "2606:4700:4700::1111"], 4)
-    add_check(checks, "default-ipv6-connectivity", route.returncode == 0, "warning", "IPv6 route lookup " + ("ok" if route.returncode == 0 else "failed"), "check RouterOS RA/default IPv6 route and VM policy routing")
+    ipv6_targets = [
+        "2606:2800:220:1:248:1893:25c8:1946",
+        "2606:4700::6810:84e5",
+    ]
+    ipv6_reachable = next(
+        (host for host in ipv6_targets if tcp_connectivity(host, socket.AF_INET6)),
+        None,
+    )
+    add_check(
+        checks,
+        "default-ipv6-connectivity",
+        ipv6_reachable is not None,
+        "warning",
+        f"TCP/443 reachable={ipv6_reachable is not None} target={ipv6_reachable or ','.join(ipv6_targets)}",
+        "check RouterOS RA/default IPv6 route, firewall, and upstream Internet connectivity",
+    )
 
 ct_count = int_file("/proc/sys/net/netfilter/nf_conntrack_count")
 ct_max = max(int_file("/proc/sys/net/netfilter/nf_conntrack_max", 1), 1)

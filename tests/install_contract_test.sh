@@ -852,6 +852,15 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'FS_ROOT=${DNSCOMPLEX_FS_ROOT:-$DNSCOMPLEX_ROOT}'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'MAINTENANCE_LOCK=${DNSCOMPLEX_MAINTENANCE_LOCK:-${FS_ROOT}/run/lock/dnscomplex-maintenance.lock}'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'socket.AF_INET'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'socket.AF_INET6'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'default-ipv4-connectivity'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'default-ipv6-connectivity'
+assert_not_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'IPv6 route lookup ok'
+assert_not_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'tcp_connectivity("1.1.1.1"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'SmartDNS listeners and direct DNS positive controls are unavailable'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'acquire_maintenance_lock'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'snapshot_copy'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'sqlite_backup'
