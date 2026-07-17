@@ -26,6 +26,22 @@ file_mode() {
   stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
+assert_health_check() {
+  local file=$1 name=$2 expected_status=$3
+  python3 - "$file" "$name" "$expected_status" <<'PY'
+import json
+import sys
+
+path, name, expected = sys.argv[1:4]
+with open(path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+checks = {item["name"]: item for item in payload["checks"]}
+actual = checks.get(name, {}).get("status")
+if actual != expected:
+    raise SystemExit(f"{name} status={actual!r}, expected={expected!r}")
+PY
+}
+
 monotonic_millis() {
   python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'
 }
@@ -53,6 +69,7 @@ state="$tmpdir/state"
 run_dir="$tmpdir/run"
 fake_root="$tmpdir/fakeroot"
 fakebin="$tmpdir/fakebin"
+fakepy="$tmpdir/fakepy"
 calls="$tmpdir/calls.log"
 counter="$tmpdir/dig.counter"
 second_round="$tmpdir/second-round"
@@ -63,7 +80,8 @@ blocking="$tmpdir/blocking"
 probe_pids="$tmpdir/probe-pids"
 nft_race="$tmpdir/nft-race"
 tar_blocking="$tmpdir/tar-blocking"
-mkdir -p "$state" "$run_dir" "$fake_root" "$fakebin"
+socket_calls="$tmpdir/socket-calls"
+mkdir -p "$state" "$run_dir" "$fake_root" "$fakebin" "$fakepy"
 
 cat >"$config" <<'EOF'
 DNSCOMPLEX_NONINTERACTIVE=1
@@ -86,6 +104,58 @@ DNSCOMPLEX_ROOT="$render_root" \
   bash "$repo_root/install.sh" --dry-run --config "$config" >/dev/null
 manager="$render_root/usr/local/sbin/dnscomplex"
 [[ -x "$manager" ]] || fail "manager was not rendered"
+
+cat >"$fakepy/socket.py" <<'PY'
+import os
+
+AF_INET = 2
+AF_INET6 = 10
+SOCK_STREAM = 1
+
+
+def _record(kind, family, address):
+    path = os.environ.get("DNS_TEST_SOCKET_CALLS", "")
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{kind} family={family} address={address!r}\n")
+
+
+class _Connection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def close(self):
+        return None
+
+
+def create_connection(address, timeout=None):
+    _record("create_connection", 0, address)
+    if os.environ.get("DNS_TEST_SOCKS_CONNECTIVITY", "1") != "1":
+        raise OSError("simulated SOCKS listener failure")
+    return _Connection()
+
+
+class socket:
+    def __init__(self, family, sock_type):
+        self.family = family
+        self.sock_type = sock_type
+        self.timeout = None
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def connect(self, address):
+        _record("connect", self.family, address)
+        key = "DNS_TEST_IPV6_CONNECTIVITY" if self.family == AF_INET6 else "DNS_TEST_IPV4_CONNECTIVITY"
+        if os.environ.get(key, "1") != "1":
+            raise OSError(f"simulated connectivity failure for family {self.family}")
+
+    def close(self):
+        return None
+PY
 
 for reserved_ip in \
   0.1.2.3 10.0.0.1 100.64.0.1 100.127.255.254 127.0.0.1 \
@@ -435,6 +505,11 @@ run_manager() {
   DNS_TEST_TAR_DELAY="${DNS_TEST_TAR_DELAY:-0}" \
   DNS_TEST_TAR_FAIL="${DNS_TEST_TAR_FAIL:-0}" \
   DNS_TEST_TAR_BLOCKING="$tar_blocking" \
+  DNS_TEST_SOCKET_CALLS="$socket_calls" \
+  DNS_TEST_SOCKS_CONNECTIVITY="${DNS_TEST_SOCKS_CONNECTIVITY:-1}" \
+  DNS_TEST_IPV4_CONNECTIVITY="${DNS_TEST_IPV4_CONNECTIVITY:-1}" \
+  DNS_TEST_IPV6_CONNECTIVITY="${DNS_TEST_IPV6_CONNECTIVITY:-1}" \
+  PYTHONPATH="${DNS_TEST_PYTHONPATH:-}" \
   DNS_TEST_REAL_SLEEP="${DNS_TEST_REAL_SLEEP:-0}" \
   DNS_TEST_NOW="${DNS_TEST_NOW:-}" \
   DNSCOMPLEX_CONFIG="${DNS_TEST_CONFIG:-$config}" \
@@ -444,7 +519,8 @@ run_manager() {
 reset_state() {
   : >"$calls"
   rm -f "$counter" "$second_round" "$restarted" "$restart_epoch" \
-    "$restart_monotonic" "$blocking" "$probe_pids" "$nft_race" "$tar_blocking"
+    "$restart_monotonic" "$blocking" "$probe_pids" "$nft_race" \
+    "$tar_blocking" "$socket_calls"
 }
 
 run_watchdog() {
@@ -882,6 +958,53 @@ fi
 if compgen -G "$tmpdir/.preserved-on-failure.tar.gz.*" >/dev/null; then
   fail "failed backup left a temporary archive"
 fi
+
+reset_state
+DNS_TEST_PYTHONPATH="$fakepy" \
+DNS_TEST_IPV4_CONNECTIVITY=1 \
+DNS_TEST_IPV6_CONNECTIVITY=1 \
+run_manager health --json >"$tmpdir/health-connectivity-ok.json"
+assert_health_check "$tmpdir/health-connectivity-ok.json" default-ipv4-connectivity ok
+assert_health_check "$tmpdir/health-connectivity-ok.json" default-ipv6-connectivity ok
+assert_contains "$socket_calls" 'connect family=2'
+assert_contains "$socket_calls" 'connect family=10'
+assert_not_contains "$socket_calls" '1.1.1.1'
+
+reset_state
+if DNS_TEST_PYTHONPATH="$fakepy" \
+   DNS_TEST_IPV4_CONNECTIVITY=0 \
+   DNS_TEST_IPV6_CONNECTIVITY=1 \
+   run_manager health --json >"$tmpdir/health-ipv4-failed.json"; then
+  fail "failed default IPv4 connectivity was not unhealthy"
+fi
+assert_health_check "$tmpdir/health-ipv4-failed.json" default-ipv4-connectivity fail
+python3 - "$tmpdir/health-ipv4-failed.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    assert json.load(fh)["status"] == "unhealthy"
+PY
+
+reset_state
+DNS_TEST_PYTHONPATH="$fakepy" \
+DNS_TEST_IPV4_CONNECTIVITY=1 \
+DNS_TEST_IPV6_CONNECTIVITY=0 \
+run_manager health --json >"$tmpdir/health-ipv6-failed.json"
+assert_health_check "$tmpdir/health-ipv6-failed.json" default-ipv4-connectivity ok
+assert_health_check "$tmpdir/health-ipv6-failed.json" default-ipv6-connectivity warn
+
+ipv6_off_config="$tmpdir/ipv6-off.env"
+cp "$config" "$ipv6_off_config"
+printf '%s\n' 'DEFAULT_IPV6_MODE=off' >>"$ipv6_off_config"
+reset_state
+DNS_TEST_CONFIG="$ipv6_off_config" \
+DNS_TEST_PYTHONPATH="$fakepy" \
+DNS_TEST_IPV4_CONNECTIVITY=1 \
+DNS_TEST_IPV6_CONNECTIVITY=0 \
+run_manager health --json >"$tmpdir/health-ipv6-off.json"
+assert_health_check "$tmpdir/health-ipv6-off.json" default-ipv6-connectivity ok
+assert_not_contains "$socket_calls" 'connect family=10'
 
 reset_state
 rm -f "$run_dir/smartdns.last_restart"
