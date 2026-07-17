@@ -4058,20 +4058,23 @@ sync_ipsec_nat() {
   delete_nft_rules_by_comment postrouting dnscomplex-ai-snat
   delete_nft_rules_by_comment postrouting dnscomplex-cn-snat
 
-  local ai_vip cn_vip
-  ai_vip=$(ipsec_vip ai || true)
-  cn_vip=$(ipsec_vip cn || true)
-
-  if [[ -n "$ai_vip" ]]; then
-    nft add rule inet dnscomplex postrouting oifname "ipsec-ai" ip daddr @ai4 snat ip to "$ai_vip" comment "dnscomplex-ai-snat"
-  else
-    warn "AI IPsec virtual IPv4 is not available yet; SNAT rule not installed"
+  local ai_vip="" cn_vip=""
+  if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
+    ai_vip=$(ipsec_vip ai || true)
+    if [[ -n "$ai_vip" ]]; then
+      nft add rule inet dnscomplex postrouting oifname "ipsec-ai" ip daddr @ai4 snat ip to "$ai_vip" comment "dnscomplex-ai-snat"
+    else
+      warn "AI IPsec virtual IPv4 is not available yet; SNAT rule not installed"
+    fi
   fi
 
-  if [[ -n "$cn_vip" ]]; then
-    nft add rule inet dnscomplex postrouting oifname "ipsec-cn" ip daddr @cn4 snat ip to "$cn_vip" comment "dnscomplex-cn-snat"
-  else
-    warn "CN IPsec virtual IPv4 is not available yet; SNAT rule not installed"
+  if [[ "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
+    cn_vip=$(ipsec_vip cn || true)
+    if [[ -n "$cn_vip" ]]; then
+      nft add rule inet dnscomplex postrouting oifname "ipsec-cn" ip daddr @cn4 snat ip to "$cn_vip" comment "dnscomplex-cn-snat"
+    else
+      warn "CN IPsec virtual IPv4 is not available yet; SNAT rule not installed"
+    fi
   fi
 }
 
@@ -4079,9 +4082,13 @@ sync_singbox_ipsec_bind_addresses() {
   command -v jq >/dev/null 2>&1 || return 0
   [[ -f /etc/sing-box/config.json ]] || return 0
 
-  local ai_vip cn_vip current_ai current_cn tmp needs_update=0
-  ai_vip=$(ipsec_vip ai || true)
-  cn_vip=$(ipsec_vip cn || true)
+  local ai_vip="" cn_vip="" current_ai current_cn tmp needs_update=0
+  if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
+    ai_vip=$(ipsec_vip ai || true)
+  fi
+  if [[ "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
+    cn_vip=$(ipsec_vip cn || true)
+  fi
   [[ -n "$ai_vip" || -n "$cn_vip" ]] || return 0
 
   current_ai=$(jq -r '.outbounds[] | select(.tag=="ai-ipsec") | .inet4_bind_address // ""' /etc/sing-box/config.json)
@@ -4109,26 +4116,68 @@ sync_singbox_ipsec_bind_addresses() {
   systemctl restart sing-box || true
 }
 
+ensure_policy_route_profile() {
+  local profile=$1 mode mark table priority device vip rules
+  case "$profile" in
+    ai)
+      mode=${AI_EGRESS_MODE:-ipsec}
+      mark=$AI_MARK
+      table=$AI_TABLE
+      priority=10301
+      device=ipsec-ai
+      ;;
+    cn)
+      mode=${CN_EGRESS_MODE:-ipsec}
+      mark=$CN_MARK
+      table=$CN_TABLE
+      priority=10351
+      device=ipsec-cn
+      ;;
+    *)
+      warn "unknown policy-route profile: $profile"
+      return 1
+      ;;
+  esac
+
+  case "$mode" in
+    xray) return 0 ;;
+    ipsec) ;;
+    *)
+      warn "$profile has invalid egress mode: $mode"
+      return 1
+      ;;
+  esac
+
+  if ! rules=$(ip rule show 2>/dev/null); then
+    warn "could not inspect policy rules for $profile"
+    return 1
+  fi
+  if ! grep -Eq "fwmark ${mark}.*lookup ${table}" <<<"$rules"; then
+    if ! ip rule add fwmark "$mark" table "$table" priority "$priority"; then
+      warn "could not install the $profile policy rule"
+      return 1
+    fi
+  fi
+
+  vip=$(ipsec_vip "$profile" || true)
+  if [[ -n "$vip" ]]; then
+    if ! ip route replace default dev "$device" src "$vip" table "$table"; then
+      warn "could not install the $profile policy route"
+      return 1
+    fi
+  elif ! ip route replace default dev "$device" table "$table"; then
+    warn "could not install the $profile policy route"
+    return 1
+  fi
+}
+
 routes_cmd() {
   need_root
   local action=${1:-}
-  local ai_vip cn_vip
   case "$action" in
     up)
-      ip rule add fwmark "$AI_MARK" table "$AI_TABLE" priority 10301 2>/dev/null || true
-      ip rule add fwmark "$CN_MARK" table "$CN_TABLE" priority 10351 2>/dev/null || true
-      ai_vip=$(ipsec_vip ai || true)
-      cn_vip=$(ipsec_vip cn || true)
-      if [[ -n "$ai_vip" ]]; then
-        ip route replace default dev ipsec-ai src "$ai_vip" table "$AI_TABLE"
-      else
-        ip route replace default dev ipsec-ai table "$AI_TABLE"
-      fi
-      if [[ -n "$cn_vip" ]]; then
-        ip route replace default dev ipsec-cn src "$cn_vip" table "$CN_TABLE"
-      else
-        ip route replace default dev ipsec-cn table "$CN_TABLE"
-      fi
+      ensure_policy_route_profile ai || return 1
+      ensure_policy_route_profile cn || return 1
       sync_ipsec_nat || true
       sync_singbox_ipsec_bind_addresses || true
       ;;
@@ -4599,23 +4648,28 @@ health_json_cmd() {
 
 smartdns_probe() {
   local domain=$1 port=$2 timeout_seconds=${3:-2}
-  timeout --signal=TERM --kill-after=1 "${timeout_seconds}s" \
+  timeout --signal=TERM --kill-after=0.5s "${timeout_seconds}s" \
     dig "+time=${timeout_seconds}" +tries=1 +short A "$domain" @127.0.0.1 -p "$port" 2>/dev/null |
     grep -Eq '^[0-9]+([.][0-9]+){3}$'
 }
 
 smartdns_listener_round() {
-  local deadline_ms=${1:-0} now remaining_ms probe_timeout=2 temp success=0 running pid
+  local deadline_ms=${1:-0} now remaining_ms probe_timeout=2 temp="" success=0 pid
   local -a pids=()
   if ((deadline_ms > 0)); then
     now=$(monotonic_millis)
     ((now < deadline_ms)) || return 2
     remaining_ms=$((deadline_ms - now))
-    probe_timeout=$(((remaining_ms + 999) / 1000))
-    ((probe_timeout > 2)) && probe_timeout=2
+    # A one-second probe may need another half-second for timeout escalation.
+    # Do not launch a round unless the deadline still has scheduling margin.
+    ((remaining_ms >= 2500)) || return 2
+    probe_timeout=1
   fi
 
-  temp=$(mktemp -d "$RUN_DIR/.smartdns-probe.XXXXXX")
+  if ! temp=$(mktemp -d "$RUN_DIR/.smartdns-probe.XXXXXX"); then
+    warn "could not allocate SmartDNS probe state"
+    return 3
+  fi
   (
     if smartdns_probe example.com "$SMARTDNS_DEFAULT_PORT" "$probe_timeout"; then
       printf 'ok\n' >"$temp/default"
@@ -4641,20 +4695,6 @@ smartdns_listener_round() {
   ) &
   pids+=("$!")
 
-  while :; do
-    running=0
-    for pid in "${pids[@]}"; do
-      kill -0 "$pid" 2>/dev/null && running=1
-    done
-    [[ "$running" == "0" ]] && break
-    if ((deadline_ms > 0)) && (( $(monotonic_millis) >= deadline_ms )); then
-      for pid in "${pids[@]}"; do
-        kill "$pid" 2>/dev/null || true
-      done
-      break
-    fi
-    sleep 0.05
-  done
   for pid in "${pids[@]}"; do
     wait "$pid" 2>/dev/null || true
   done
@@ -4682,12 +4722,19 @@ direct_dns_available() {
 }
 
 wait_smartdns_listeners() {
-  local deadline_ms
-  deadline_ms=$(( $(monotonic_millis) + 15000 ))
-  while (( $(monotonic_millis) < deadline_ms )); do
+  local deadline_ms now result
+  # Leave half a second for scheduler jitter while enforcing a 15-second
+  # external bound from the completed systemctl restart.
+  deadline_ms=$(( $(monotonic_millis) + 14500 ))
+  while :; do
+    now=$(monotonic_millis)
+    ((deadline_ms - now >= 2500)) || break
     if smartdns_listener_round "$deadline_ms"; then
       return 0
+    else
+      result=$?
     fi
+    [[ "$result" != "3" ]] || return 1
     sleep 0.05
   done
   return 1
@@ -4710,20 +4757,29 @@ read_smartdns_restart_epoch() {
 }
 
 write_smartdns_restart_epoch() {
-  local timestamp=$1 temp
+  local timestamp=$1
   (
+    local temp=""
+    cleanup_restart_epoch_temp() {
+      [[ -z "$temp" ]] || rm -f -- "$temp"
+    }
+    trap cleanup_restart_epoch_temp EXIT HUP INT TERM
     umask 077
-    temp=$(mktemp "$RUN_DIR/.smartdns.last_restart.XXXXXX") || exit 1
-    printf '%s\n' "$timestamp" >"$temp"
-    chmod 0600 "$temp"
-    mv -f "$temp" "$RUN_DIR/smartdns.last_restart"
+    temp=$(mktemp "$RUN_DIR/.smartdns.last_restart.XXXXXX") || return 1
+    printf '%s\n' "$timestamp" >"$temp" || return 1
+    chmod 0600 "$temp" || return 1
+    mv -f "$temp" "$RUN_DIR/smartdns.last_restart" || return 1
+    temp=""
   )
 }
 
 repair_policy_routes_if_needed() {
   command -v ip >/dev/null 2>&1 || return 0
-  local profile mode mark table device rules repair_needed=0
-  rules=$(ip rule show 2>/dev/null || true)
+  local profile mode mark table device rules failed=0
+  if ! rules=$(ip rule show 2>/dev/null); then
+    warn "policy routes could not be inspected"
+    return 1
+  fi
   for profile in ai cn; do
     case "$profile" in
       ai)
@@ -4742,17 +4798,18 @@ repair_policy_routes_if_needed() {
     [[ "$mode" == "ipsec" ]] || continue
     if ! grep -Eq "fwmark ${mark}.*lookup ${table}" <<<"$rules" ||
        ! ip route show table "$table" 2>/dev/null | grep -Eq "^default .*dev ${device}([[:space:]]|$)"; then
-      repair_needed=1
+      if ! ensure_policy_route_profile "$profile"; then
+        warn "$profile policy route is missing and could not be repaired"
+        failed=1
+      fi
     fi
   done
-  if [[ "$repair_needed" == "1" ]]; then
-    "$0" routes up || warn "policy routes are missing and could not be repaired"
-  fi
+  return "$failed"
 }
 
 repair_ipsec_children_if_needed() {
   command -v swanctl >/dev/null 2>&1 || return 0
-  local child mode
+  local child mode failed=0
   for child in ai cn; do
     case "$child" in
       ai) mode=${AI_EGRESS_MODE:-ipsec} ;;
@@ -4761,33 +4818,55 @@ repair_ipsec_children_if_needed() {
     [[ "$mode" == "ipsec" ]] || continue
     if ! timeout 5 swanctl --list-sas 2>/dev/null |
       grep -Eq "^${child}: #[0-9]+, ESTABLISHED"; then
-      timeout 15 swanctl --initiate --child "$child" >/dev/null 2>&1 ||
+      timeout 15 swanctl --initiate --child "$child" >/dev/null 2>&1 || {
         warn "$child IPsec child is not established"
+        failed=1
+      }
     fi
   done
+  return "$failed"
+}
+
+restart_watchdog_unit_if_inactive() {
+  local unit=$1
+  if systemctl is-active --quiet "$unit"; then
+    return 0
+  fi
+  if ! systemctl restart "$unit"; then
+    warn "$unit is inactive and could not be restarted"
+    return 1
+  fi
 }
 
 watchdog_locked_cmd() {
   local unit now last first_round second_round
   for unit in nftables smartdns AdGuardHome sing-box; do
-    systemctl is-active --quiet "$unit" || systemctl restart "$unit"
+    restart_watchdog_unit_if_inactive "$unit" || return 1
   done
   if [[ "${XRAY_ENABLED:-1}" == "1" ]]; then
-    systemctl is-active --quiet xray-dnscomplex || systemctl restart xray-dnscomplex
+    restart_watchdog_unit_if_inactive xray-dnscomplex || return 1
   fi
-  repair_policy_routes_if_needed
-  repair_ipsec_children_if_needed
+  repair_policy_routes_if_needed || return 1
+  repair_ipsec_children_if_needed || return 1
 
   if smartdns_listener_round; then
     return 0
   else
     first_round=$?
   fi
+  if [[ "$first_round" == "3" ]]; then
+    warn "SmartDNS listener probes could not be initialized"
+    return 1
+  fi
   sleep 2
   if smartdns_listener_round; then
     return 0
   else
     second_round=$?
+  fi
+  if [[ "$second_round" == "3" ]]; then
+    warn "SmartDNS listener probes could not be initialized"
+    return 1
   fi
   if [[ "$first_round" != "2" || "$second_round" != "2" ]]; then
     warn "SmartDNS listeners are partially unavailable or changing state; skipping resolver restart"
