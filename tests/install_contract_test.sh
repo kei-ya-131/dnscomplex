@@ -327,6 +327,12 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'singbox-socks-listener
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'smartdns-ai-listener'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'nftset-ai-freshness'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'default-ipv6-connectivity'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'ipsec_sa_state_from_sas'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'child_installed='
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'route_source_matches='
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" ', INSTALLED'
+assert_not_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'ok = (profile + ":") in sas'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'metrics_sample_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'soak_cmd'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '--output-json'
@@ -878,6 +884,10 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 'dns
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 'dnscomplex_profile_connections'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 'dnscomplex_ipv6_connection_ratio'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 'schema_version'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" \
+  'DNSCOMPLEX_MANAGER'
+assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" \
+  'child + ":" in run(["swanctl", "--list-sas"], 5).stdout'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-web.service" 'ExecStart=/usr/bin/python3 /usr/local/lib/dnscomplex-web/app.py'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics.service" 'ExecStart=/usr/bin/python3 /usr/local/lib/dnscomplex-metrics/exporter.py'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.service" 'ExecStart=/usr/local/sbin/dnscomplex metrics-sample'
