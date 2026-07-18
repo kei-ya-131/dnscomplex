@@ -6305,6 +6305,22 @@ restore_release_binaries() {
   [[ -f "$dir/AdGuardHome" ]] && install -m 0755 "$dir/AdGuardHome" /opt/AdGuardHome/AdGuardHome
 }
 
+rollback_component_update() {
+  local before=$1 binary_rc config_rc
+  update_software_stage "rollback application binaries and managed configuration"
+  set +e
+  restore_release_binaries "$before/bin"
+  binary_rc=$?
+  restore_cmd "$before/dnscomplex-pre-update.tar.gz"
+  config_rc=$?
+  set -e
+  if [[ "$binary_rc" != "0" || "$config_rc" != "0" ]]; then
+    warn "application rollback incomplete: binaries_rc=$binary_rc config_rc=$config_rc"
+    return 1
+  fi
+  log "application rollback completed; Debian package changes remain managed by apt/dpkg"
+}
+
 acquire_maintenance_lock() {
   local lock_dir old_umask
   if [[ "${DNSCOMPLEX_MAINTENANCE_LOCK_HELD:-0}" == "1" ]]; then
@@ -6377,29 +6393,48 @@ PY
 
 update_software_impl() {
   need_root
-  local before
+  local before component_rc rollback_rc
   UPDATED_SERVICES=()
   before=$(mktemp -d)
   update_software_stage "backup current config and release binaries"
-  backup_cmd "$before/dnscomplex-pre-update.tar.gz"
-  backup_release_binaries "$before/bin"
+  if ! backup_cmd "$before/dnscomplex-pre-update.tar.gz"; then
+    rm -rf "$before"
+    die "software update stopped because the pre-update backup failed"
+  fi
+  if ! backup_release_binaries "$before/bin"; then
+    rm -rf "$before"
+    die "software update stopped because release binaries could not be backed up"
+  fi
   export DEBIAN_FRONTEND=noninteractive
   update_software_stage "Debian apt update"
-  apt-get update
-  update_software_stage "Debian apt upgrade"
-  apt-get \
+  if ! apt-get update; then
+    rm -rf "$before"
+    die "Debian apt update failed before dnscomplex component mutations; no application rollback was needed"
+  fi
+  update_software_stage "Debian apt upgrade (package state remains managed by apt/dpkg)"
+  if ! apt-get \
     -o Dpkg::Options::=--force-confdef \
     -o Dpkg::Options::=--force-confold \
-    upgrade -y --with-new-pkgs
-  update_software_stage "GitHub release metadata and asset verification channel=${DNSCOMPLEX_UPDATE_CHANNEL:-stable} policy=${GITHUB_RELEASE_POLICY:-latest} pinned=${DNSCOMPLEX_PINNED_VERSION:-}"
-  update_release_if_needed sing-box SagerNet/sing-box sing-box install_singbox_release
-  update_release_if_needed smartdns pymumu/smartdns smartdns install_smartdns_release
-  update_release_if_needed AdGuardHome AdguardTeam/AdGuardHome AdGuardHome install_adguardhome_release
-  update_release_if_needed xray XTLS/Xray-core xray-dnscomplex install_xray_release
-  update_software_stage "dnscomplex installer/schema validation"
-  "$0" validate-config "$CONFIG"
-  update_software_stage "config validation"
-  if sing-box check -c /etc/sing-box/config.json && xray run -test -format=json -config /usr/local/etc/xray/config.json && nft -c -f /etc/nftables.conf; then
+    upgrade -y --with-new-pkgs; then
+    rm -rf "$before"
+    die "Debian apt upgrade failed before dnscomplex component mutations; inspect apt/dpkg state"
+  fi
+
+  set +e
+  (
+    set -e
+    write_config_cmd
+    update_software_stage "GitHub release metadata and asset verification channel=${DNSCOMPLEX_UPDATE_CHANNEL:-stable} policy=${GITHUB_RELEASE_POLICY:-latest} pinned=${DNSCOMPLEX_PINNED_VERSION:-}"
+    update_release_if_needed sing-box SagerNet/sing-box sing-box install_singbox_release
+    update_release_if_needed smartdns pymumu/smartdns smartdns install_smartdns_release
+    update_release_if_needed AdGuardHome AdguardTeam/AdGuardHome AdGuardHome install_adguardhome_release
+    update_release_if_needed xray XTLS/Xray-core xray-dnscomplex install_xray_release
+    update_software_stage "dnscomplex installer/schema validation"
+    "$0" validate-config "$CONFIG"
+    update_software_stage "config validation"
+    sing-box check -c /etc/sing-box/config.json
+    xray run -test -format=json -config /usr/local/etc/xray/config.json
+    nft -c -f /etc/nftables.conf
     if ((${#UPDATED_SERVICES[@]} > 0)); then
       update_software_stage "restart changed services: ${UPDATED_SERVICES[*]}"
       systemctl restart "${UPDATED_SERVICES[@]}"
@@ -6410,21 +6445,19 @@ update_software_impl() {
     "$0" ipsec-ready
     "$0" routes up
     update_software_stage "post-update health validation"
-    if "$0" test; then
-      :
-    else
-      log "health validation failed after update; restoring backup"
-      restore_release_binaries "$before/bin"
-      restore_cmd "$before/dnscomplex-pre-update.tar.gz"
-      rm -rf "$before"
-      die "software update rolled back"
-    fi
-  else
-    log "validation failed after update; restoring config backup"
-    restore_release_binaries "$before/bin"
-    restore_cmd "$before/dnscomplex-pre-update.tar.gz"
+    "$0" test
+  )
+  component_rc=$?
+  set -e
+  if [[ "$component_rc" != "0" ]]; then
+    warn "dnscomplex component update failed with status $component_rc; starting application rollback"
+    rollback_rc=0
+    rollback_component_update "$before" || rollback_rc=$?
     rm -rf "$before"
-    die "software update rolled back"
+    if [[ "$rollback_rc" != "0" ]]; then
+      die "software component update failed and application rollback was incomplete"
+    fi
+    die "software component update failed and application changes were rolled back"
   fi
   rm -rf "$before"
 }
@@ -6461,7 +6494,6 @@ update_software_cmd() {
   if [[ "$DNSCOMPLEX_UPDATE_CHANNEL" == "pinned" || "$GITHUB_RELEASE_POLICY" == "pinned" ]]; then
     [[ -n "$DNSCOMPLEX_PINNED_VERSION" ]] || die "--version VERSION is required for pinned updates"
   fi
-  write_config_cmd
   mkdir -p /var/log/dnscomplex
   local stamp_log log_file rc
   stamp_log="/var/log/dnscomplex/update-$(date +%Y%m%d-%H%M%S).log"

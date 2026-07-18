@@ -1077,8 +1077,11 @@ update_software_body=$(awk '
   inside && /^}/ { exit }
 ' "$tmpdir/root/usr/local/sbin/dnscomplex")
 case "$update_software_body" in
-  *acquire_maintenance_lock*write_config_cmd*update_software_impl*) ;;
-  *) fail "software update must acquire maintenance lock before mutation" ;;
+  *acquire_maintenance_lock*update_software_impl*) ;;
+  *) fail "software update must acquire maintenance lock before entering the transaction" ;;
+esac
+case "$update_software_body" in
+  *write_config_cmd*) fail "software update command mutated config before the transaction backup" ;;
 esac
 update_software_impl_body=$(awk '
   /^update_software_impl\(\) \{/ { inside=1 }
@@ -1086,10 +1089,16 @@ update_software_impl_body=$(awk '
   inside && /^}/ { exit }
 ' "$tmpdir/root/usr/local/sbin/dnscomplex")
 case "$update_software_impl_body" in
+  *backup_cmd*backup_release_binaries*'apt-get update'*write_config_cmd*update_release_if_needed*) ;;
+  *) fail "software update must back up before APT and defer config mutation until APT succeeds" ;;
+esac
+case "$update_software_impl_body" in
   *'systemctl restart "${UPDATED_SERVICES[@]}"'*'"$0" ipsec-ready'*'"$0" routes up'*\
 'post-update health validation'*'"$0" test'*) ;;
   *) fail "software update must restore selected egress before post-update validation" ;;
 esac
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'rollback_component_update "$before"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'Debian package changes remain managed by apt/dpkg'
 restore_body=$(awk '
   /^restore_cmd\(\) \{/ { inside=1 }
   inside { print }
