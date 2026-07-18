@@ -9022,11 +9022,17 @@ enable_services() {
   systemctl enable --now dnscomplex-ipsec-ifaces
   for ipsec_unit in strongswan-swanctl strongswan-starter strongswan ipsec; do
     if systemctl list-unit-files "${ipsec_unit}.service" >/dev/null 2>&1; then
-      systemctl enable --now "$ipsec_unit" && ipsec_enabled=1 && break
+      if systemctl enable --now "$ipsec_unit" && systemctl restart "$ipsec_unit"; then
+        ipsec_enabled=1
+        break
+      fi
     fi
   done
   [[ "$ipsec_enabled" == "1" ]] || warn "no strongSwan systemd unit found; IPsec may need manual service setup"
   systemctl enable --now dnscomplex-ipsec-ready dnscomplex-routing dnscomplex-health.timer dnscomplex-update.timer dnscomplex-cn-overrides.timer dnscomplex-nftset-refresh.timer dnscomplex-metrics-sample.timer
+  systemctl reset-failed dnscomplex-ipsec-ready dnscomplex-routing
+  systemctl restart dnscomplex-ipsec-ready
+  systemctl restart dnscomplex-routing
   systemctl restart dnscomplex-health.timer \
     dnscomplex-update.timer \
     dnscomplex-cn-overrides.timer \

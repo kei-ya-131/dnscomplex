@@ -498,17 +498,19 @@ enable_services_body=$(awk '
   inside && /^}/ { exit }
 ' "$repo_root/install.sh")
 ipsec_enable_line=$(grep -nF 'for ipsec_unit in' <<<"$enable_services_body")
+ipsec_restart_line=$(grep -nF 'systemctl restart "$ipsec_unit"' <<<"$enable_services_body")
 ready_enable_line=$(grep -nF 'systemctl enable --now dnscomplex-ipsec-ready' <<<"$enable_services_body")
 network_enable_line=$(grep -nF 'systemctl enable --now dnscomplex-network-ready' <<<"$enable_services_body")
-[[ -n "$network_enable_line" && -n "$ipsec_enable_line" && -n "$ready_enable_line" ]] ||
+[[ -n "$network_enable_line" && -n "$ipsec_enable_line" && -n "$ipsec_restart_line" && -n "$ready_enable_line" ]] ||
   fail "service enable order markers are missing"
 ipsec_enable_line=${ipsec_enable_line%%:*}
+ipsec_restart_line=${ipsec_restart_line%%:*}
 ready_enable_line=${ready_enable_line%%:*}
 network_enable_line=${network_enable_line%%:*}
 ((network_enable_line < ipsec_enable_line)) ||
   fail "network readiness must start before IPsec services"
-((ipsec_enable_line < ready_enable_line)) ||
-  fail "selected strongSwan unit must start before IPsec readiness"
+((ipsec_enable_line < ipsec_restart_line && ipsec_restart_line < ready_enable_line)) ||
+  fail "selected strongSwan unit must restart before IPsec readiness"
 assert_not_contains "$repo_root/install.sh" 'dhcpcd --rebind "$WAN_IFACE"'
 assert_contains "$repo_root/install.sh" 'systemctl restart dnscomplex-health.timer'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'apply_runtime_network_settings'
