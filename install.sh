@@ -7016,23 +7016,15 @@ PY
 }
 
 redact_stream() {
-  python3 -c '
-import re
-import sys
-
-text = sys.stdin.read()
-patterns = [
-    (r"(AI_IPSEC_USERNAME|CN_IPSEC_USERNAME|AI_IPSEC_PASSWORD|CN_IPSEC_PASSWORD|DNSCOMPLEX_WEB_PASSWORD|AI_XRAY_URI|CN_XRAY_URI|AI_XRAY_OUTBOUND_JSON|CN_XRAY_OUTBOUND_JSON|GITHUB_TOKEN|GH_TOKEN|TOKEN|USERNAME|PASSWORD|SECRET|PSK|COOKIE|SESSION)=([^\s]+)", r"\1=[REDACTED_SECRET]"),
-    (r"(vless|vmess|trojan|ss)://[^\s]+", r"\1://[REDACTED_XRAY_URI]"),
-    (r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "[REDACTED_UUID]"),
-    (r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", "[REDACTED_IPV4]"),
-    (r"\bfd[0-9a-fA-F:]*:[0-9a-fA-F:]*\b", "[REDACTED_IPV6]"),
-    (r"\b[\w.-]+\.local\b", "[REDACTED_HOSTNAME]"),
-]
-for pattern, repl in patterns:
-    text = re.sub(pattern, repl, text)
-sys.stdout.write(text)
-'
+  local redactor
+  local -a args
+  redactor=$(fs_path /usr/local/lib/dnscomplex-redact/redact.py)
+  [[ -x "$redactor" ]] || die "redaction helper is unavailable"
+  args=("$redactor")
+  if [[ -r "$CONFIG" ]]; then
+    args+=(--config "$CONFIG")
+  fi
+  python3 "${args[@]}"
 }
 
 render_config_cmd() {
@@ -7078,9 +7070,9 @@ CN_IPSEC_PASSWORD=
 EOF
 }
 
-support_bundle_cmd() {
+support_bundle_cmd() (
   need_root
-  local output="" include_logs=standard tmp
+  local output="" include_logs=standard tmp rel
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --output) output=${2:-}; shift 2 ;;
@@ -7091,6 +7083,7 @@ support_bundle_cmd() {
   case "$include_logs" in minimal|standard|full) ;; *) die "--include-logs must be minimal, standard, or full" ;; esac
   output=${output:-"/var/log/dnscomplex/support-bundle-$(date +%Y%m%d-%H%M%S).tar.gz"}
   tmp=$(mktemp -d)
+  trap 'rm -rf -- "$tmp"' EXIT
   mkdir -p "$tmp/raw" "$tmp/redacted"
   {
     printf 'dnscomplex_version=%s\n' "${DNSCOMPLEX_VERSION:-unknown}"
@@ -7124,9 +7117,8 @@ support_bundle_cmd() {
   done < <(find "$tmp/raw" -type f -print0)
   mkdir -p "$(dirname "$output")"
   tar -czf "$output" -C "$tmp/redacted" .
-  rm -rf "$tmp"
   log "support bundle written: $output"
-}
+)
 
 install_smartdns_release() {
   local arch asset tmp
@@ -7341,6 +7333,7 @@ usr/local/lib/dnscomplex-xray
 usr/local/lib/dnscomplex-soak
 usr/local/lib/dnscomplex-metrics
 usr/local/lib/dnscomplex-web
+usr/local/lib/dnscomplex-redact
 usr/local/sbin/dnscomplex
 opt/AdGuardHome
 var/lib/smartdns
@@ -8692,6 +8685,159 @@ groups:
 EOF
 }
 
+render_redactor() {
+  write_file /usr/local/lib/dnscomplex-redact/redact.py <<'PY'
+#!/usr/bin/env python3
+import argparse
+import os
+import re
+import shlex
+import sys
+
+REDACTED = "[REDACTED_SECRET]"
+EXACT_SECRET_KEYS = {
+    "AI_IPSEC_USERNAME",
+    "AI_IPSEC_PASSWORD",
+    "CN_IPSEC_USERNAME",
+    "CN_IPSEC_PASSWORD",
+    "DNSCOMPLEX_WEB_PASSWORD",
+    "AI_XRAY_URI",
+    "CN_XRAY_URI",
+    "AI_XRAY_OUTBOUND_JSON",
+    "CN_XRAY_OUTBOUND_JSON",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+}
+SECRET_KEY_WORDS = (
+    "PASSWORD",
+    "PASSWD",
+    "USERNAME",
+    "TOKEN",
+    "SECRET",
+    "PSK",
+    "COOKIE",
+    "SESSION",
+    "AUTHORIZATION",
+)
+ASSIGNMENT_RE = re.compile(
+    r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*?)(?:\r?\n)?$"
+)
+SECRET_KEY_PATTERN = (
+    r"(?:password|passwd|username|token|secret|psk|cookie|session|authorization|"
+    r"ai_ipsec_username|cn_ipsec_username|ai_ipsec_password|cn_ipsec_password|"
+    r"dnscomplex_web_password|ai_xray_uri|cn_xray_uri|"
+    r"ai_xray_outbound_json|cn_xray_outbound_json|github_token|gh_token)"
+)
+JSON_SECRET_RE = re.compile(
+    rf'(?i)("{SECRET_KEY_PATTERN}"\s*:\s*)'
+    r'("(?:\\.|[^"\\])*"|[^,}\r\n]*)'
+)
+INLINE_SECRET_RE = re.compile(
+    rf"(?im)(^|[\s,;])({SECRET_KEY_PATTERN})(\s*[=:]\s*)"
+    r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n]*)"
+)
+
+
+def is_secret_key(key):
+    upper = key.upper()
+    return upper in EXACT_SECRET_KEYS or any(word in upper for word in SECRET_KEY_WORDS)
+
+
+def assignment_block(lines, start):
+    match = ASSIGNMENT_RE.match(lines[start])
+    if not match:
+        return start, None, None
+    logical = match.group(4)
+    end = start
+    while True:
+        try:
+            parts = shlex.split(logical, comments=False, posix=True)
+            return end, match, " ".join(parts)
+        except ValueError:
+            end += 1
+            if end >= len(lines):
+                return len(lines) - 1, match, None
+            logical += "\n" + lines[end].rstrip("\r\n")
+
+
+def secret_values(text):
+    lines = text.splitlines(keepends=True)
+    values = []
+    index = 0
+    while index < len(lines):
+        end, match, value = assignment_block(lines, index)
+        if match and is_secret_key(match.group(2)) and value:
+            values.append(value)
+        index = end + 1 if match else index + 1
+    return values
+
+
+def redact_assignments(text):
+    lines = text.splitlines(keepends=True)
+    output = []
+    index = 0
+    while index < len(lines):
+        end, match, _ = assignment_block(lines, index)
+        if not match or not is_secret_key(match.group(2)):
+            output.append(lines[index])
+            index += 1
+            continue
+        block = lines[index : end + 1]
+        newline_count = sum(line.count("\n") for line in block)
+        output.append(
+            match.group(1)
+            + match.group(2)
+            + match.group(3)
+            + REDACTED
+            + ("\n" * newline_count)
+        )
+        index = end + 1
+    return "".join(output)
+
+
+def redact(text, config_text=""):
+    literals = secret_values(config_text) + secret_values(text)
+    for value in sorted({item for item in literals if len(item) >= 4}, key=len, reverse=True):
+        text = text.replace(value, REDACTED)
+    text = redact_assignments(text)
+    text = JSON_SECRET_RE.sub(lambda match: match.group(1) + f'"{REDACTED}"', text)
+    text = INLINE_SECRET_RE.sub(
+        lambda match: match.group(1) + match.group(2) + match.group(3) + REDACTED,
+        text,
+    )
+    patterns = [
+        (r"(?i)\b(vless|vmess|trojan|ss)://[^\s'\"<>]+", r"\1://[REDACTED_XRAY_URI]"),
+        (
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            "[REDACTED_UUID]",
+        ),
+        (r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", "[REDACTED_IPV4]"),
+        (r"\bfd[0-9a-fA-F:]*:[0-9a-fA-F:]*\b", "[REDACTED_IPV6]"),
+        (r"\b[\w.-]+\.local\b", "[REDACTED_HOSTNAME]"),
+    ]
+    for pattern, replacement in patterns:
+        text = re.sub(pattern, replacement, text)
+    return text
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config")
+    args = parser.parse_args()
+    config_text = ""
+    if args.config and os.path.isfile(args.config):
+        with open(args.config, "r", encoding="utf-8", errors="replace") as handle:
+            config_text = handle.read()
+    sys.stdout.write(redact(sys.stdin.read(), config_text))
+
+
+if __name__ == "__main__":
+    main()
+PY
+  chmod_target 0755 /usr/local/lib/dnscomplex-redact/redact.py
+}
+
 render_web_interface() {
   write_file /usr/local/lib/dnscomplex-web/app.py <<'PY'
 #!/usr/bin/env python3
@@ -8706,6 +8852,7 @@ import shlex
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -8713,6 +8860,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONFIG = "/etc/dnscomplex/config.env"
 DNSCOMPLEX = "/usr/local/sbin/dnscomplex"
+REDACTOR = "/usr/local/lib/dnscomplex-redact/redact.py"
 
 SERVICES = [
     "sing-box.service",
@@ -9529,21 +9677,23 @@ def safe_config():
     return safe
 
 def redact_text(text):
-    patterns = [
-        (r"(AI_IPSEC_USERNAME|CN_IPSEC_USERNAME|AI_IPSEC_PASSWORD|CN_IPSEC_PASSWORD|DNSCOMPLEX_WEB_PASSWORD|AI_XRAY_URI|CN_XRAY_URI|AI_XRAY_OUTBOUND_JSON|CN_XRAY_OUTBOUND_JSON|GITHUB_TOKEN|GH_TOKEN|TOKEN|USERNAME|PASSWORD|SECRET|PSK|COOKIE|SESSION)=([^\s]+)", r"\1=[REDACTED_SECRET]"),
-        (r"(vless|vmess|trojan|ss)://[^\s]+", r"\1://[REDACTED_XRAY_URI]"),
-        (r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "[REDACTED_UUID]"),
-        (r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", "[REDACTED_IPV4]"),
-        (r"\b(?:10|127)\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}\b", "[REDACTED_IPV4]"),
-        (r"\b172\.(?:1[6-9]|2[0-9]|3[0-1])\.[0-9]{1,3}\.[0-9]{1,3}\b", "[REDACTED_IPV4]"),
-        (r"\b192\.168\.[0-9]{1,3}\.[0-9]{1,3}\b", "[REDACTED_IPV4]"),
-        (r"\bfd[0-9a-fA-F:]*:[0-9a-fA-F:]*\b", "[REDACTED_IPV6]"),
-        (r"\b[\w.-]+\.local\b", "[REDACTED_HOSTNAME]"),
-    ]
-    redacted = text
-    for pattern, repl in patterns:
-        redacted = re.sub(pattern, repl, redacted)
-    return redacted
+    args = [sys.executable, REDACTOR]
+    if os.path.isfile(CONFIG):
+        args.extend(["--config", CONFIG])
+    try:
+        proc = subprocess.run(
+            args,
+            input=text,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "[REDACTION_FAILED]"
+    if proc.returncode != 0:
+        return "[REDACTION_FAILED]"
+    return proc.stdout
 
 def wizard_template():
     return shell_output([DNSCOMPLEX, "wizard"], 10)
@@ -10453,6 +10603,7 @@ validate_rendered_install() {
   local swan_file=/etc/swanctl/swanctl.conf
   local -a python_files=(
     /usr/local/lib/dnscomplex-metrics/exporter.py
+    /usr/local/lib/dnscomplex-redact/redact.py
     /usr/local/lib/dnscomplex-soak/runner.py
     /usr/local/lib/dnscomplex-web/app.py
     /usr/local/lib/dnscomplex-xray/render.py
@@ -10548,6 +10699,7 @@ render_all() {
   render_management_script
   render_soak_runner
   render_metrics_exporter
+  render_redactor
   render_web_interface
 }
 
