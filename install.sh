@@ -1519,8 +1519,19 @@ render_adguard() {
   write_adguard_allow_rules >"$allow_rules"
   {
     cat <<EOF
-bind_host: 127.0.0.1
-bind_port: 3000
+http:
+  pprof:
+    port: 6060
+    enabled: false
+  doh:
+    routes:
+      - GET /dns-query
+      - POST /dns-query
+      - GET /dns-query/{ClientID}
+      - POST /dns-query/{ClientID}
+    insecure_enabled: false
+  address: 127.0.0.1:3000
+  session_ttl: 30d
 users: []
 auth_attempts: 5
 block_auth_min: 15
@@ -1584,7 +1595,7 @@ log:
   max_size: 100
   max_age: 3
   compress: false
-schema_version: 29
+schema_version: 34
 EOF
   } | write_file /etc/AdGuardHome/AdGuardHome.yaml
   rm -f "$allow_rules"
@@ -1600,7 +1611,7 @@ After=dnscomplex-network-ready.service
 [Service]
 Type=simple
 DynamicUser=false
-ExecStart=/opt/AdGuardHome/AdGuardHome -c /etc/AdGuardHome/AdGuardHome.yaml -w /opt/AdGuardHome
+ExecStart=/opt/AdGuardHome/AdGuardHome --web-addr 127.0.0.1:3000 -c /etc/AdGuardHome/AdGuardHome.yaml -w /opt/AdGuardHome
 Restart=on-failure
 RestartSec=5s
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -2933,12 +2944,60 @@ normalize_adguard_cache_config() {
   rm -f "$cache_block"
 }
 
+normalize_adguard_http_config() {
+  local input=$1
+  local output=$2
+  if grep -q '^http:[[:space:]]*$' "$input"; then
+    awk '
+      /^http:[[:space:]]*$/ {
+        in_http = 1
+        saw_address = 0
+        print
+        next
+      }
+      in_http && /^[^[:space:]#]/ {
+        if (!saw_address) {
+          print "  address: 127.0.0.1:3000"
+        }
+        in_http = 0
+      }
+      in_http && /^  address:/ {
+        if (!saw_address) {
+          print "  address: 127.0.0.1:3000"
+          saw_address = 1
+        }
+        next
+      }
+      $1 == "bind_host:" || $1 == "bind_port:" { next }
+      { print }
+      END {
+        if (in_http && !saw_address) {
+          print "  address: 127.0.0.1:3000"
+        }
+      }
+    ' "$input" >"$output"
+  else
+    {
+      cat <<'EOF'
+http:
+  pprof:
+    port: 6060
+    enabled: false
+  address: 127.0.0.1:3000
+  session_ttl: 30d
+EOF
+      awk '$1 != "bind_host:" && $1 != "bind_port:" { print }' "$input"
+    } >"$output"
+  fi
+}
+
 render_adguard_runtime() {
-  local tmp rules allow_rules merged
+  local tmp rules allow_rules merged normalized
   tmp=$(mktemp)
   rules=$(mktemp)
   allow_rules=$(mktemp)
   merged=$(mktemp)
+  normalized=$(mktemp)
   write_adguard_upstream_rules >"$rules"
   write_adguard_allow_rules >"$allow_rules"
 
@@ -2966,8 +3025,19 @@ render_adguard_runtime() {
   else
     {
       cat <<EOF
-bind_host: 127.0.0.1
-bind_port: 3000
+http:
+  pprof:
+    port: 6060
+    enabled: false
+  doh:
+    routes:
+      - GET /dns-query
+      - POST /dns-query
+      - GET /dns-query/{ClientID}
+      - POST /dns-query/{ClientID}
+    insecure_enabled: false
+  address: 127.0.0.1:3000
+  session_ttl: 30d
 users: []
 auth_attempts: 5
 block_auth_min: 15
@@ -3031,16 +3101,18 @@ log:
   max_size: 100
   max_age: 3
   compress: false
-schema_version: 29
+schema_version: 34
 EOF
     } >"$tmp"
   fi
 
+  normalize_adguard_http_config "$tmp" "$normalized"
+  mv "$normalized" "$tmp"
   normalize_adguard_cache_config "$tmp" "$tmp.cache"
   mv "$tmp.cache" "$tmp"
   merge_adguard_user_rules "$tmp" "$merged" "$allow_rules"
   install -m 0644 "$merged" /etc/AdGuardHome/AdGuardHome.yaml
-  rm -f "$tmp" "$rules" "$allow_rules" "$merged"
+  rm -f "$tmp" "$rules" "$allow_rules" "$merged" "$normalized"
 }
 
 apply_runtime_network_settings() {

@@ -104,6 +104,45 @@ assert_file "$tmpdir/root/var/lib/dnscomplex/geosite/ai.sources"
 assert_file "$tmpdir/root/var/lib/dnscomplex/geosite/ai-support.sources"
 assert_file "$tmpdir/root/var/lib/dnscomplex/geosite/cn-video.sources"
 
+cat >"$tmpdir/adguard-current.yaml" <<'EOF'
+http:
+  pprof:
+    port: 6060
+    enabled: false
+  address: 0.0.0.0:3000
+  session_ttl: 30d
+bind_host: 0.0.0.0
+bind_port: 3000
+dns:
+  bind_hosts:
+    - 0.0.0.0
+    - '::'
+  port: 53
+EOF
+bash -c 'source "$1"; normalize_adguard_http_config "$2" "$3"' \
+  _ "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  "$tmpdir/adguard-current.yaml" "$tmpdir/adguard-current.normalized.yaml"
+assert_contains "$tmpdir/adguard-current.normalized.yaml" '  address: 127.0.0.1:3000'
+assert_not_contains "$tmpdir/adguard-current.normalized.yaml" '  address: 0.0.0.0:3000'
+assert_not_contains "$tmpdir/adguard-current.normalized.yaml" 'bind_host:'
+assert_contains "$tmpdir/adguard-current.normalized.yaml" '    - 0.0.0.0'
+
+cat >"$tmpdir/adguard-legacy.yaml" <<'EOF'
+bind_host: 0.0.0.0
+bind_port: 3000
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 53
+EOF
+bash -c 'source "$1"; normalize_adguard_http_config "$2" "$3"' \
+  _ "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  "$tmpdir/adguard-legacy.yaml" "$tmpdir/adguard-legacy.normalized.yaml"
+assert_contains "$tmpdir/adguard-legacy.normalized.yaml" 'http:'
+assert_contains "$tmpdir/adguard-legacy.normalized.yaml" '  address: 127.0.0.1:3000'
+assert_not_contains "$tmpdir/adguard-legacy.normalized.yaml" 'bind_host:'
+assert_contains "$tmpdir/adguard-legacy.normalized.yaml" '    - 0.0.0.0'
+
 assert_contains "$tmpdir/root/etc/sing-box/config.json" '"type": "tun"'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" '"auto_route": true'
 assert_contains "$tmpdir/root/etc/sing-box/config.json" '"auto_redirect": true'
@@ -192,8 +231,9 @@ assert_not_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'nameserver /domai
 assert_not_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'nftset /domain-set'
 
 assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" "    - '127.0.0.1:1053'"
-assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" 'bind_host: 127.0.0.1'
-assert_not_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" 'bind_host: 0.0.0.0'
+assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" 'http:'
+assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" '  address: 127.0.0.1:3000'
+assert_not_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" 'bind_host:'
 assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" '  cache_enabled: false'
 assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" '  cache_size: 0'
 assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" '  cache_optimistic: false'
@@ -445,6 +485,10 @@ assert_contains "$tmpdir/root/etc/systemd/system/sing-box.service.d/dnscomplex.c
   'After=dnscomplex-network-ready.service'
 assert_contains "$tmpdir/root/etc/systemd/system/AdGuardHome.service" \
   'Requires=dnscomplex-network-ready.service'
+assert_contains "$tmpdir/root/etc/systemd/system/AdGuardHome.service" \
+  '--web-addr 127.0.0.1:3000'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  '  address: 127.0.0.1:3000'
 assert_contains "$repo_root/install.sh" 'dnscomplex-cn-overrides.timer'
 assert_contains "$repo_root/install.sh" 'dnscomplex-nftset-refresh.timer'
 assert_contains "$repo_root/install.sh" 'dnscomplex-ipsec-ready'
