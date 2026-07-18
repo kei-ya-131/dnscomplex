@@ -810,7 +810,7 @@ assert_not_contains "$tmpdir/ipsec-ready-success.log" 'simulated optional plugin
 reset_state
 if ! DNS_TEST_WAN_ROUTE=filtered_dev_elided DNS_TEST_IPSEC_START_EMPTY=1 \
      DNS_TEST_AI_VIP=10.64.0.1 DNS_TEST_CN_VIP=10.64.0.2 \
-     DNSCOMPLEX_IPSEC_BOOT_TIMEOUT=1 \
+     DNSCOMPLEX_IPSEC_BOOT_TIMEOUT=5 \
      run_manager ipsec-ready >"$tmpdir/ipsec-filtered-route.log" 2>&1; then
   fail "IPsec readiness rejected a valid default route after iproute2 elided its device"
 fi
@@ -863,6 +863,23 @@ DNS_TEST_CONFIG="$both_xray_boot_config" run_manager ipsec-ready
 assert_not_contains "$calls" 'ip -4 -o addr show dev eth0 scope global'
 assert_not_contains "$calls" 'swanctl --load-all --noprompt'
 assert_not_contains "$calls" 'swanctl --initiate --child'
+
+reset_state
+DNS_TEST_CONFIG="$both_xray_boot_config" \
+  DNS_TEST_WAN_ROUTE=filtered_dev_elided \
+  run_manager network-ready
+assert_contains "$calls" 'ip -4 -o addr show dev eth0 scope global'
+grep -Fxq 'ip -4 route show default' "$calls" ||
+  fail "network readiness did not inspect complete default routes"
+assert_not_contains "$calls" 'swanctl'
+
+reset_state
+if DNS_TEST_CONFIG="$both_xray_boot_config" DNS_TEST_WAN_ROUTE=missing \
+   DNS_TEST_REAL_SLEEP=1 DNSCOMPLEX_IPSEC_BOOT_TIMEOUT=1 \
+   run_manager network-ready >"$tmpdir/network-ready-timeout.log" 2>&1; then
+  fail "network readiness accepted a missing RouterOS default route"
+fi
+assert_not_contains "$calls" 'swanctl'
 
 vlan_boot_config="$tmpdir/vlan-boot.env"
 cat >"$vlan_boot_config" <<'EOF'

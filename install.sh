@@ -711,8 +711,8 @@ install_packages() {
     -o Dpkg::Options::=--force-confdef \
     -o Dpkg::Options::=--force-confold \
     install -y \
-    ca-certificates curl jq tar unzip iproute2 nftables conntrack dnsmasq radvd \
-    strongswan-swanctl strongswan-charon libcharon-extra-plugins \
+    ca-certificates curl jq tar unzip iproute2 nftables conntrack dnsmasq radvd kmod \
+    strongswan-swanctl strongswan-charon libcharon-extra-plugins libstrongswan-extra-plugins \
     cron dnsutils python3 coreutils util-linux
   if [[ "$PROMETHEUS_MODE" == "local" ]]; then
     apt-get \
@@ -1106,6 +1106,10 @@ EOF
 }
 
 render_network() {
+  write_file /etc/modules-load.d/dnscomplex.conf <<'EOF'
+nf_conntrack
+EOF
+
   if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
     write_file /etc/sysctl.d/90-dnscomplex.conf <<EOF
 net.ipv4.ip_forward = 1
@@ -1263,8 +1267,53 @@ configure_dhcpcd_resolver_ownership() {
   fi
 }
 
+configure_nsswitch_resolver_ownership() {
+  [[ "$DEPLOY_MODE" == "routeros-policy" ]] || return 0
+  local target tmp
+  target=$(target_path /etc/nsswitch.conf)
+  [[ -f "$target" ]] || return 0
+  tmp=$(mktemp)
+  awk '
+    $1 == "hosts:" {
+      output = "hosts:"
+      saw_dns = 0
+      comment = ""
+      for (i = 2; i <= NF; i++) {
+        if ($i ~ /^#/) {
+          for (j = i; j <= NF; j++) {
+            comment = comment (comment == "" ? "" : " ") $j
+          }
+          break
+        }
+        if ($i == "resolve") {
+          if (i < NF && $(i + 1) ~ /^\[/) {
+            i++
+          }
+          continue
+        }
+        if ($i == "dns") {
+          saw_dns = 1
+        }
+        output = output " " $i
+      }
+      if (!saw_dns) {
+        output = output " dns"
+      }
+      if (comment != "") {
+        output = output " " comment
+      }
+      print output
+      next
+    }
+    { print }
+  ' "$target" >"$tmp"
+  install -m 0644 "$tmp" "$target"
+  rm -f "$tmp"
+}
+
 apply_runtime_network_settings() {
   [[ "$DRY_RUN" == "1" ]] && return 0
+  modprobe nf_conntrack
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
   sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
   sysctl -w net.ipv6.conf.default.forwarding=1 >/dev/null
@@ -1470,7 +1519,7 @@ render_adguard() {
   write_adguard_allow_rules >"$allow_rules"
   {
     cat <<EOF
-bind_host: 0.0.0.0
+bind_host: 127.0.0.1
 bind_port: 3000
 users: []
 auth_attempts: 5
@@ -1545,8 +1594,8 @@ render_adguard_service() {
   write_file /etc/systemd/system/AdGuardHome.service <<'EOF'
 [Unit]
 Description=AdGuard Home DNS filtering server
-After=network-online.target
-Wants=network-online.target
+Requires=dnscomplex-network-ready.service
+After=dnscomplex-network-ready.service
 
 [Service]
 Type=simple
@@ -2163,6 +2212,34 @@ RestartSec=2s
 TimeoutStopSec=5s
 EOF
 
+  write_file /etc/systemd/system/sing-box.service.d/dnscomplex.conf <<'EOF'
+[Unit]
+Requires=dnscomplex-network-ready.service
+After=dnscomplex-network-ready.service
+EOF
+
+  write_file /etc/systemd/system/dnscomplex-network-ready.service <<'EOF'
+[Unit]
+Description=dnscomplex wait for the configured network underlay
+After=network-online.target
+Wants=network-online.target
+Before=dnscomplex-ipsec-ready.service dnscomplex-web.service sing-box.service AdGuardHome.service
+Upholds=dnscomplex-ipsec-ready.service sing-box.service AdGuardHome.service dnscomplex-web.service
+StartLimitIntervalSec=5min
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/dnscomplex network-ready
+TimeoutStartSec=120s
+Restart=on-failure
+RestartSec=15s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
   write_file /etc/systemd/system/dnscomplex-ipsec-ifaces.service <<EOF
 [Unit]
 Description=dnscomplex route-based IPsec XFRM interfaces
@@ -2182,9 +2259,8 @@ EOF
   write_file /etc/systemd/system/dnscomplex-ipsec-ready.service <<EOF
 [Unit]
 Description=dnscomplex wait for selected IPsec egress
-After=network-online.target dnscomplex-ipsec-ifaces.service strongswan-starter.service strongswan-swanctl.service strongswan.service ipsec.service
-Wants=network-online.target
-Requires=dnscomplex-ipsec-ifaces.service
+After=dnscomplex-network-ready.service dnscomplex-ipsec-ifaces.service strongswan-starter.service strongswan-swanctl.service strongswan.service ipsec.service
+Requires=dnscomplex-network-ready.service dnscomplex-ipsec-ifaces.service
 Before=dnscomplex-routing.service
 OnSuccess=dnscomplex-routing.service
 StartLimitIntervalSec=5min
@@ -2890,7 +2966,7 @@ render_adguard_runtime() {
   else
     {
       cat <<EOF
-bind_host: 0.0.0.0
+bind_host: 127.0.0.1
 bind_port: 3000
 users: []
 auth_attempts: 5
@@ -2968,6 +3044,7 @@ EOF
 }
 
 apply_runtime_network_settings() {
+  modprobe nf_conntrack
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
   sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
   sysctl -w net.ipv6.conf.default.forwarding=1 >/dev/null
@@ -3298,6 +3375,7 @@ Commands:
   support-bundle [--output PATH] [--include-logs minimal|standard|full]
   backup [OUTPUT_TAR_GZ]
   restore INPUT_TAR_GZ
+  network-ready
   ipsec-ready
   ipsec-ifaces up|down
   routes up|down
@@ -3346,6 +3424,7 @@ status_cmd() {
     xray-dnscomplex.service \
     dnscomplex-web.service \
     dnscomplex-metrics.service \
+    dnscomplex-network-ready.service \
     dnscomplex-ipsec-ifaces.service \
     dnscomplex-ipsec-ready.service \
     dnscomplex-routing.service \
@@ -4148,6 +4227,16 @@ wait_for_ipsec_underlay() {
   done
 }
 
+network_ready_cmd() {
+  need_root
+  local timeout_seconds=${DNSCOMPLEX_IPSEC_BOOT_TIMEOUT:-90}
+  local deadline
+  [[ "$timeout_seconds" =~ ^[0-9]+$ ]] && ((timeout_seconds >= 1 && timeout_seconds <= 110)) ||
+    die "DNSCOMPLEX_IPSEC_BOOT_TIMEOUT must be 1-110 seconds at runtime"
+  deadline=$(($(date +%s) + timeout_seconds))
+  wait_for_ipsec_underlay "$deadline"
+}
+
 wait_for_swanctl_vici() {
   local deadline=$1 probe_timeout
   while true; do
@@ -4488,8 +4577,8 @@ fix_cmd() {
   systemctl reset-failed dnscomplex-update.service dnscomplex-update.timer 2>/dev/null || true
   "$0" ipsec-ready || warn "selected IPsec egress did not become ready during repair"
   "$0" routes up || warn "policy routing could not be restored during repair"
-  systemctl reset-failed dnscomplex-ipsec-ready dnscomplex-routing 2>/dev/null || true
-  systemctl restart dnscomplex-ipsec-ready dnscomplex-routing 2>/dev/null || true
+  systemctl reset-failed dnscomplex-network-ready dnscomplex-ipsec-ready dnscomplex-routing 2>/dev/null || true
+  systemctl restart dnscomplex-network-ready dnscomplex-ipsec-ready dnscomplex-routing 2>/dev/null || true
   render_adguard_runtime || true
   restart_dns_stack || true
   "$0" refresh-nftsets || true
@@ -6485,6 +6574,7 @@ main() {
     support-bundle) support_bundle_cmd "$@" ;;
     backup) backup_cmd "$@" ;;
     restore) restore_cmd "$@" ;;
+    network-ready) network_ready_cmd "$@" ;;
     ipsec-ready) ipsec_ready_cmd "$@" ;;
     ipsec-ifaces) ipsec_ifaces_cmd "$@" ;;
     routes) routes_cmd "$@" ;;
@@ -8830,8 +8920,8 @@ PY
   write_file /etc/systemd/system/dnscomplex-web.service <<'EOF'
 [Unit]
 Description=dnscomplex web management interface
-After=network-online.target
-Wants=network-online.target
+Requires=dnscomplex-network-ready.service
+After=dnscomplex-network-ready.service
 
 [Service]
 Type=simple
@@ -8856,6 +8946,7 @@ enable_services() {
     systemctl enable --now systemd-networkd nftables dnsmasq radvd
   fi
   systemctl restart nftables || true
+  systemctl enable --now dnscomplex-network-ready
   systemctl enable --now dnscomplex-ipsec-ifaces
   for ipsec_unit in strongswan-swanctl strongswan-starter strongswan ipsec; do
     if systemctl list-unit-files "${ipsec_unit}.service" >/dev/null 2>&1; then
@@ -8881,6 +8972,7 @@ render_all() {
   disable_systemd_ssh_generator
   render_network
   configure_dhcpcd_resolver_ownership
+  configure_nsswitch_resolver_ownership
   apply_runtime_network_settings
   resolve_default_ipv6_mode
   render_geosite_seeds
