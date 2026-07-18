@@ -69,8 +69,8 @@ dnscomplex metrics-sample
 dnscomplex soak --duration 30m --clients 1000 --dns-qps 50 --profiles ai,cn,default
 dnscomplex validate-config /etc/dnscomplex/config.env
 dnscomplex render-config --redacted
-dnscomplex update-software --channel stable
-dnscomplex update-software --channel pinned --version v1.2.3
+dnscomplex update-software --allow-unverified-release-assets --channel stable
+dnscomplex system-update --acknowledge-no-os-rollback
 dnscomplex support-bundle --include-logs standard
 ```
 
@@ -79,7 +79,7 @@ Default service endpoints:
 - Web UI: `http://<vm-ip>:8088`
 - Metrics and RouterOS health probe: `http://<vm-ip>:9108/metrics`
 - Health probe JSON: `http://<vm-ip>:9108/healthz`
-- SOCKS: `<vm-ip>:1080`
+- SOCKS: `<vm-ip>:10800` in `routeros-policy` mode
 
 AI/CN Xray mode carries TCP/UDP through local Xray SOCKS inbounds. ICMP for AI/CN nftset destinations is blocked in Xray mode instead of falling back to default routing, so `ping` may fail by design.
 
@@ -91,7 +91,13 @@ AI/CN Xray mode carries TCP/UDP through local Xray SOCKS inbounds. ICMP for AI/C
 - `beta`: allow the newest non-draft GitHub release, including prereleases.
 - `pinned`: update GitHub-managed binaries only to `DNSCOMPLEX_PINNED_VERSION`.
 
-`update-software` still performs backup, package/release update, config checks, health checks, and rollback on failure. Logs are written under `/var/log/dnscomplex/update-*.log`.
+The daily timer updates only geosite/SRS data. `update-software` is manual-only
+because the four upstream projects do not share a uniform trusted signature
+chain; it requires explicit acknowledgement of unverified release assets,
+backs up managed state, validates the stack, and rolls back application files
+on failure. `system-update` is separate, never scheduled, and requires an
+external VM snapshot because dnscomplex cannot roll back Debian package
+changes.
 
 `support-bundle` creates a redacted `.tar.gz` for GitHub issues. It removes IPsec passwords, Xray URIs/UUIDs, GitHub tokens, private IPv4/IPv6 addresses, `.local` hostnames, cookies, and session-like secrets before packaging.
 

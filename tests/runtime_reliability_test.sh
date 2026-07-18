@@ -2044,12 +2044,6 @@ run_update_impl() {
     }
     apt-get() {
       printf "apt-get %s\n" "$*" >>"$DNS_TEST_UPDATE_CALLS"
-      if [[ "$DNS_TEST_UPDATE_FAIL_STAGE" == "apt-update" && "${1:-}" == "update" ]]; then
-        return 9
-      fi
-      if [[ "$DNS_TEST_UPDATE_FAIL_STAGE" == "apt-upgrade" && "$*" == *"upgrade"* ]]; then
-        return 9
-      fi
     }
     update_release_if_needed() {
       printf "release %s\n" "$1" >>"$DNS_TEST_UPDATE_CALLS"
@@ -2102,17 +2096,73 @@ for update_failure in \
     fail "configuration was not restored after $update_failure"
 done
 
-for apt_failure in apt-update apt-upgrade; do
-  if run_update_impl "$apt_failure"; then
-    fail "APT failure stage unexpectedly succeeded: $apt_failure"
-  fi
-  [[ ! -e "$update_restored_bins" && ! -e "$update_restored_config" ]] ||
-    fail "APT-only failure incorrectly claimed component rollback: $apt_failure"
-  assert_not_contains "$update_calls" 'write-config'
-done
-
 run_update_impl healthy
 [[ ! -e "$update_restored_bins" && ! -e "$update_restored_config" ]] ||
   fail "successful update unexpectedly ran rollback"
+assert_not_contains "$update_calls" 'apt-get '
+
+update_approval_marker="$tmpdir/update-approval-ran"
+if DNS_TEST_UPDATE_APPROVAL_MARKER="$update_approval_marker" \
+   DNSCOMPLEX_CONFIG="$config" \
+   MANAGER="$manager" \
+   bash -c '
+     set -euo pipefail
+     source "$MANAGER"
+     load_config
+     need_root() { :; }
+     acquire_maintenance_lock() { :; }
+     update_software_impl() { : >"$DNS_TEST_UPDATE_APPROVAL_MARKER"; }
+     update_software_cmd
+   ' >"$tmpdir/update-approval.log" 2>&1; then
+  fail "component update accepted missing unverified-asset acknowledgement"
+fi
+[[ ! -e "$update_approval_marker" ]] ||
+  fail "component update mutated state before explicit acknowledgement"
+
+system_update_calls="$tmpdir/system-update.calls"
+run_system_update_impl() {
+  : >"$system_update_calls"
+  DNS_TEST_SYSTEM_UPDATE_FAIL="${1:-none}" \
+  DNS_TEST_SYSTEM_UPDATE_CALLS="$system_update_calls" \
+  DNSCOMPLEX_CONFIG="$config" \
+  MANAGER="$manager" \
+  bash -c '
+    set -euo pipefail
+    source "$MANAGER"
+    load_config
+    need_root() { :; }
+    apt-get() {
+      printf "apt-get %s\n" "$*" >>"$DNS_TEST_SYSTEM_UPDATE_CALLS"
+      if [[ "$DNS_TEST_SYSTEM_UPDATE_FAIL" == "upgrade" && "$*" == *"upgrade"* ]]; then
+        return 9
+      fi
+    }
+    test_cmd() {
+      printf "test\n" >>"$DNS_TEST_SYSTEM_UPDATE_CALLS"
+    }
+    write_config_cmd() {
+      printf "forbidden-write-config\n" >>"$DNS_TEST_SYSTEM_UPDATE_CALLS"
+    }
+    update_release_if_needed() {
+      printf "forbidden-release-update\n" >>"$DNS_TEST_SYSTEM_UPDATE_CALLS"
+    }
+    rollback_component_update() {
+      printf "forbidden-rollback\n" >>"$DNS_TEST_SYSTEM_UPDATE_CALLS"
+    }
+    system_update_impl
+  '
+}
+
+run_system_update_impl healthy
+assert_contains "$system_update_calls" 'apt-get update'
+assert_contains "$system_update_calls" 'upgrade'
+assert_contains "$system_update_calls" '--with-new-pkgs'
+assert_contains "$system_update_calls" 'test'
+assert_not_contains "$system_update_calls" 'forbidden-'
+
+if run_system_update_impl upgrade >"$tmpdir/system-update-failure.log" 2>&1; then
+  fail "partial Debian package update failure was reported as success"
+fi
+assert_not_contains "$system_update_calls" 'forbidden-rollback'
 
 printf 'runtime reliability test: ok\n'
