@@ -76,11 +76,13 @@ assert_file "$tmpdir/root/etc/smartdns/smartdns.conf"
 assert_file "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml"
 assert_file "$tmpdir/root/etc/swanctl/swanctl.conf"
 assert_file "$tmpdir/root/etc/strongswan.d/charon/resolve.conf"
+assert_file "$tmpdir/root/etc/modules-load.d/dnscomplex.conf"
 assert_file "$tmpdir/root/etc/nftables.d/dnscomplex.nft"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.timer"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.timer"
+assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-network-ready.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-web.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics.service"
@@ -88,6 +90,7 @@ assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.timer"
 assert_file "$tmpdir/root/etc/systemd/system/xray-dnscomplex.service"
 assert_file "$tmpdir/root/etc/systemd/system/smartdns.service.d/dnscomplex.conf"
+assert_file "$tmpdir/root/etc/systemd/system/sing-box.service.d/dnscomplex.conf"
 assert_symlink_target "$tmpdir/root/etc/systemd/system-generators/systemd-ssh-generator" /dev/null
 assert_file "$tmpdir/root/usr/local/sbin/dnscomplex"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-xray/render.py"
@@ -189,6 +192,8 @@ assert_not_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'nameserver /domai
 assert_not_contains "$tmpdir/root/etc/smartdns/smartdns.conf" 'nftset /domain-set'
 
 assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" "    - '127.0.0.1:1053'"
+assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" 'bind_host: 127.0.0.1'
+assert_not_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" 'bind_host: 0.0.0.0'
 assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" '  cache_enabled: false'
 assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" '  cache_size: 0'
 assert_contains "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml" '  cache_optimistic: false'
@@ -236,10 +241,13 @@ assert_contains "$tmpdir/root/etc/sysctl.d/90-dnscomplex.conf" 'net.netfilter.nf
 assert_contains "$tmpdir/root/etc/sysctl.d/90-dnscomplex.conf" 'net.netfilter.nf_conntrack_tcp_timeout_established = 86400'
 assert_contains "$tmpdir/root/etc/sysctl.d/90-dnscomplex.conf" 'net.ipv4.tcp_max_syn_backlog = 65535'
 assert_contains "$tmpdir/root/etc/sysctl.d/90-dnscomplex.conf" 'net.ipv4.ip_local_port_range = 1024 65535'
+assert_contains "$tmpdir/root/etc/modules-load.d/dnscomplex.conf" 'nf_conntrack'
 assert_contains "$repo_root/install.sh" 'apply_runtime_network_settings'
 assert_contains "$repo_root/install.sh" 'resolve_default_ipv6_mode'
 assert_contains "$repo_root/install.sh" 'DEFAULT_IPV6_MODE'
 assert_contains "$repo_root/install.sh" 'sysctl -w net.ipv4.ip_forward=1'
+assert_contains "$repo_root/install.sh" 'modprobe nf_conntrack'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'modprobe nf_conntrack'
 
 for cmd in status test health fix doctor update-geosite add-domain remove-domain set-socks set-ipsec set-update-time refresh-nftsets refresh-cn-overrides trace-domain test-dns test-ipsec mss-calibrate routeros-print update-software backup restore metrics-sample soak wizard validate-config render-config support-bundle; do
   assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" "$cmd"
@@ -397,8 +405,20 @@ assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.timer" 
 assert_not_contains "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.timer" 'OnUnitActiveSec=6h'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.service" 'ExecStart=/usr/local/sbin/dnscomplex refresh-nftsets'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.timer" 'OnUnitActiveSec=5m'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-network-ready.service" \
+  'ExecStart=/usr/local/sbin/dnscomplex network-ready'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-network-ready.service" \
+  'Before=dnscomplex-ipsec-ready.service dnscomplex-web.service sing-box.service AdGuardHome.service'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-network-ready.service" \
+  'Upholds=dnscomplex-ipsec-ready.service sing-box.service AdGuardHome.service dnscomplex-web.service'
+assert_not_contains "$tmpdir/root/etc/systemd/system/dnscomplex-network-ready.service" \
+  'OnSuccess='
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-network-ready.service" \
+  'Restart=on-failure'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service" \
-  'After=network-online.target dnscomplex-ipsec-ifaces.service strongswan-starter.service strongswan-swanctl.service strongswan.service ipsec.service'
+  'After=dnscomplex-network-ready.service dnscomplex-ipsec-ifaces.service strongswan-starter.service strongswan-swanctl.service strongswan.service ipsec.service'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service" \
+  'Requires=dnscomplex-network-ready.service dnscomplex-ipsec-ifaces.service'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service" \
   'Before=dnscomplex-routing.service'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service" \
@@ -415,6 +435,16 @@ assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-routing.service" \
   'After=network-online.target nftables.service dnscomplex-ipsec-ifaces.service dnscomplex-ipsec-ready.service'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-routing.service" \
   'PartOf=nftables.service'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-web.service" \
+  'Requires=dnscomplex-network-ready.service'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-web.service" \
+  'After=dnscomplex-network-ready.service'
+assert_contains "$tmpdir/root/etc/systemd/system/sing-box.service.d/dnscomplex.conf" \
+  'Requires=dnscomplex-network-ready.service'
+assert_contains "$tmpdir/root/etc/systemd/system/sing-box.service.d/dnscomplex.conf" \
+  'After=dnscomplex-network-ready.service'
+assert_contains "$tmpdir/root/etc/systemd/system/AdGuardHome.service" \
+  'Requires=dnscomplex-network-ready.service'
 assert_contains "$repo_root/install.sh" 'dnscomplex-cn-overrides.timer'
 assert_contains "$repo_root/install.sh" 'dnscomplex-nftset-refresh.timer'
 assert_contains "$repo_root/install.sh" 'dnscomplex-ipsec-ready'
@@ -425,10 +455,14 @@ enable_services_body=$(awk '
 ' "$repo_root/install.sh")
 ipsec_enable_line=$(grep -nF 'for ipsec_unit in' <<<"$enable_services_body")
 ready_enable_line=$(grep -nF 'systemctl enable --now dnscomplex-ipsec-ready' <<<"$enable_services_body")
-[[ -n "$ipsec_enable_line" && -n "$ready_enable_line" ]] ||
+network_enable_line=$(grep -nF 'systemctl enable --now dnscomplex-network-ready' <<<"$enable_services_body")
+[[ -n "$network_enable_line" && -n "$ipsec_enable_line" && -n "$ready_enable_line" ]] ||
   fail "service enable order markers are missing"
 ipsec_enable_line=${ipsec_enable_line%%:*}
 ready_enable_line=${ready_enable_line%%:*}
+network_enable_line=${network_enable_line%%:*}
+((network_enable_line < ipsec_enable_line)) ||
+  fail "network readiness must start before IPsec services"
 ((ipsec_enable_line < ready_enable_line)) ||
   fail "selected strongSwan unit must start before IPsec readiness"
 assert_not_contains "$repo_root/install.sh" 'dhcpcd --rebind "$WAN_IFACE"'
@@ -600,6 +634,7 @@ assert_contains "$repo_root/install.sh" 'Dpkg::Options::=--force-confold'
 assert_contains "$repo_root/install.sh" 'upgrade -y --with-new-pkgs'
 assert_contains "$repo_root/install.sh" 'update_release_if_needed'
 assert_contains "$repo_root/install.sh" 'conntrack'
+assert_contains "$repo_root/install.sh" 'libstrongswan-extra-plugins'
 assert_contains "$repo_root/install.sh" 'dnscomplex update-geosite'
 assert_contains "$repo_root/install.sh" 'dnscomplex routes up || true'
 assert_contains "$repo_root/install.sh" 'doctor_cmd'
@@ -775,12 +810,21 @@ HA_MODE=primary
 HA_PRIMARY_IP=192.168.50.200
 HA_SECONDARY_IP=192.168.50.201
 EOF
+mkdir -p "$policy_tmp/root/etc"
+cat >"$policy_tmp/root/etc/nsswitch.conf" <<'EOF'
+passwd: files systemd
+group: files systemd
+hosts: files myhostname resolve [!UNAVAIL=return] # resolver chain
+networks: files
+EOF
 DNSCOMPLEX_ROOT="$policy_tmp/root" bash "$repo_root/install.sh" --dry-run --config "$policy_tmp/config.env"
 assert_file "$policy_tmp/root/etc/sing-box/config.json"
 assert_file "$policy_tmp/root/etc/nftables.d/dnscomplex.nft"
 assert_file "$policy_tmp/root/var/lib/dnscomplex/routeros.rsc"
 assert_contains "$policy_tmp/root/etc/dnscomplex/config.env" "DEPLOY_MODE='routeros-policy'"
 assert_contains "$policy_tmp/root/etc/dhcpcd.conf" 'nohook resolv.conf'
+assert_contains "$policy_tmp/root/etc/nsswitch.conf" 'hosts: files myhostname dns # resolver chain'
+assert_not_contains "$policy_tmp/root/etc/nsswitch.conf" ' resolve '
 assert_contains "$policy_tmp/root/etc/sing-box/config.json" '"include_interface": ['
 assert_contains "$policy_tmp/root/etc/sing-box/config.json" '"ens18"'
 assert_contains "$policy_tmp/root/etc/sing-box/config.json" '"listen": "192.168.50.200"'
