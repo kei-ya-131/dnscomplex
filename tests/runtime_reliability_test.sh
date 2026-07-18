@@ -1314,4 +1314,145 @@ run_watchdog healthy >"$tmpdir/final-lock-release.log" 2>&1
 assert_not_contains "$tmpdir/final-lock-release.log" 'coalescing invocation'
 assert_contains "$calls" 'dig '
 
+update_calls="$tmpdir/update.calls"
+update_restored_bins="$tmpdir/update.restored-bins"
+update_restored_config="$tmpdir/update.restored-config"
+update_self="$tmpdir/update-self"
+cat >"$update_self" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'self %s\n' "$*" >>"$DNS_TEST_UPDATE_CALLS"
+case "${1:-}" in
+  validate-config)
+    [[ "${DNS_TEST_UPDATE_FAIL_STAGE:-}" != "validate-config" ]]
+    ;;
+  ipsec-ready)
+    [[ "${DNS_TEST_UPDATE_FAIL_STAGE:-}" != "ipsec-ready" ]]
+    ;;
+  routes)
+    [[ "${2:-}" == "up" ]]
+    [[ "${DNS_TEST_UPDATE_FAIL_STAGE:-}" != "routes" ]]
+    ;;
+  test)
+    [[ "${DNS_TEST_UPDATE_FAIL_STAGE:-}" != "test" ]]
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+EOF
+chmod +x "$update_self"
+
+run_update_impl() {
+  local scenario=$1
+  : >"$update_calls"
+  rm -f "$update_restored_bins" "$update_restored_config"
+  set +e
+  DNSCOMPLEX_CONFIG="$config" \
+  DNSCOMPLEX_BASE="$state" \
+  DNSCOMPLEX_RUN_DIR="$run_dir" \
+  DNSCOMPLEX_FS_ROOT="$fake_root" \
+  DNSCOMPLEX_MAINTENANCE_LOCK="$tmpdir/maintenance.lock" \
+  DNS_TEST_UPDATE_CALLS="$update_calls" \
+  DNS_TEST_UPDATE_FAIL_STAGE="$scenario" \
+  DNS_TEST_UPDATE_RESTORED_BINS="$update_restored_bins" \
+  DNS_TEST_UPDATE_RESTORED_CONFIG="$update_restored_config" \
+  MANAGER="$manager" \
+  bash -c '
+    set -euo pipefail
+    source "$MANAGER"
+    load_config
+    need_root() { :; }
+    backup_cmd() {
+      printf "backup %s\n" "$*" >>"$DNS_TEST_UPDATE_CALLS"
+      [[ "$DNS_TEST_UPDATE_FAIL_STAGE" != "backup" ]]
+    }
+    backup_release_binaries() {
+      printf "backup-binaries %s\n" "$*" >>"$DNS_TEST_UPDATE_CALLS"
+    }
+    restore_release_binaries() {
+      printf "restore-binaries %s\n" "$*" >>"$DNS_TEST_UPDATE_CALLS"
+      : >"$DNS_TEST_UPDATE_RESTORED_BINS"
+    }
+    restore_cmd() {
+      printf "restore-config %s\n" "$*" >>"$DNS_TEST_UPDATE_CALLS"
+      : >"$DNS_TEST_UPDATE_RESTORED_CONFIG"
+    }
+    write_config_cmd() {
+      printf "write-config\n" >>"$DNS_TEST_UPDATE_CALLS"
+      [[ "$DNS_TEST_UPDATE_FAIL_STAGE" != "write-config" ]]
+    }
+    apt-get() {
+      printf "apt-get %s\n" "$*" >>"$DNS_TEST_UPDATE_CALLS"
+      if [[ "$DNS_TEST_UPDATE_FAIL_STAGE" == "apt-update" && "${1:-}" == "update" ]]; then
+        return 9
+      fi
+      if [[ "$DNS_TEST_UPDATE_FAIL_STAGE" == "apt-upgrade" && "$*" == *"upgrade"* ]]; then
+        return 9
+      fi
+    }
+    update_release_if_needed() {
+      printf "release %s\n" "$1" >>"$DNS_TEST_UPDATE_CALLS"
+      [[ "$DNS_TEST_UPDATE_FAIL_STAGE" != "release" ]] || return 9
+      UPDATED_SERVICES+=(sing-box)
+    }
+    sing-box() {
+      printf "sing-box %s\n" "$*" >>"$DNS_TEST_UPDATE_CALLS"
+      [[ "$DNS_TEST_UPDATE_FAIL_STAGE" != "config-check" ]]
+    }
+    xray() {
+      printf "xray %s\n" "$*" >>"$DNS_TEST_UPDATE_CALLS"
+    }
+    nft() {
+      printf "nft %s\n" "$*" >>"$DNS_TEST_UPDATE_CALLS"
+    }
+    systemctl() {
+      printf "systemctl %s\n" "$*" >>"$DNS_TEST_UPDATE_CALLS"
+      [[ "$DNS_TEST_UPDATE_FAIL_STAGE" != "restart" || "${1:-}" != "restart" ]]
+    }
+    set +e
+    (
+      set -e
+      update_software_impl
+    )
+    rc=$?
+    set -e
+    exit "$rc"
+  ' "$update_self"
+  local rc=$?
+  set -e
+  return "$rc"
+}
+
+for update_failure in \
+  write-config \
+  release \
+  validate-config \
+  config-check \
+  restart \
+  ipsec-ready \
+  routes \
+  test; do
+  if run_update_impl "$update_failure"; then
+    fail "update failure stage unexpectedly succeeded: $update_failure"
+  fi
+  [[ -f "$update_restored_bins" ]] ||
+    fail "release binaries were not restored after $update_failure"
+  [[ -f "$update_restored_config" ]] ||
+    fail "configuration was not restored after $update_failure"
+done
+
+for apt_failure in apt-update apt-upgrade; do
+  if run_update_impl "$apt_failure"; then
+    fail "APT failure stage unexpectedly succeeded: $apt_failure"
+  fi
+  [[ ! -e "$update_restored_bins" && ! -e "$update_restored_config" ]] ||
+    fail "APT-only failure incorrectly claimed component rollback: $apt_failure"
+  assert_not_contains "$update_calls" 'write-config'
+done
+
+run_update_impl healthy
+[[ ! -e "$update_restored_bins" && ! -e "$update_restored_config" ]] ||
+  fail "successful update unexpectedly ran rollback"
+
 printf 'runtime reliability test: ok\n'
