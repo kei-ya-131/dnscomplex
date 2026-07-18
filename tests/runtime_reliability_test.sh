@@ -342,8 +342,15 @@ if [[ "$*" == "-4 -o addr show dev $underlay_iface scope global" ]]; then
   esac
   exit 0
 fi
-if [[ "$*" == "-4 route show default dev $underlay_iface" ]]; then
-  if [[ "${DNS_TEST_WAN_ROUTE:-expected}" == "expected" ]]; then
+if [[ "$*" == "-4 route show default" ||
+      "$*" == "-4 route show default dev $underlay_iface" ]]; then
+  if [[ "${DNS_TEST_WAN_ROUTE:-expected}" != "missing" ]]; then
+    if [[ "${DNS_TEST_WAN_ROUTE:-expected}" == "filtered_dev_elided" &&
+          "$*" == *" dev $underlay_iface" ]]; then
+      printf 'default via %s proto dhcp src %s\n' \
+        "$underlay_gateway" "$underlay_ipv4"
+      exit 0
+    fi
     printf 'default via %s dev %s proto dhcp src %s\n' \
       "$underlay_gateway" "$underlay_iface" "$underlay_ipv4"
   fi
@@ -786,6 +793,16 @@ assert_call_before 'swanctl --load-all --noprompt' 'swanctl --initiate --child a
 assert_not_contains "$tmpdir/ipsec-ready-success.log" 'simulated optional plugin warning'
 
 reset_state
+if ! DNS_TEST_WAN_ROUTE=filtered_dev_elided DNS_TEST_IPSEC_START_EMPTY=1 \
+     DNS_TEST_AI_VIP=10.64.0.1 DNS_TEST_CN_VIP=10.64.0.2 \
+     DNSCOMPLEX_IPSEC_BOOT_TIMEOUT=1 \
+     run_manager ipsec-ready >"$tmpdir/ipsec-filtered-route.log" 2>&1; then
+  fail "IPsec readiness rejected a valid default route after iproute2 elided its device"
+fi
+grep -Fxq 'ip -4 route show default' "$calls" ||
+  fail "IPsec readiness did not inspect complete default routes"
+
+reset_state
 if DNS_TEST_WAN_ADDRESS=wrong DNS_TEST_REAL_SLEEP=1 \
    DNSCOMPLEX_IPSEC_BOOT_TIMEOUT=1 \
    run_manager ipsec-ready >"$tmpdir/ipsec-underlay-timeout.log" 2>&1; then
@@ -800,7 +817,8 @@ if DNS_TEST_WAN_ROUTE=missing DNS_TEST_REAL_SLEEP=1 \
    run_manager ipsec-ready >"$tmpdir/ipsec-route-timeout.log" 2>&1; then
   fail "IPsec readiness accepted a missing RouterOS default route"
 fi
-assert_contains "$calls" 'ip -4 route show default dev eth0'
+grep -Fxq 'ip -4 route show default' "$calls" ||
+  fail "IPsec readiness did not inspect complete default routes"
 assert_not_contains "$calls" 'swanctl --load-all --noprompt'
 
 reset_state
@@ -847,7 +865,8 @@ DNS_TEST_CONFIG="$vlan_boot_config" DNS_TEST_IPSEC_START_EMPTY=1 \
   DNS_TEST_UNDERLAY_GATEWAY=10.255.10.1 DNS_TEST_AI_VIP=10.64.0.1 \
   run_manager ipsec-ready
 assert_contains "$calls" 'ip -4 -o addr show dev eth0.10 scope global'
-assert_contains "$calls" 'ip -4 route show default dev eth0.10'
+grep -Fxq 'ip -4 route show default' "$calls" ||
+  fail "VLAN IPsec readiness did not inspect complete default routes"
 assert_contains "$calls" 'swanctl --initiate --child ai'
 assert_not_contains "$calls" 'swanctl --initiate --child cn'
 
