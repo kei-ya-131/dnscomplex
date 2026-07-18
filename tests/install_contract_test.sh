@@ -75,6 +75,7 @@ assert_file "$tmpdir/root/etc/sing-box/config.json"
 assert_file "$tmpdir/root/etc/smartdns/smartdns.conf"
 assert_file "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml"
 assert_file "$tmpdir/root/etc/swanctl/swanctl.conf"
+assert_file "$tmpdir/root/etc/strongswan.d/swanctl.conf"
 assert_file "$tmpdir/root/etc/strongswan.d/charon/resolve.conf"
 assert_file "$tmpdir/root/etc/strongswan.d/charon/agent.conf"
 assert_file "$tmpdir/root/etc/strongswan.d/charon/tpm.conf"
@@ -689,6 +690,9 @@ assert_contains "$repo_root/install.sh" 'libstrongswan-extra-plugins'
 assert_contains "$tmpdir/root/etc/strongswan.d/charon/agent.conf" 'load = no'
 assert_contains "$tmpdir/root/etc/strongswan.d/charon/tpm.conf" 'load = no'
 assert_contains "$tmpdir/root/etc/strongswan.d/charon/dhcp.conf" 'load = no'
+assert_contains "$tmpdir/root/etc/strongswan.d/swanctl.conf" \
+  'load = test-vectors aesni aes rc2 sha2 sha1 md5 mgf1 rdrand random x509 pubkey pkcs1 pkcs7 pkcs12 dnskey sshkey pem openssl gcrypt pkcs8 af-alg gmp curve25519 hmac kdf drbg'
+assert_not_contains "$tmpdir/root/etc/strongswan.d/swanctl.conf" 'agent'
 assert_contains "$repo_root/install.sh" 'dnscomplex update-geosite'
 assert_contains "$repo_root/install.sh" 'dnscomplex routes up || true'
 assert_contains "$repo_root/install.sh" 'doctor_cmd'

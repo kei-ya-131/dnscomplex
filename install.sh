@@ -1737,6 +1737,14 @@ dhcp {
     load = no
 }
 EOF
+
+  write_file /etc/strongswan.d/swanctl.conf <<'EOF'
+swanctl {
+    # Older releases load daemon-only plugins into this client by default.
+    # Use the credential-parser set adopted upstream for newer releases.
+    load = test-vectors aesni aes rc2 sha2 sha1 md5 mgf1 rdrand random x509 pubkey pkcs1 pkcs7 pkcs12 dnskey sshkey pem openssl gcrypt pkcs8 af-alg gmp curve25519 hmac kdf drbg
+}
+EOF
 }
 
 render_ipsec_ca_store() {
