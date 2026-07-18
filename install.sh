@@ -2424,17 +2424,16 @@ EOF
 
   write_file /etc/systemd/system/dnscomplex-update.service <<'EOF'
 [Unit]
-Description=dnscomplex conservative software and geosite update
+Description=dnscomplex verified geosite data update
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/dnscomplex update-software
 ExecStart=/usr/local/sbin/dnscomplex update-geosite
 EOF
 
   write_file /etc/systemd/system/dnscomplex-update.timer <<EOF
 [Unit]
-Description=Run dnscomplex conservative updates daily
+Description=Run dnscomplex verified geosite data update daily
 
 [Timer]
 OnCalendar=*-*-* $DNSCOMPLEX_UPDATE_TIME:00
@@ -3543,7 +3542,8 @@ Commands:
   test-ipsec
   mss-calibrate
   routeros-print
-  update-software [--channel stable|beta|pinned] [--version VERSION]
+  update-software --allow-unverified-release-assets [--channel stable|beta|pinned] [--version VERSION]
+  system-update --acknowledge-no-os-rollback
   metrics-sample
   soak [--duration 30m] [--clients 1000] [--dns-qps 50] [--profiles ai,cn,default] [--idle-resume] [--output-json PATH]
   wizard
@@ -7233,7 +7233,7 @@ rollback_component_update() {
     warn "application rollback incomplete: binaries_rc=$binary_rc config_rc=$config_rc"
     return 1
   fi
-  log "application rollback completed; Debian package changes remain managed by apt/dpkg"
+  log "application rollback completed"
 }
 
 acquire_maintenance_lock() {
@@ -7265,7 +7265,7 @@ acquire_maintenance_lock() {
 
 persistent_mutator_command() {
   case "${1:-}" in
-    fix|update-geosite|add-domain|remove-domain|set-socks|set-ipsec|set-web-password|set-local-host|set-egress|set-xray-uri|set-xray-json|test-xray|render-xray|set-update-time|refresh-nftsets|refresh-cn-overrides|mss-calibrate|update-software|metrics-sample|apply-config|apply-config-json|backup|restore)
+    fix|update-geosite|add-domain|remove-domain|set-socks|set-ipsec|set-web-password|set-local-host|set-egress|set-xray-uri|set-xray-json|test-xray|render-xray|set-update-time|refresh-nftsets|refresh-cn-overrides|mss-calibrate|update-software|system-update|metrics-sample|apply-config|apply-config-json|backup|restore)
       return 0
       ;;
     *)
@@ -7682,26 +7682,11 @@ update_software_impl() {
     rm -rf "$before"
     die "software update stopped because release binaries could not be backed up"
   fi
-  export DEBIAN_FRONTEND=noninteractive
-  update_software_stage "Debian apt update"
-  if ! apt-get update; then
-    rm -rf "$before"
-    die "Debian apt update failed before dnscomplex component mutations; no application rollback was needed"
-  fi
-  update_software_stage "Debian apt upgrade (package state remains managed by apt/dpkg)"
-  if ! apt-get \
-    -o Dpkg::Options::=--force-confdef \
-    -o Dpkg::Options::=--force-confold \
-    upgrade -y --with-new-pkgs; then
-    rm -rf "$before"
-    die "Debian apt upgrade failed before dnscomplex component mutations; inspect apt/dpkg state"
-  fi
-
   set +e
   (
     set -e
     write_config_cmd
-    update_software_stage "GitHub release metadata and asset verification channel=${DNSCOMPLEX_UPDATE_CHANNEL:-stable} policy=${GITHUB_RELEASE_POLICY:-latest} pinned=${DNSCOMPLEX_PINNED_VERSION:-}"
+    update_software_stage "manually approved unverified GitHub release assets channel=${DNSCOMPLEX_UPDATE_CHANNEL:-stable} policy=${GITHUB_RELEASE_POLICY:-latest} pinned=${DNSCOMPLEX_PINNED_VERSION:-}"
     update_release_if_needed sing-box SagerNet/sing-box sing-box install_singbox_release
     update_release_if_needed smartdns pymumu/smartdns smartdns install_smartdns_release
     update_release_if_needed AdGuardHome AdguardTeam/AdGuardHome AdGuardHome install_adguardhome_release
@@ -7742,9 +7727,13 @@ update_software_impl() {
 update_software_cmd() {
   need_root
   acquire_maintenance_lock
-  local requested_channel="" requested_version=""
+  local requested_channel="" requested_version="" allow_unverified=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --allow-unverified-release-assets)
+        allow_unverified=1
+        shift
+        ;;
       --channel)
         requested_channel=${2:-}
         shift 2
@@ -7754,10 +7743,12 @@ update_software_cmd() {
         shift 2
         ;;
       *)
-        die "usage: dnscomplex update-software [--channel stable|beta|pinned] [--version VERSION]"
+        die "usage: dnscomplex update-software --allow-unverified-release-assets [--channel stable|beta|pinned] [--version VERSION]"
         ;;
     esac
   done
+  [[ "$allow_unverified" == "1" ]] ||
+    die "GitHub release assets are not covered by a uniform trusted signature chain; rerun manually with --allow-unverified-release-assets only after reviewing the selected upstream releases"
   if [[ -n "$requested_channel" ]]; then
     case "$requested_channel" in stable|beta|pinned) ;; *) die "--channel must be stable, beta, or pinned" ;; esac
     DNSCOMPLEX_UPDATE_CHANNEL=$requested_channel
@@ -7789,6 +7780,31 @@ update_software_cmd() {
     log "software update failed; see $stamp_log"
     return "$rc"
   fi
+}
+
+system_update_impl() {
+  need_root
+  export DEBIAN_FRONTEND=noninteractive
+  update_software_stage "Debian apt update (external VM rollback required)"
+  apt-get update ||
+    die "Debian apt metadata update failed; no dnscomplex rollback was attempted"
+  update_software_stage "Debian apt upgrade (external VM rollback required)"
+  apt-get \
+    -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold \
+    upgrade -y --with-new-pkgs ||
+    die "Debian package update failed and may be partially applied; inspect apt/dpkg state or restore the external VM snapshot"
+  update_software_stage "post-system-update dnscomplex validation"
+  test_cmd ||
+    die "Debian package update completed but dnscomplex validation failed; no OS rollback was attempted"
+}
+
+system_update_cmd() {
+  need_root
+  acquire_maintenance_lock
+  [[ $# -eq 1 && "$1" == "--acknowledge-no-os-rollback" ]] ||
+    die "usage: dnscomplex system-update --acknowledge-no-os-rollback (create an external VM snapshot first)"
+  system_update_impl
 }
 
 update_software_stage() {
@@ -8056,6 +8072,7 @@ main() {
     mss-calibrate) mss_calibrate_cmd "$@" ;;
     routeros-print) routeros_print_cmd "$@" ;;
     update-software) update_software_cmd "$@" ;;
+    system-update) system_update_cmd "$@" ;;
     metrics-sample) metrics_sample_cmd "$@" ;;
     soak) soak_cmd "$@" ;;
     wizard) wizard_cmd "$@" ;;
@@ -9080,20 +9097,12 @@ HTML = r"""<!doctype html>
     </div>
     <div id="update" class="view">
       <section>
-        <div class="row" style="justify-content:space-between"><h2>Release / Update Channel</h2><button onclick="loadUpdateStatus()">刷新</button></div>
+        <div class="row" style="justify-content:space-between"><h2>規則資料更新</h2><button onclick="loadUpdateStatus()">刷新</button></div>
         <div class="help-card">
-          <h3>點樣揀</h3>
-          <ul class="mini-list">
-            <li><b>stable：一般使用</b>，只追最新穩定 release。</li>
-            <li><b>beta</b>：追 prerelease，適合測試新功能。</li>
-            <li><b>pinned</b>：固定版本，例如上一版最穩時使用；要填 Pinned version。</li>
-          </ul>
+          <h3>自動更新範圍</h3>
+          <p>每日排程只更新 geosite/SRS 規則資料。作業系統與 release 元件需要先建立 VM 復原點，再由終端明確執行。</p>
         </div>
-        <div class="grid">
-          <div class="field"><label>Channel</label><select id="updateChannel"><option value="stable">stable</option><option value="beta">beta</option><option value="pinned">pinned</option></select></div>
-          <div class="field"><label>Pinned version</label><input id="updateVersion" placeholder="例如 v1.2.3"></div>
-        </div>
-        <div class="row"><button class="primary" onclick="runUpdate()">執行更新</button></div>
+        <div class="row"><button class="primary" onclick="runUpdate()">更新 geosite/SRS</button></div>
         <pre id="updateOutput"></pre>
       </section>
     </div>
@@ -9120,7 +9129,6 @@ HTML = r"""<!doctype html>
           <button onclick="runAction('refresh-cn-overrides')">刷新 CN Override</button>
           <button onclick="runAction('update-geosite')">更新 geosite/SRS</button>
           <button onclick="runAction('mss-calibrate')">MSS 校準</button>
-          <button onclick="runAction('update-software')">更新 Debian / GitHub release</button>
           <button onclick="runAction('backup')">備份</button>
         </div>
         <div class="row" style="margin-top:12px">
@@ -9465,12 +9473,10 @@ async function applyWizard() {
   await refreshAll();
 }
 async function loadUpdateStatus() {
-  const data = await runWithOutput('updateOutput', () => api('/api/update/status'));
-  updateChannel.value = data.channel || 'stable';
-  updateVersion.value = data.pinned_version || '';
+  await runWithOutput('updateOutput', () => api('/api/update/status'));
 }
 async function runUpdate() {
-  await runWithOutput('updateOutput', () => api('/api/update/run', {method:'POST', body: JSON.stringify({channel:updateChannel.value, version:updateVersion.value})}));
+  await runWithOutput('updateOutput', () => api('/api/update/run', {method:'POST', body: '{}'}));
   await refreshAll();
 }
 async function supportBundle() {
@@ -10265,14 +10271,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(result)
                 return
             if self.path == "/api/update/run":
-                args = [DNSCOMPLEX, "update-software"]
-                channel = payload.get("channel", "")
-                version = payload.get("version", "")
-                if channel:
-                    args.extend(["--channel", channel])
-                if version:
-                    args.extend(["--version", version])
-                result = run(args, 900)
+                result = run([DNSCOMPLEX, "update-geosite"], 900)
                 result["output"] = redact_text(result.get("output", ""))
                 self.send_json(result)
                 return
@@ -10299,7 +10298,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/action":
                 action = payload.get("action", "")
-                if action in {"test", "fix", "doctor", "test-dns", "test-ipsec", "refresh-nftsets", "refresh-cn-overrides", "update-geosite", "update-software", "backup", "mss-calibrate"}:
+                if action in {"test", "fix", "doctor", "test-dns", "test-ipsec", "refresh-nftsets", "refresh-cn-overrides", "update-geosite", "backup", "mss-calibrate"}:
                     self.send_json(run([DNSCOMPLEX, action], 600))
                     return
                 if action == "test-xray":

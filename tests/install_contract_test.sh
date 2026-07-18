@@ -294,7 +294,7 @@ assert_contains "$repo_root/install.sh" 'sysctl -w net.ipv4.ip_forward=1'
 assert_contains "$repo_root/install.sh" 'modprobe nf_conntrack'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'modprobe nf_conntrack'
 
-for cmd in status test health fix doctor update-geosite add-domain remove-domain set-socks set-ipsec set-update-time refresh-nftsets refresh-cn-overrides trace-domain test-dns test-ipsec mss-calibrate routeros-print update-software backup restore metrics-sample soak wizard validate-config render-config support-bundle; do
+for cmd in status test health fix doctor update-geosite add-domain remove-domain set-socks set-ipsec set-update-time refresh-nftsets refresh-cn-overrides trace-domain test-dns test-ipsec mss-calibrate routeros-print update-software system-update backup restore metrics-sample soak wizard validate-config render-config support-bundle; do
   assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" "$cmd"
 done
 for cmd in set-egress set-xray-uri set-xray-json test-xray xray-status render-xray; do
@@ -608,6 +608,14 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'github_latest_release_
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'update_release_if_needed'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'already latest; skip'
 assert_not_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'systemctl restart sing-box smartdns AdGuardHome nftables'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-update.service" \
+  'ExecStart=/usr/local/sbin/dnscomplex update-geosite'
+assert_not_contains "$tmpdir/root/etc/systemd/system/dnscomplex-update.service" \
+  'update-software'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  '--allow-unverified-release-assets'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  '--acknowledge-no-os-rollback'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" "grep -Eo '([0-9]{1,3}\\.){3}[0-9]{1,3}' || true"
 # shellcheck disable=SC2016
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'local_addrs = $local_ip'
@@ -825,7 +833,8 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '自訂項目
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '建議下一步'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '常用設定只放日常會改的項目'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '精靈會先驗證，不會直接覆蓋 production'
-assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'stable：一般使用'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
+  '每日排程只更新 geosite/SRS 規則資料'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'white-space:pre-wrap'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'overflow-wrap:anywhere'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'AI_NFTSET_REFRESH_DOMAINS'
@@ -857,7 +866,8 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" "querySelecto
 assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'id="configForm"'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '"AI_SAMPLE_DOMAINS"'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" '"CN_SAMPLE_DOMAINS"'
-assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'update-software'
+assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
+  '<button onclick="runAction('\''update-software'\'')"'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'last_update_log'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'domain_source'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'profile_source'
@@ -1185,8 +1195,11 @@ update_software_impl_body=$(awk '
   inside && /^}/ { exit }
 ' "$tmpdir/root/usr/local/sbin/dnscomplex")
 case "$update_software_impl_body" in
-  *backup_cmd*backup_release_binaries*'apt-get update'*write_config_cmd*update_release_if_needed*) ;;
-  *) fail "software update must back up before APT and defer config mutation until APT succeeds" ;;
+  *backup_cmd*backup_release_binaries*write_config_cmd*update_release_if_needed*) ;;
+  *) fail "component update must back up before release and config mutations" ;;
+esac
+case "$update_software_impl_body" in
+  *apt-get*) fail "component update must not mutate Debian package state" ;;
 esac
 case "$update_software_impl_body" in
   *'systemctl restart "${UPDATED_SERVICES[@]}"'*'"$0" ipsec-ready'*'"$0" routes up'*\
@@ -1194,12 +1207,25 @@ case "$update_software_impl_body" in
   *) fail "software update must restore selected egress before post-update validation" ;;
 esac
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'rollback_component_update "$before"'
-assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'Debian package changes remain managed by apt/dpkg'
+system_update_impl_body=$(awk '
+  /^system_update_impl\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$tmpdir/root/usr/local/sbin/dnscomplex")
+case "$system_update_impl_body" in
+  *'apt-get update'*'upgrade -y --with-new-pkgs'*test_cmd*) ;;
+  *) fail "system update must keep Debian package mutation in its own explicit flow" ;;
+esac
+case "$system_update_impl_body" in
+  *write_config_cmd*|*update_release_if_needed*|*rollback_component_update*)
+    fail "system update must not mix config/release mutation or application rollback"
+    ;;
+esac
 for mutator in \
   fix update-geosite add-domain remove-domain set-socks set-ipsec \
   set-web-password set-local-host set-egress set-xray-uri set-xray-json \
   test-xray render-xray set-update-time refresh-nftsets \
-  refresh-cn-overrides mss-calibrate update-software metrics-sample \
+  refresh-cn-overrides mss-calibrate update-software system-update metrics-sample \
   apply-config apply-config-json backup restore; do
   bash -c 'source "$1"; persistent_mutator_command "$2"' \
     _ "$tmpdir/root/usr/local/sbin/dnscomplex" "$mutator" ||
