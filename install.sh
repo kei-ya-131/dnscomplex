@@ -4580,7 +4580,7 @@ inspect_ipsec_policy_rule() {
   local expected_mark=$1 expected_table=$2 expected_priority=$3
   local rules line priority_token mark_token table_token
   local priority_value mark_value mask_value table_value field
-  local negated rule_matches
+  local negated rule_matches selector_unrestricted action_unmodified
   local expected_mark_value expected_table_value expected_priority_value
   local -a fields
   IPSEC_RULE_EXACT_COUNT=0
@@ -4600,18 +4600,74 @@ inspect_ipsec_policy_rule() {
     mark_token=""
     table_token=""
     negated=0
-    for ((field = 0; field < ${#fields[@]}; field++)); do
-      if [[ "${fields[field]}" == "not" ]]; then
-        negated=1
-      fi
-      if [[ "${fields[field]}" == "fwmark" &&
-            $((field + 1)) -lt ${#fields[@]} ]]; then
-        mark_token=${fields[field + 1]}
-      fi
-      if [[ "${fields[field]}" == "lookup" &&
-            $((field + 1)) -lt ${#fields[@]} ]]; then
-        table_token=${fields[field + 1]}
-      fi
+    selector_unrestricted=1
+    action_unmodified=1
+    for ((field = 1; field < ${#fields[@]}; field++)); do
+      case "${fields[field]}" in
+        not)
+          if ((negated == 1)); then
+            action_unmodified=0
+          fi
+          negated=1
+          ;;
+        from|to)
+          if ((field + 1 >= ${#fields[@]})); then
+            selector_unrestricted=0
+            action_unmodified=0
+            continue
+          fi
+          field=$((field + 1))
+          [[ "${fields[field]}" == "all" ]] || selector_unrestricted=0
+          ;;
+        fwmark)
+          if ((field + 1 >= ${#fields[@]})); then
+            action_unmodified=0
+            continue
+          fi
+          [[ -z "$mark_token" ]] || action_unmodified=0
+          field=$((field + 1))
+          mark_token=${fields[field]}
+          ;;
+        lookup|table)
+          if ((field + 1 >= ${#fields[@]})); then
+            action_unmodified=0
+            continue
+          fi
+          [[ -z "$table_token" ]] || action_unmodified=0
+          field=$((field + 1))
+          table_token=${fields[field]}
+          ;;
+        proto|protocol)
+          if ((field + 1 >= ${#fields[@]})); then
+            action_unmodified=0
+            continue
+          fi
+          field=$((field + 1))
+          ;;
+        tos|dsfield|iif|oif|uidrange|ipproto|sport|dport|tun_id)
+          selector_unrestricted=0
+          if ((field + 1 >= ${#fields[@]})); then
+            action_unmodified=0
+            continue
+          fi
+          field=$((field + 1))
+          ;;
+        l3mdev)
+          selector_unrestricted=0
+          ;;
+        suppress_prefixlength|suppress_ifgroup|goto|nat|realms)
+          action_unmodified=0
+          if ((field + 1 < ${#fields[@]})); then
+            field=$((field + 1))
+          fi
+          ;;
+        blackhole|unreachable|prohibit|nop)
+          action_unmodified=0
+          ;;
+        *)
+          action_unmodified=0
+          ;;
+      esac
     done
     [[ "$priority_token" =~ ^[0-9]+$ ]] || continue
     priority_value=$((10#$priority_token))
@@ -4649,7 +4705,11 @@ inspect_ipsec_policy_rule() {
       rule_matches=0
     fi
     if ((negated == 1)); then
-      rule_matches=$((1 - rule_matches))
+      if ((rule_matches == 0 || selector_unrestricted == 0)); then
+        rule_matches=1
+      else
+        rule_matches=0
+      fi
     fi
     if ((priority_value < expected_priority_value && rule_matches == 1)); then
       IPSEC_RULE_HIGHER_CONFLICT=1
@@ -4658,6 +4718,8 @@ inspect_ipsec_policy_rule() {
       table_value=$((10#$table_token))
       if ((priority_value == expected_priority_value &&
            negated == 0 &&
+           selector_unrestricted == 1 &&
+           action_unmodified == 1 &&
            mark_value == expected_mark_value &&
            mask_value == 0xffffffff &&
            table_value == expected_table_value)); then
@@ -5413,14 +5475,98 @@ def ipsec_policy_rule_present(
             actual_priority = int(tokens[0].rstrip(":"), 10)
         except (ValueError, IndexError):
             continue
+        mark_token = None
+        table_token = None
+        negated = False
+        selector_unrestricted = True
+        action_unmodified = True
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "not":
+                if negated:
+                    action_unmodified = False
+                negated = True
+                index += 1
+                continue
+            if token in ("from", "to"):
+                if index + 1 >= len(tokens):
+                    selector_unrestricted = False
+                    action_unmodified = False
+                    break
+                selector_unrestricted = (
+                    selector_unrestricted and tokens[index + 1] == "all"
+                )
+                index += 2
+                continue
+            if token == "fwmark":
+                if index + 1 >= len(tokens):
+                    action_unmodified = False
+                    break
+                if mark_token is not None:
+                    action_unmodified = False
+                mark_token = tokens[index + 1]
+                index += 2
+                continue
+            if token in ("lookup", "table"):
+                if index + 1 >= len(tokens):
+                    action_unmodified = False
+                    break
+                if table_token is not None:
+                    action_unmodified = False
+                table_token = tokens[index + 1]
+                index += 2
+                continue
+            if token in ("proto", "protocol"):
+                if index + 1 >= len(tokens):
+                    action_unmodified = False
+                    break
+                index += 2
+                continue
+            if token in (
+                "tos",
+                "dsfield",
+                "iif",
+                "oif",
+                "uidrange",
+                "ipproto",
+                "sport",
+                "dport",
+                "tun_id",
+            ):
+                selector_unrestricted = False
+                if index + 1 >= len(tokens):
+                    action_unmodified = False
+                    break
+                index += 2
+                continue
+            if token == "l3mdev":
+                selector_unrestricted = False
+                index += 1
+                continue
+            if token in (
+                "suppress_prefixlength",
+                "suppress_ifgroup",
+                "goto",
+                "nat",
+                "realms",
+            ):
+                action_unmodified = False
+                index += 2
+                continue
+            if token in ("blackhole", "unreachable", "prohibit", "nop"):
+                action_unmodified = False
+                index += 1
+                continue
+            action_unmodified = False
+            index += 1
         try:
-            mark_index = tokens.index("fwmark")
-            mark_parts = tokens[mark_index + 1].split("/", 1)
+            mark_parts = mark_token.split("/", 1)
             actual_mark = int(mark_parts[0], 0)
             actual_mask = (
                 int(mark_parts[1], 0) if len(mark_parts) == 2 else 0xFFFFFFFF
             )
-        except (ValueError, IndexError):
+        except (AttributeError, ValueError):
             if actual_priority == priority_number:
                 same_priority_stale = True
             continue
@@ -5434,23 +5580,24 @@ def ipsec_policy_rule_present(
         rule_matches = (
             (mark_number & actual_mask) == (actual_mark & actual_mask)
         )
-        if "not" in tokens:
-            rule_matches = not rule_matches
+        if negated:
+            rule_matches = not rule_matches or not selector_unrestricted
         if (
             actual_priority < priority_number
             and rule_matches
         ):
             higher_conflict = True
         try:
-            lookup_index = tokens.index("lookup")
-            actual_table = int(tokens[lookup_index + 1], 10)
-        except (ValueError, IndexError):
+            actual_table = int(table_token, 10)
+        except (TypeError, ValueError):
             if actual_priority == priority_number:
                 same_priority_stale = True
             continue
         if (
             actual_priority == priority_number
-            and "not" not in tokens
+            and not negated
+            and selector_unrestricted
+            and action_unmodified
             and actual_mark == mark_number
             and actual_mask == 0xFFFFFFFF
             and actual_table == table_number
