@@ -4316,7 +4316,11 @@ test_dns_cmd() {
 
 test_ipsec_cmd() {
   local sas required=0 failed=0
-  sas=$(swanctl --list-sas 2>/dev/null || true)
+  if ! sas=$(timeout --signal=TERM --kill-after=1s 8s \
+    swanctl --list-sas 2>/dev/null); then
+    warn "StrongSwan SA state could not be queried"
+    return 1
+  fi
   if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
     required=1
     ipsec_profile_runtime_ready ai "$sas" || failed=1
@@ -4573,27 +4577,45 @@ ipsec_interface_is_up() {
 }
 
 ipsec_policy_rule_present() {
-  local expected_mark=$1 expected_table=$2 rules
+  local expected_mark=$1 expected_table=$2 rules line mark_token table_token
+  local mark_value mask_value table_value expected_table_value field
+  local -a fields
   rules=$(ip rule show 2>/dev/null) || return 1
-  awk -v expected_mark="$expected_mark" -v expected_table="$expected_table" '
-    {
-      mark = ""
-      table = ""
-      for (field = 1; field <= NF; field++) {
-        if ($field == "fwmark" && field < NF) {
-          mark = $(field + 1)
-          sub(/\/.*/, "", mark)
-        }
-        if ($field == "lookup" && field < NF) {
-          table = $(field + 1)
-        }
-      }
-      if (mark == expected_mark && table == expected_table) {
-        found = 1
-      }
-    }
-    END { exit(found ? 0 : 1) }
-  ' <<<"$rules"
+  while IFS= read -r line; do
+    IFS=$' \t' read -r -a fields <<<"$line"
+    mark_token=""
+    table_token=""
+    for ((field = 0; field < ${#fields[@]}; field++)); do
+      if [[ "${fields[field]}" == "fwmark" &&
+            $((field + 1)) -lt ${#fields[@]} ]]; then
+        mark_token=${fields[field + 1]}
+      fi
+      if [[ "${fields[field]}" == "lookup" &&
+            $((field + 1)) -lt ${#fields[@]} ]]; then
+        table_token=${fields[field + 1]}
+      fi
+    done
+    [[ -n "$mark_token" && -n "$table_token" ]] || continue
+    mark_value=${mark_token%%/*}
+    if [[ "$mark_token" == */* ]]; then
+      mask_value=${mark_token#*/}
+    else
+      mask_value=0xffffffff
+    fi
+    [[ "$mark_value" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ &&
+       "$mask_value" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ &&
+       "$expected_mark" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ &&
+       "$table_token" =~ ^[0-9]+$ &&
+       "$expected_table" =~ ^[0-9]+$ ]] || continue
+    table_value=$((10#$table_token))
+    expected_table_value=$((10#$expected_table))
+    if ((mark_value == expected_mark &&
+         mask_value == 0xffffffff &&
+         table_value == expected_table_value)); then
+      return 0
+    fi
+  done <<<"$rules"
+  return 1
 }
 
 ipsec_policy_route_matches() {
@@ -4872,7 +4894,7 @@ sync_singbox_ipsec_bind_addresses() {
 }
 
 ensure_policy_route_profile() {
-  local profile=$1 mode mark table priority device vip rules
+  local profile=$1 mode mark table priority device vip
   case "$profile" in
     ai)
       mode=${AI_EGRESS_MODE:-ipsec}
@@ -4903,11 +4925,11 @@ ensure_policy_route_profile() {
       ;;
   esac
 
-  if ! rules=$(ip rule show 2>/dev/null); then
+  if ! ip rule show >/dev/null 2>&1; then
     warn "could not inspect policy rules for $profile"
     return 1
   fi
-  if ! grep -Eq "fwmark ${mark}.*lookup ${table}" <<<"$rules"; then
+  if ! ipsec_policy_rule_present "$mark" "$table"; then
     if ! ip rule add fwmark "$mark" table "$table" priority "$priority"; then
       warn "could not install the $profile policy rule"
       return 1
@@ -5163,7 +5185,20 @@ def parse_config():
     return cfg
 
 def run(cmd, timeout=5):
-    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    try:
+        return subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            cmd, 124, exc.stdout or "", exc.stderr or ""
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(cmd, 127, "", str(exc))
 
 def service_active(name):
     return run(["systemctl", "is-active", "--quiet", name], 4).returncode == 0
@@ -5280,11 +5315,19 @@ def ipsec_policy_rule_present(rules, expected_mark, expected_table):
         try:
             mark_index = tokens.index("fwmark")
             lookup_index = tokens.index("lookup")
-            actual_mark = int(tokens[mark_index + 1].split("/", 1)[0], 0)
+            mark_parts = tokens[mark_index + 1].split("/", 1)
+            actual_mark = int(mark_parts[0], 0)
+            actual_mask = (
+                int(mark_parts[1], 0) if len(mark_parts) == 2 else 0xFFFFFFFF
+            )
             actual_table = int(tokens[lookup_index + 1], 10)
         except (ValueError, IndexError):
             continue
-        if actual_mark == mark_number and actual_table == table_number:
+        if (
+            actual_mark == mark_number
+            and actual_mask == 0xFFFFFFFF
+            and actual_table == table_number
+        ):
             return True
     return False
 
@@ -5470,7 +5513,8 @@ for profile, set_name, freshness_name in [("ai", "ai4", "nftset-ai-freshness"), 
     stale = age is not None and age <= 7200
     add_check(checks, freshness_name, stale, "warning", f"last_refresh_age_seconds={age}", "run dnscomplex refresh-nftsets and check timer", value=-1 if age is None else age)
 
-sas = run(["swanctl", "--list-sas"], 8).stdout
+sas_proc = run(["swanctl", "--list-sas"], 8)
+sas = sas_proc.stdout if sas_proc.returncode == 0 else ""
 rules_proc = run(["ip", "rule", "show"], 5)
 rules = rules_proc.stdout if rules_proc.returncode == 0 else ""
 ipsec_ok = True
@@ -5721,8 +5765,8 @@ write_smartdns_restart_epoch() {
 
 repair_policy_routes_if_needed() {
   command -v ip >/dev/null 2>&1 || return 0
-  local profile mode mark table device vip rules failed=0
-  if ! rules=$(ip rule show 2>/dev/null); then
+  local profile mode mark table device vip sas failed=0
+  if ! ip rule show >/dev/null 2>&1; then
     warn "policy routes could not be inspected"
     return 1
   fi
@@ -5743,10 +5787,21 @@ repair_policy_routes_if_needed() {
     esac
     [[ "$mode" == "ipsec" ]] || continue
     vip=$(ipsec_vip "$profile" || true)
-    if ! grep -Eq "fwmark ${mark}.*lookup ${table}" <<<"$rules" ||
+    if ! ipsec_policy_rule_present "$mark" "$table" ||
        ! ipsec_policy_route_matches "$table" "$device" "$vip"; then
       if ! ensure_policy_route_profile "$profile"; then
         warn "$profile policy route is missing and could not be repaired"
+        failed=1
+        continue
+      fi
+      if ! sas=$(timeout --signal=TERM --kill-after=1s 8s \
+        swanctl --list-sas 2>/dev/null); then
+        warn "$profile policy route repair could not re-read StrongSwan state"
+        failed=1
+        continue
+      fi
+      if ! ipsec_profile_runtime_ready "$profile" "$sas"; then
+        warn "$profile policy route repair did not produce a valid runtime state"
         failed=1
       fi
     fi

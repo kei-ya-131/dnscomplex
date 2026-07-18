@@ -331,6 +331,14 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'ipsec_sa_state_from_sa
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'child_installed='
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'route_source_matches='
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" ', INSTALLED'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'mask_value == 0xffffffff'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'actual_mask == 0xFFFFFFFF'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'policy route repair did not produce a valid runtime state'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'StrongSwan SA state could not be queried'
 assert_not_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'ok = (profile + ":") in sas'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'metrics_sample_cmd'
