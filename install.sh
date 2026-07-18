@@ -3108,7 +3108,7 @@ component_current_tag() {
       sing-box version 2>/dev/null | awk '/^sing-box version / {print "v" $3; exit}'
       ;;
     smartdns)
-      smartdns -v 2>&1 | grep -Eo 'Release[0-9]+' | head -n1
+      smartdns -v 2>&1 | grep -Eo 'Release[0-9]+([.][0-9]+)*' | head -n1
       ;;
     AdGuardHome)
       /opt/AdGuardHome/AdGuardHome --version 2>/dev/null | grep -Eo 'v[0-9]+(\.[0-9]+)+' | head -n1

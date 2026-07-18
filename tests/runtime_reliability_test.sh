@@ -323,6 +323,15 @@ fi
 exec /bin/mv "$@"
 EOF
 
+cat >"$fakebin/smartdns" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-v" ]]; then
+  printf '%s\n' "${DNS_TEST_SMARTDNS_VERSION:-smartdns 1.2026.06.28-1614 (Release48.2)}"
+  exit 0
+fi
+exit 64
+EOF
+
 cat >"$fakebin/ip" <<'EOF'
 #!/usr/bin/env bash
 printf 'ip %s\n' "$*" >>"$DNS_TEST_CALLS"
@@ -617,6 +626,12 @@ run_watchdog_at() {
   local now=$1 scenario=$2
   DNS_TEST_NOW="$now" run_watchdog "$scenario"
 }
+
+smartdns_tag=$(PATH="$fakebin:$PATH" \
+  DNS_TEST_SMARTDNS_VERSION='smartdns 1.2026.06.28-1614 (Release48.2)' \
+  bash -c 'source "$1"; component_current_tag smartdns' _ "$manager")
+[[ "$smartdns_tag" == "Release48.2" ]] ||
+  fail "SmartDNS dotted release tag was truncated to $smartdns_tag"
 
 run_watchdog healthy
 assert_not_contains "$calls" 'restart smartdns'
