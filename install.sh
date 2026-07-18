@@ -344,6 +344,8 @@ validate_config() {
   if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
     [[ "$SINGBOX_SOCKS_LISTEN" == "${LINUX_LAN_IPV4%%/*}" ]] ||
       die "routeros-policy SOCKS listen must match LINUX_LAN_IPV4"
+    ((SINGBOX_SOCKS_PORT == 10800)) ||
+      die "routeros-policy SOCKS port must be 10800"
   fi
   [[ "$XRAY_AI_SOCKS_PORT" =~ ^[0-9]+$ ]] || die "XRAY_AI_SOCKS_PORT must be numeric"
   [[ "$XRAY_CN_SOCKS_PORT" =~ ^[0-9]+$ ]] || die "XRAY_CN_SOCKS_PORT must be numeric"
@@ -6335,6 +6337,8 @@ set_socks_cmd() {
     expected_listen=${expected_listen%%/*}
     [[ -n "$expected_listen" && "$listen" == "$expected_listen" ]] ||
       die "routeros-policy SOCKS listen must match LINUX_LAN_IPV4"
+    ((port == 10800)) ||
+      die "routeros-policy SOCKS port must be 10800"
   fi
 
   local tmp
@@ -6795,6 +6799,11 @@ validate_loaded_config() {
         ( -z "$expected_socks_listen" ||
           "${SINGBOX_SOCKS_LISTEN:-}" != "$expected_socks_listen" ) ]]; then
     printf 'error: routeros-policy SOCKS listen must match LINUX_LAN_IPV4\n'
+    errors=$((errors + 1))
+  fi
+  if [[ "${DEPLOY_MODE:-}" == "routeros-policy" &&
+        "${SINGBOX_SOCKS_PORT:-}" != "10800" ]]; then
+    printf 'error: routeros-policy SOCKS port must be 10800\n'
     errors=$((errors + 1))
   fi
   if [[ "${AI_EGRESS_MODE:-ipsec}" == "xray" ]]; then
