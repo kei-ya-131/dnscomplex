@@ -4319,13 +4319,11 @@ test_ipsec_cmd() {
   sas=$(swanctl --list-sas 2>/dev/null || true)
   if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
     required=1
-    grep -Eq '^ai:' <<<"$sas" || { warn "AI IPsec SA not found"; failed=1; }
-    ip link show ipsec-ai >/dev/null || { warn "ipsec-ai interface not found"; failed=1; }
+    ipsec_profile_runtime_ready ai "$sas" || failed=1
   fi
   if [[ "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
     required=1
-    grep -Eq '^cn:' <<<"$sas" || { warn "CN IPsec SA not found"; failed=1; }
-    ip link show ipsec-cn >/dev/null || { warn "ipsec-cn interface not found"; failed=1; }
+    ipsec_profile_runtime_ready cn "$sas" || failed=1
   fi
   if [[ "$required" == "0" ]]; then
     log "AI/CN egress are not using IPsec; skipping IPsec test"
@@ -4452,24 +4450,223 @@ wait_for_swanctl_vici() {
   done
 }
 
-ipsec_vip_from_sas() {
-  local child=$1
-  awk -v child="$child" '
-    $1 == child ":" {
-      in_child = 1
+ipsec_sa_state_from_sas() {
+  local profile=$1
+  awk -v profile="$profile" '
+    function valid_ipv4(value, octets, count, field) {
+      count = split(value, octets, ".")
+      if (count != 4) {
+        return 0
+      }
+      for (field = 1; field <= 4; field++) {
+        if (octets[field] !~ /^[0-9]+$/ ||
+            octets[field] + 0 < 0 || octets[field] + 0 > 255) {
+          return 0
+        }
+      }
+      if (octets[1] + 0 == 0 || octets[1] + 0 == 127 ||
+          octets[1] + 0 >= 224 ||
+          (octets[1] + 0 == 169 && octets[2] + 0 == 254)) {
+        return 0
+      }
+      return 1
+    }
+
+    function reset_section() {
+      in_profile = 0
+      established = 0
+      installed = 0
+      vip = ""
+    }
+
+    function finish_section() {
+      if (!in_profile || !established) {
+        return
+      }
+      any_ike = 1
+      if (installed) {
+        any_child = 1
+      }
+      if (vip != "") {
+        any_vip = 1
+      }
+      if (installed && vip != "" && ready_vip == "") {
+        ready_vip = vip
+      }
+    }
+
+    BEGIN {
+      reset_section()
+    }
+
+    /^[^[:space:]]/ {
+      finish_section()
+      reset_section()
+      if ($1 == profile ":") {
+        in_profile = 1
+        established = ($0 ~ /, ESTABLISHED([,[:space:]]|$)/)
+      }
       next
     }
-    /^[[:alnum:]_-]+:/ {
-      in_child = 0
+
+    in_profile {
+      if ($1 == profile ":" &&
+          $0 ~ /, INSTALLED([,[:space:]]|$)/) {
+        installed = 1
+      }
+      if ($1 == "local") {
+        remainder = $0
+        while (match(remainder, /\[[^][]+\]/)) {
+          candidate = substr(remainder, RSTART + 1, RLENGTH - 2)
+          if (valid_ipv4(candidate)) {
+            vip = candidate
+          }
+          remainder = substr(remainder, RSTART + RLENGTH)
+        }
+      }
     }
-    in_child && $0 ~ /local .*\[[0-9.]+\]/ {
-      line = $0
-      sub(/^.*\[/, "", line)
-      sub(/\].*$/, "", line)
-      print line
-      exit
+
+    END {
+      finish_section()
+      printf "%d|%d|%d|%s\n", any_ike, any_child, any_vip, ready_vip
     }
   '
+}
+
+read_ipsec_sa_state() {
+  local profile=$1 sas=$2 state
+  state=$(ipsec_sa_state_from_sas "$profile" <<<"$sas") || return 1
+  IFS='|' read -r \
+    IPSEC_STATE_IKE_ESTABLISHED \
+    IPSEC_STATE_CHILD_INSTALLED \
+    IPSEC_STATE_VIP_VALID \
+    IPSEC_STATE_READY_VIP <<<"$state"
+  IPSEC_STATE_IKE_ESTABLISHED=${IPSEC_STATE_IKE_ESTABLISHED:-0}
+  IPSEC_STATE_CHILD_INSTALLED=${IPSEC_STATE_CHILD_INSTALLED:-0}
+  IPSEC_STATE_VIP_VALID=${IPSEC_STATE_VIP_VALID:-0}
+  IPSEC_STATE_READY_VIP=${IPSEC_STATE_READY_VIP:-}
+}
+
+ipsec_vip_from_sas() {
+  local profile=$1 sas
+  sas=$(cat)
+  read_ipsec_sa_state "$profile" "$sas" || return 1
+  [[ "$IPSEC_STATE_IKE_ESTABLISHED" == "1" &&
+     "$IPSEC_STATE_CHILD_INSTALLED" == "1" &&
+     "$IPSEC_STATE_VIP_VALID" == "1" &&
+     -n "$IPSEC_STATE_READY_VIP" ]] || return 1
+  printf '%s\n' "$IPSEC_STATE_READY_VIP"
+}
+
+ipsec_installed_from_sas() {
+  local profile=$1 sas
+  sas=$(cat)
+  read_ipsec_sa_state "$profile" "$sas" || return 1
+  [[ "$IPSEC_STATE_IKE_ESTABLISHED" == "1" &&
+     "$IPSEC_STATE_CHILD_INSTALLED" == "1" ]]
+}
+
+ipsec_interface_is_up() {
+  local device=$1 output
+  output=$(ip -o link show dev "$device" 2>/dev/null) || return 1
+  grep -Eq '<([^>]*,)?UP(,[^>]*)?>' <<<"$output"
+}
+
+ipsec_policy_rule_present() {
+  local expected_mark=$1 expected_table=$2 rules
+  rules=$(ip rule show 2>/dev/null) || return 1
+  awk -v expected_mark="$expected_mark" -v expected_table="$expected_table" '
+    {
+      mark = ""
+      table = ""
+      for (field = 1; field <= NF; field++) {
+        if ($field == "fwmark" && field < NF) {
+          mark = $(field + 1)
+          sub(/\/.*/, "", mark)
+        }
+        if ($field == "lookup" && field < NF) {
+          table = $(field + 1)
+        }
+      }
+      if (mark == expected_mark && table == expected_table) {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' <<<"$rules"
+}
+
+ipsec_policy_route_matches() {
+  local table=$1 device=$2 vip=$3 routes
+  [[ -n "$vip" ]] || return 1
+  routes=$(ip route show table "$table" 2>/dev/null) || return 1
+  awk -v expected_device="$device" -v expected_vip="$vip" '
+    $1 == "default" {
+      device = ""
+      source = ""
+      for (field = 1; field <= NF; field++) {
+        if ($field == "dev" && field < NF) {
+          device = $(field + 1)
+        }
+        if ($field == "src" && field < NF) {
+          source = $(field + 1)
+        }
+      }
+      if (device == expected_device && source == expected_vip) {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' <<<"$routes"
+}
+
+ipsec_profile_runtime_ready() {
+  local profile=$1 sas=$2 mark table device failed=0
+  case "$profile" in
+    ai)
+      mark=$AI_MARK
+      table=$AI_TABLE
+      device=ipsec-ai
+      ;;
+    cn)
+      mark=$CN_MARK
+      table=$CN_TABLE
+      device=ipsec-cn
+      ;;
+    *)
+      warn "unknown IPsec profile: $profile"
+      return 1
+      ;;
+  esac
+
+  read_ipsec_sa_state "$profile" "$sas" || return 1
+  if [[ "$IPSEC_STATE_IKE_ESTABLISHED" != "1" ]]; then
+    warn "$profile IPsec IKE_SA is not established"
+    failed=1
+  fi
+  if [[ "$IPSEC_STATE_CHILD_INSTALLED" != "1" ]]; then
+    warn "$profile IPsec CHILD_SA is not installed"
+    failed=1
+  fi
+  if [[ "$IPSEC_STATE_VIP_VALID" != "1" ||
+        -z "$IPSEC_STATE_READY_VIP" ]]; then
+    warn "$profile IPsec virtual IPv4 is missing or invalid"
+    failed=1
+  fi
+  if ! ipsec_interface_is_up "$device"; then
+    warn "$device interface is missing or down"
+    failed=1
+  fi
+  if ! ipsec_policy_rule_present "$mark" "$table"; then
+    warn "$profile IPsec fwmark policy rule is missing"
+    failed=1
+  fi
+  if ! ipsec_policy_route_matches "$table" "$device" \
+       "$IPSEC_STATE_READY_VIP"; then
+    warn "$profile IPsec default route does not use $device with its virtual IPv4 source"
+    failed=1
+  fi
+  [[ "$failed" == "0" ]]
 }
 
 ipsec_child_ready() {
@@ -4939,7 +5136,9 @@ adguard_cache_diagnostics() {
 health_checks_json() {
   python3 - "$CONFIG" <<'PY'
 import json
+import ipaddress
 import os
+import re
 import shutil
 import socket
 import statistics
@@ -5000,11 +5199,139 @@ def tcp_connectivity(host, family, timeout=3.0):
         if sock is not None:
             sock.close()
 
+def valid_ipsec_vip(value):
+    try:
+        address = ipaddress.IPv4Address(value)
+    except ipaddress.AddressValueError:
+        return False
+    first = int(str(address).split(".", 1)[0])
+    return not (
+        address.is_unspecified
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or first >= 224
+    )
+
+def ipsec_sa_state(sas, profile):
+    result = {
+        "ike_established": False,
+        "child_installed": False,
+        "vip_valid": False,
+        "ready_vip": "",
+    }
+    section = None
+
+    def finish_section():
+        nonlocal section
+        if not section or not section["established"]:
+            return
+        result["ike_established"] = True
+        result["child_installed"] |= section["installed"]
+        result["vip_valid"] |= bool(section["vip"])
+        if section["installed"] and section["vip"] and not result["ready_vip"]:
+            result["ready_vip"] = section["vip"]
+
+    for raw in sas.splitlines():
+        if raw and not raw[0].isspace():
+            finish_section()
+            first = raw.split(None, 1)[0]
+            if first == profile + ":":
+                section = {
+                    "established": bool(
+                        re.search(r", ESTABLISHED(?:,|\s|$)", raw)
+                    ),
+                    "installed": False,
+                    "vip": "",
+                }
+            else:
+                section = None
+            continue
+        if section is None:
+            continue
+        stripped = raw.lstrip()
+        first = stripped.split(None, 1)[0] if stripped else ""
+        if first == profile + ":" and re.search(
+            r", INSTALLED(?:,|\s|$)", stripped
+        ):
+            section["installed"] = True
+        if first == "local":
+            for candidate in re.findall(r"\[([^][]+)\]", stripped):
+                if valid_ipsec_vip(candidate):
+                    section["vip"] = str(ipaddress.IPv4Address(candidate))
+    finish_section()
+    return result
+
+def ipsec_interface_up(device):
+    proc = run(["ip", "-o", "link", "show", "dev", device], 4)
+    if proc.returncode != 0:
+        return False
+    match = re.search(r"<([^>]*)>", proc.stdout)
+    return bool(match and "UP" in match.group(1).split(","))
+
+def ipsec_policy_rule_present(rules, expected_mark, expected_table):
+    try:
+        mark_number = int(expected_mark, 0)
+        table_number = int(expected_table, 10)
+    except ValueError:
+        return False
+    for line in rules.splitlines():
+        tokens = line.split()
+        try:
+            mark_index = tokens.index("fwmark")
+            lookup_index = tokens.index("lookup")
+            actual_mark = int(tokens[mark_index + 1].split("/", 1)[0], 0)
+            actual_table = int(tokens[lookup_index + 1], 10)
+        except (ValueError, IndexError):
+            continue
+        if actual_mark == mark_number and actual_table == table_number:
+            return True
+    return False
+
+def ipsec_policy_route_matches(table, device, vip):
+    if not vip:
+        return False
+    proc = run(["ip", "route", "show", "table", str(table)], 4)
+    if proc.returncode != 0:
+        return False
+    for line in proc.stdout.splitlines():
+        tokens = line.split()
+        if not tokens or tokens[0] != "default":
+            continue
+        try:
+            actual_device = tokens[tokens.index("dev") + 1]
+            actual_source = tokens[tokens.index("src") + 1]
+        except (ValueError, IndexError):
+            continue
+        if actual_device == device and actual_source == vip:
+            return True
+    return False
+
+def ipsec_runtime_state(sas, rules, profile, mark, table):
+    state = ipsec_sa_state(sas, profile)
+    device = "ipsec-" + profile
+    state["interface_up"] = ipsec_interface_up(device)
+    state["policy_rule"] = ipsec_policy_rule_present(rules, mark, table)
+    state["route_source_matches"] = ipsec_policy_route_matches(
+        table, device, state["ready_vip"]
+    )
+    state["ok"] = all(
+        state[name]
+        for name in (
+            "ike_established",
+            "child_installed",
+            "vip_valid",
+            "interface_up",
+            "policy_rule",
+            "route_source_matches",
+        )
+    ) and bool(state["ready_vip"])
+    return state
+
 def nft_count(set_name):
     proc = run(["nft", "list", "set", "inet", "dnscomplex", set_name], 5)
     if proc.returncode != 0:
         return -1
-    import re
     return len(set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", proc.stdout)))
 
 def file_age(path):
@@ -5144,13 +5471,31 @@ for profile, set_name, freshness_name in [("ai", "ai4", "nftset-ai-freshness"), 
     add_check(checks, freshness_name, stale, "warning", f"last_refresh_age_seconds={age}", "run dnscomplex refresh-nftsets and check timer", value=-1 if age is None else age)
 
 sas = run(["swanctl", "--list-sas"], 8).stdout
+rules_proc = run(["ip", "rule", "show"], 5)
+rules = rules_proc.stdout if rules_proc.returncode == 0 else ""
 ipsec_ok = True
 for profile in ["ai", "cn"]:
     mode = cfg.get(f"{profile.upper()}_EGRESS_MODE", "ipsec")
     if mode == "ipsec":
-        ok = (profile + ":") in sas
+        if profile == "ai":
+            mark = cfg.get("AI_MARK", "0x301")
+            table = cfg.get("AI_TABLE", "301")
+        else:
+            mark = cfg.get("CN_MARK", "0x351")
+            table = cfg.get("CN_TABLE", "351")
+        state = ipsec_runtime_state(sas, rules, profile, mark, table)
+        ok = state["ok"]
         ipsec_ok = ipsec_ok and ok
-        add_check(checks, f"{profile}-ipsec-selected-egress", ok, "critical", f"{profile} IPsec selected and up={ok}", f"dnscomplex test-ipsec or update {profile.upper()} IPsec credentials", core=True)
+        detail = (
+            f"ike_established={state['ike_established']} "
+            f"child_installed={state['child_installed']} "
+            f"vip_valid={state['vip_valid']} "
+            f"vip={state['ready_vip'] or 'none'} "
+            f"interface_up={state['interface_up']} "
+            f"policy_rule={state['policy_rule']} "
+            f"route_source_matches={state['route_source_matches']}"
+        )
+        add_check(checks, f"{profile}-ipsec-selected-egress", ok, "critical", detail, f"dnscomplex test-ipsec or update {profile.upper()} IPsec credentials", core=True)
     elif mode == "xray":
         ok = service_active("xray-dnscomplex.service")
         add_check(checks, f"{profile}-xray-selected-egress", ok, "critical", f"{profile} Xray selected and service up={ok}", f"dnscomplex test-xray {profile}", core=True)
@@ -5376,7 +5721,7 @@ write_smartdns_restart_epoch() {
 
 repair_policy_routes_if_needed() {
   command -v ip >/dev/null 2>&1 || return 0
-  local profile mode mark table device rules failed=0
+  local profile mode mark table device vip rules failed=0
   if ! rules=$(ip rule show 2>/dev/null); then
     warn "policy routes could not be inspected"
     return 1
@@ -5397,8 +5742,9 @@ repair_policy_routes_if_needed() {
         ;;
     esac
     [[ "$mode" == "ipsec" ]] || continue
+    vip=$(ipsec_vip "$profile" || true)
     if ! grep -Eq "fwmark ${mark}.*lookup ${table}" <<<"$rules" ||
-       ! ip route show table "$table" 2>/dev/null | grep -Eq "^default .*dev ${device}([[:space:]]|$)"; then
+       ! ipsec_policy_route_matches "$table" "$device" "$vip"; then
       if ! ensure_policy_route_profile "$profile"; then
         warn "$profile policy route is missing and could not be repaired"
         failed=1
@@ -5413,7 +5759,7 @@ ipsec_child_established() {
   if ! sas=$(timeout 5 swanctl --list-sas 2>/dev/null); then
     return 1
   fi
-  grep -Eq "^${child}: #[0-9]+, ESTABLISHED" <<<"$sas"
+  ipsec_vip_from_sas "$child" <<<"$sas" >/dev/null
 }
 
 repair_ipsec_children_if_needed() {
@@ -5439,6 +5785,11 @@ repair_ipsec_children_if_needed() {
         failed=1
         continue
       }
+      if ! ipsec_child_established "$child"; then
+        warn "$child IPsec child did not become installed with a virtual IPv4"
+        failed=1
+        continue
+      fi
       IPSEC_CHILDREN_REPAIRED=1
     fi
   done
@@ -7562,7 +7913,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONFIG = "/etc/dnscomplex/config.env"
 DB = "/var/lib/dnscomplex/metrics.sqlite3"
-DNSCOMPLEX = "/usr/local/sbin/dnscomplex"
+DNSCOMPLEX = os.environ.get("DNSCOMPLEX_MANAGER", "/usr/local/sbin/dnscomplex")
 
 SERVICES = ["sing-box.service", "smartdns.service", "AdGuardHome.service", "nftables.service", "dnscomplex-web.service"]
 
@@ -7637,8 +7988,21 @@ def nftset_age(profile):
     except FileNotFoundError:
         return -1
 
-def ipsec_up(child):
-    return 1 if child + ":" in run(["swanctl", "--list-sas"], 5).stdout else 0
+def health_snapshot():
+    proc = run([DNSCOMPLEX, "health", "--json"], 20)
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except Exception:
+        payload = {}
+    return payload
+
+def ipsec_up(child, snapshot=None):
+    payload = snapshot if snapshot is not None else health_snapshot()
+    check_name = f"{child}-ipsec-selected-egress"
+    for item in payload.get("checks", []):
+        if item.get("name") == check_name:
+            return 1 if item.get("status") == "ok" else 0
+    return 0
 
 def adguard_cache_enabled():
     path = "/etc/AdGuardHome/AdGuardHome.yaml"
@@ -7654,12 +8018,9 @@ def adguard_cache_enabled():
         return 0
     return 1 if enabled or size > 0 else 0
 
-def health_status_value():
-    proc = run([DNSCOMPLEX, "health", "--json"], 20)
-    try:
-        status = json.loads(proc.stdout or "{}").get("status", "unhealthy")
-    except Exception:
-        status = "unhealthy"
+def health_status_value(snapshot=None):
+    payload = snapshot if snapshot is not None else health_snapshot()
+    status = payload.get("status", "unhealthy")
     return {"healthy": 0, "degraded": 1, "unhealthy": 2}.get(status, 2)
 
 def active_connection_metrics():
@@ -7694,6 +8055,7 @@ def service_restart_count(name):
 
 def collect():
     cfg = parse_config()
+    health = health_snapshot()
     count = read_int("/proc/sys/net/netfilter/nf_conntrack_count")
     max_count = max(read_int("/proc/sys/net/netfilter/nf_conntrack_max", 1), 1)
     dns = dns_sample()
@@ -7710,10 +8072,10 @@ def collect():
         "cn_nftset_count": nft_count("cn4"),
         "ai_nftset_age_seconds": nftset_age("ai"),
         "cn_nftset_age_seconds": nftset_age("cn"),
-        "ipsec_ai_up": ipsec_up("ai"),
-        "ipsec_cn_up": ipsec_up("cn"),
+        "ipsec_ai_up": ipsec_up("ai", health),
+        "ipsec_cn_up": ipsec_up("cn", health),
         "xray_up": service_up("xray-dnscomplex.service"),
-        "health_status": health_status_value(),
+        "health_status": health_status_value(health),
         "adguard_cache_enabled": adguard_cache_enabled(),
         "ha_mode": cfg.get("HA_MODE", "single"),
     }

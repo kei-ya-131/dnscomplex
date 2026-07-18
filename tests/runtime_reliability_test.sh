@@ -54,6 +54,22 @@ if actual != expected:
 PY
 }
 
+assert_health_detail_contains() {
+  local file=$1 name=$2 needle=$3
+  python3 - "$file" "$name" "$needle" <<'PY'
+import json
+import sys
+
+path, name, needle = sys.argv[1:4]
+with open(path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+checks = {item["name"]: item for item in payload["checks"]}
+detail = checks.get(name, {}).get("detail", "")
+if needle not in detail:
+    raise SystemExit(f"{name} detail={detail!r}, expected substring={needle!r}")
+PY
+}
+
 monotonic_millis() {
   python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'
 }
@@ -382,6 +398,34 @@ if [[ "$*" == "-4 route show default" ||
   fi
   exit 0
 fi
+if [[ "$*" == "link show ipsec-ai" ||
+      "$*" == "link show dev ipsec-ai" ||
+      "$*" == "-o link show dev ipsec-ai" ]]; then
+  case "${DNS_TEST_AI_INTERFACE_STATE:-up}" in
+    missing) exit 1 ;;
+    down)
+      printf '5: ipsec-ai@%s: <NOARP> mtu 1400 state DOWN mode DEFAULT\n' "$underlay_iface"
+      ;;
+    *)
+      printf '5: ipsec-ai@%s: <NOARP,UP,LOWER_UP> mtu 1400 state UNKNOWN mode DEFAULT\n' "$underlay_iface"
+      ;;
+  esac
+  exit 0
+fi
+if [[ "$*" == "link show ipsec-cn" ||
+      "$*" == "link show dev ipsec-cn" ||
+      "$*" == "-o link show dev ipsec-cn" ]]; then
+  case "${DNS_TEST_CN_INTERFACE_STATE:-up}" in
+    missing) exit 1 ;;
+    down)
+      printf '6: ipsec-cn@%s: <NOARP> mtu 1400 state DOWN mode DEFAULT\n' "$underlay_iface"
+      ;;
+    *)
+      printf '6: ipsec-cn@%s: <NOARP,UP,LOWER_UP> mtu 1400 state UNKNOWN mode DEFAULT\n' "$underlay_iface"
+      ;;
+  esac
+  exit 0
+fi
 case "${DNS_TEST_ROUTE_APPLY_FAIL:-0}" in
   1|all)
     if [[ "${1:-} ${2:-}" == "rule add" || "${1:-} ${2:-}" == "route replace" ]]; then
@@ -416,12 +460,33 @@ case "${1:-} ${2:-}" in
       301)
         case "${DNS_TEST_ROUTE_STATE:-complete}" in
           missing_route|missing_all) ;;
-          *) printf 'default dev ipsec-ai table 301\n' ;;
+          *)
+            printf 'default dev ipsec-ai table 301'
+            case "${DNS_TEST_AI_ROUTE_SOURCE_STATE:-match}" in
+              missing) ;;
+              wrong) printf ' src 10.127.255.1' ;;
+              *)
+                [[ -z "${DNS_TEST_AI_VIP:-}" ]] ||
+                  printf ' src %s' "$DNS_TEST_AI_VIP"
+                ;;
+            esac
+            printf '\n'
+            ;;
         esac
         ;;
       351)
-        [[ "${DNS_TEST_ROUTE_STATE:-complete}" == "missing_cn" ]] ||
-          printf 'default dev ipsec-cn table 351\n'
+        if [[ "${DNS_TEST_ROUTE_STATE:-complete}" != "missing_cn" ]]; then
+          printf 'default dev ipsec-cn table 351'
+          case "${DNS_TEST_CN_ROUTE_SOURCE_STATE:-match}" in
+            missing) ;;
+            wrong) printf ' src 10.127.255.2' ;;
+            *)
+              [[ -z "${DNS_TEST_CN_VIP:-}" ]] ||
+                printf ' src %s' "$DNS_TEST_CN_VIP"
+              ;;
+          esac
+          printf '\n'
+        fi
         ;;
     esac
     ;;
@@ -450,16 +515,38 @@ ipsec_child_up() {
     [[ "${DNS_TEST_IPSEC_FAIL_CHILD:-}" != "$child" ]]
   fi
 }
+emit_ipsec_sa() {
+  local child=$1 id=$2 vip=$3 state
+  if [[ "$child" == "ai" ]]; then
+    state=${DNS_TEST_AI_SA_STATE:-healthy}
+  else
+    state=${DNS_TEST_CN_SA_STATE:-healthy}
+  fi
+  [[ "$state" != "missing" ]] || return 0
+  if [[ "$state" == "connecting" ]]; then
+    printf '%s: #%s, CONNECTING, IKEv2\n' "$child" "$id"
+    return 0
+  fi
+  printf '%s: #%s, ESTABLISHED, IKEv2\n' "$child" "$id"
+  if [[ "$state" != "no-vip" && -n "$vip" ]]; then
+    printf '  local 192.0.2.%s[4500] [%s]\n' "$id" "$vip"
+  fi
+  case "$state" in
+    no-child) ;;
+    child-not-installed)
+      printf '  %s: #%s, reqid %s, ROUTED, TUNNEL, ESP\n' "$child" "$id" "$id"
+      ;;
+    *)
+      printf '  %s: #%s, reqid %s, INSTALLED, TUNNEL, ESP\n' "$child" "$id" "$id"
+      ;;
+  esac
+}
 if [[ "${1:-}" == "--list-sas" ]]; then
   if ipsec_child_up ai; then
-    printf 'ai: #1, ESTABLISHED\n'
-    [[ -z "${DNS_TEST_AI_VIP:-}" ]] ||
-      printf '  local 192.0.2.1[4500] [%s]\n' "$DNS_TEST_AI_VIP"
+    emit_ipsec_sa ai 1 "${DNS_TEST_AI_VIP:-}"
   fi
   if ipsec_child_up cn; then
-    printf 'cn: #2, ESTABLISHED\n'
-    [[ -z "${DNS_TEST_CN_VIP:-}" ]] ||
-      printf '  local 192.0.2.2[4500] [%s]\n' "$DNS_TEST_CN_VIP"
+    emit_ipsec_sa cn 2 "${DNS_TEST_CN_VIP:-}"
   fi
 fi
 if [[ "${1:-}" == "--initiate" && "${3:-}" == "${DNS_TEST_IPSEC_FAIL_CHILD:-}" ]]; then
@@ -606,8 +693,14 @@ run_manager() {
   DNS_TEST_VICI_AVAILABLE="${DNS_TEST_VICI_AVAILABLE:-1}" \
   DNS_TEST_SWAN_LOAD_FAIL="${DNS_TEST_SWAN_LOAD_FAIL:-0}" \
   DNS_TEST_SWAN_SUCCESS_NOISE="${DNS_TEST_SWAN_SUCCESS_NOISE:-0}" \
+  DNS_TEST_AI_SA_STATE="${DNS_TEST_AI_SA_STATE:-healthy}" \
+  DNS_TEST_CN_SA_STATE="${DNS_TEST_CN_SA_STATE:-healthy}" \
   DNS_TEST_AI_VIP="${DNS_TEST_AI_VIP:-}" \
   DNS_TEST_CN_VIP="${DNS_TEST_CN_VIP:-}" \
+  DNS_TEST_AI_INTERFACE_STATE="${DNS_TEST_AI_INTERFACE_STATE:-up}" \
+  DNS_TEST_CN_INTERFACE_STATE="${DNS_TEST_CN_INTERFACE_STATE:-up}" \
+  DNS_TEST_AI_ROUTE_SOURCE_STATE="${DNS_TEST_AI_ROUTE_SOURCE_STATE:-match}" \
+  DNS_TEST_CN_ROUTE_SOURCE_STATE="${DNS_TEST_CN_ROUTE_SOURCE_STATE:-match}" \
   DNS_TEST_INACTIVE_UNIT="${DNS_TEST_INACTIVE_UNIT:-}" \
   DNS_TEST_DISABLED_UNIT="${DNS_TEST_DISABLED_UNIT:-}" \
   DNS_TEST_RESTART_FAIL_UNIT="${DNS_TEST_RESTART_FAIL_UNIT:-}" \
@@ -649,6 +742,15 @@ run_manager_with_fix_stub() {
   ' "$fakebin/dnscomplex-fix-stub" "$manager" "$@"
 }
 
+run_health() {
+  DNS_TEST_PYTHONPATH="$fakepy" \
+  DNS_TEST_AI_VIP="${DNS_TEST_AI_VIP:-10.64.0.1}" \
+  DNS_TEST_CN_VIP="${DNS_TEST_CN_VIP:-10.64.0.2}" \
+  DNS_TEST_IPV4_CONNECTIVITY="${DNS_TEST_IPV4_CONNECTIVITY:-1}" \
+  DNS_TEST_IPV6_CONNECTIVITY="${DNS_TEST_IPV6_CONNECTIVITY:-1}" \
+    run_manager health --json
+}
+
 reset_state() {
   : >"$calls"
   rm -f "$counter" "$second_round" "$restarted" "$restart_epoch" \
@@ -663,7 +765,10 @@ run_watchdog() {
     cooldown) ;;
     *) rm -f "$run_dir/smartdns.last_restart" ;;
   esac
-  DNS_TEST_SCENARIO="$scenario" run_manager watchdog
+  DNS_TEST_SCENARIO="$scenario" \
+  DNS_TEST_AI_VIP="${DNS_TEST_AI_VIP:-10.64.0.1}" \
+  DNS_TEST_CN_VIP="${DNS_TEST_CN_VIP:-10.64.0.2}" \
+    run_manager watchdog
 }
 
 run_watchdog_at() {
@@ -781,18 +886,25 @@ assert_not_contains "$calls" 'ip rule add fwmark'
 assert_not_contains "$calls" 'dig '
 
 DNS_TEST_ROUTE_STATE=missing_route run_watchdog healthy
-assert_contains "$calls" 'ip route replace default dev ipsec-ai table 301'
+assert_contains "$calls" \
+  'ip route replace default dev ipsec-ai src 10.64.0.1 table 301'
 assert_not_contains "$calls" 'ip rule add fwmark 0x301 table 301'
-assert_not_contains "$calls" 'ip route replace default dev ipsec-cn table 351'
+assert_not_contains "$calls" 'ip route replace default dev ipsec-cn'
 
 DNS_TEST_ROUTE_STATE=missing_rule run_watchdog healthy
 assert_contains "$calls" 'ip rule add fwmark 0x301 table 301'
-assert_not_contains "$calls" 'ip route replace default dev ipsec-cn table 351'
+assert_not_contains "$calls" 'ip route replace default dev ipsec-cn'
 
 DNS_TEST_ROUTE_STATE=missing_cn run_watchdog healthy
 assert_contains "$calls" 'ip rule add fwmark 0x351 table 351'
-assert_contains "$calls" 'ip route replace default dev ipsec-cn table 351'
-assert_not_contains "$calls" 'ip route replace default dev ipsec-ai table 301'
+assert_contains "$calls" \
+  'ip route replace default dev ipsec-cn src 10.64.0.2 table 351'
+assert_not_contains "$calls" 'ip route replace default dev ipsec-ai'
+
+DNS_TEST_AI_ROUTE_SOURCE_STATE=wrong run_watchdog healthy
+assert_contains "$calls" \
+  'ip route replace default dev ipsec-ai src 10.64.0.1 table 301'
+assert_not_contains "$calls" 'ip route replace default dev ipsec-cn'
 
 if DNS_TEST_ROUTE_STATE=missing_rule DNS_TEST_ROUTE_APPLY_FAIL=rule \
    run_watchdog healthy >"$tmpdir/rule-repair-failure.log" 2>&1; then
@@ -805,7 +917,22 @@ if DNS_TEST_ROUTE_STATE=missing_route DNS_TEST_ROUTE_APPLY_FAIL=route \
    run_watchdog healthy >"$tmpdir/route-repair-failure.log" 2>&1; then
   fail "failed policy-route reconciliation was reported as healthy"
 fi
-assert_contains "$calls" 'ip route replace default dev ipsec-ai table 301'
+assert_contains "$calls" \
+  'ip route replace default dev ipsec-ai src 10.64.0.1 table 301'
+assert_not_contains "$calls" 'dig '
+
+if DNS_TEST_AI_SA_STATE=no-child \
+   run_watchdog healthy >"$tmpdir/ipsec-child-missing.log" 2>&1; then
+  fail "watchdog accepted an IKE_SA without an installed AI CHILD_SA"
+fi
+assert_contains "$calls" 'swanctl --initiate --child ai'
+assert_not_contains "$calls" 'dig '
+
+if DNS_TEST_AI_SA_STATE=no-vip \
+   run_watchdog healthy >"$tmpdir/ipsec-vip-missing.log" 2>&1; then
+  fail "watchdog accepted an installed AI CHILD_SA without a virtual IPv4"
+fi
+assert_contains "$calls" 'swanctl --initiate --child ai'
 assert_not_contains "$calls" 'dig '
 
 if DNS_TEST_IPSEC_FAIL_CHILD=ai \
@@ -962,6 +1089,8 @@ DNS_TEST_BLOCKING="$blocking" \
 DNS_TEST_PROBE_PIDS="$probe_pids" \
 DNS_TEST_SCENARIO=healthy \
 DNS_TEST_ROUTE_STATE=complete \
+DNS_TEST_AI_VIP=10.64.0.1 \
+DNS_TEST_CN_VIP=10.64.0.2 \
 "$manager" watchdog
 assert_not_contains "$calls" 'restart smartdns'
 
@@ -973,9 +1102,10 @@ assert_not_contains "$calls" 'ip rule add fwmark'
 DNS_TEST_CONFIG="$ai_xray_config" DNS_TEST_ROUTE_STATE=missing_cn \
   DNS_TEST_AI_VIP=10.64.0.1 run_watchdog healthy
 assert_contains "$calls" 'ip rule add fwmark 0x351 table 351'
-assert_contains "$calls" 'ip route replace default dev ipsec-cn table 351'
+assert_contains "$calls" \
+  'ip route replace default dev ipsec-cn src 10.64.0.2 table 351'
 assert_not_contains "$calls" 'ip rule add fwmark 0x301 table 301'
-assert_not_contains "$calls" 'ip route replace default dev ipsec-ai table 301'
+assert_not_contains "$calls" 'ip route replace default dev ipsec-ai'
 assert_not_contains "$calls" 'dnscomplex-ai-snat'
 
 cn_xray_config="$tmpdir/cn-xray.env"
@@ -986,9 +1116,10 @@ assert_not_contains "$calls" 'ip rule add fwmark'
 DNS_TEST_CONFIG="$cn_xray_config" DNS_TEST_ROUTE_STATE=missing_all \
   DNS_TEST_CN_VIP=10.64.0.2 run_watchdog healthy
 assert_contains "$calls" 'ip rule add fwmark 0x301 table 301'
-assert_contains "$calls" 'ip route replace default dev ipsec-ai table 301'
+assert_contains "$calls" \
+  'ip route replace default dev ipsec-ai src 10.64.0.1 table 301'
 assert_not_contains "$calls" 'ip rule add fwmark 0x351 table 351'
-assert_not_contains "$calls" 'ip route replace default dev ipsec-cn table 351'
+assert_not_contains "$calls" 'ip route replace default dev ipsec-cn'
 assert_not_contains "$calls" 'dnscomplex-cn-snat'
 
 printf 'ai-last-known-good\n' >"$state/nftset-ai.last_refresh"
@@ -1405,21 +1536,134 @@ if compgen -G "$tmpdir/.preserved-on-failure.tar.gz.*" >/dev/null; then
 fi
 
 reset_state
-DNS_TEST_PYTHONPATH="$fakepy" \
-DNS_TEST_IPV4_CONNECTIVITY=1 \
-DNS_TEST_IPV6_CONNECTIVITY=1 \
-run_manager health --json >"$tmpdir/health-connectivity-ok.json"
+run_health >"$tmpdir/health-connectivity-ok.json"
+assert_health_check "$tmpdir/health-connectivity-ok.json" ai-ipsec-selected-egress ok
+assert_health_check "$tmpdir/health-connectivity-ok.json" cn-ipsec-selected-egress ok
+assert_health_detail_contains "$tmpdir/health-connectivity-ok.json" \
+  ai-ipsec-selected-egress 'child_installed=True'
+assert_health_detail_contains "$tmpdir/health-connectivity-ok.json" \
+  ai-ipsec-selected-egress 'route_source_matches=True'
 assert_health_check "$tmpdir/health-connectivity-ok.json" default-ipv4-connectivity ok
 assert_health_check "$tmpdir/health-connectivity-ok.json" default-ipv6-connectivity ok
 assert_contains "$socket_calls" 'connect family=2'
 assert_contains "$socket_calls" 'connect family=10'
 assert_not_contains "$socket_calls" '1.1.1.1'
 
+for state_and_component in \
+  'connecting:ike_established=False' \
+  'no-child:child_installed=False' \
+  'child-not-installed:child_installed=False' \
+  'no-vip:vip_valid=False'; do
+  state=${state_and_component%%:*}
+  component=${state_and_component#*:}
+  reset_state
+  if DNS_TEST_AI_SA_STATE="$state" \
+     run_health >"$tmpdir/health-ipsec-${state}.json"; then
+    fail "health accepted AI IPsec state $state"
+  fi
+  assert_health_check "$tmpdir/health-ipsec-${state}.json" \
+    ai-ipsec-selected-egress fail
+  assert_health_detail_contains "$tmpdir/health-ipsec-${state}.json" \
+    ai-ipsec-selected-egress "$component"
+done
+
 reset_state
-if DNS_TEST_PYTHONPATH="$fakepy" \
-   DNS_TEST_IPV4_CONNECTIVITY=0 \
-   DNS_TEST_IPV6_CONNECTIVITY=1 \
-   run_manager health --json >"$tmpdir/health-ipv4-failed.json"; then
+if DNS_TEST_AI_INTERFACE_STATE=down \
+   run_health >"$tmpdir/health-ipsec-interface-down.json"; then
+  fail "health accepted a down AI xfrm interface"
+fi
+assert_health_detail_contains "$tmpdir/health-ipsec-interface-down.json" \
+  ai-ipsec-selected-egress 'interface_up=False'
+
+reset_state
+if DNS_TEST_AI_INTERFACE_STATE=missing \
+   run_health >"$tmpdir/health-ipsec-interface-missing.json"; then
+  fail "health accepted a missing AI xfrm interface"
+fi
+assert_health_detail_contains "$tmpdir/health-ipsec-interface-missing.json" \
+  ai-ipsec-selected-egress 'interface_up=False'
+
+reset_state
+if DNS_TEST_AI_VIP=999.64.0.1 \
+   run_health >"$tmpdir/health-ipsec-vip-invalid.json"; then
+  fail "health accepted an invalid AI virtual IPv4"
+fi
+assert_health_detail_contains "$tmpdir/health-ipsec-vip-invalid.json" \
+  ai-ipsec-selected-egress 'vip_valid=False'
+
+reset_state
+if DNS_TEST_ROUTE_STATE=missing_rule \
+   run_health >"$tmpdir/health-ipsec-rule-missing.json"; then
+  fail "health accepted a missing AI fwmark policy rule"
+fi
+assert_health_detail_contains "$tmpdir/health-ipsec-rule-missing.json" \
+  ai-ipsec-selected-egress 'policy_rule=False'
+
+reset_state
+if DNS_TEST_ROUTE_STATE=missing_route \
+   run_health >"$tmpdir/health-ipsec-route-missing.json"; then
+  fail "health accepted a missing AI policy route"
+fi
+assert_health_detail_contains "$tmpdir/health-ipsec-route-missing.json" \
+  ai-ipsec-selected-egress 'route_source_matches=False'
+
+reset_state
+if DNS_TEST_AI_ROUTE_SOURCE_STATE=wrong \
+   run_health >"$tmpdir/health-ipsec-route-source-wrong.json"; then
+  fail "health accepted an AI policy route with the wrong source address"
+fi
+assert_health_detail_contains "$tmpdir/health-ipsec-route-source-wrong.json" \
+  ai-ipsec-selected-egress 'route_source_matches=False'
+
+reset_state
+if DNS_TEST_AI_ROUTE_SOURCE_STATE=missing \
+   run_health >"$tmpdir/health-ipsec-route-source-missing.json"; then
+  fail "health accepted an AI policy route without a source address"
+fi
+assert_health_detail_contains "$tmpdir/health-ipsec-route-source-missing.json" \
+  ai-ipsec-selected-egress 'route_source_matches=False'
+
+reset_state
+DNS_TEST_AI_VIP=10.64.0.1 DNS_TEST_CN_VIP=10.64.0.2 \
+  run_manager test-ipsec
+reset_state
+if DNS_TEST_AI_SA_STATE=no-child \
+   DNS_TEST_AI_VIP=10.64.0.1 DNS_TEST_CN_VIP=10.64.0.2 \
+   run_manager test-ipsec >"$tmpdir/test-ipsec-no-child.log" 2>&1; then
+  fail "test-ipsec accepted an established IKE_SA without an installed CHILD_SA"
+fi
+
+metrics_exporter="$render_root/usr/local/lib/dnscomplex-metrics/exporter.py"
+metrics_health_stub="$tmpdir/metrics-health-stub"
+cat >"$metrics_health_stub" <<'EOF'
+#!/usr/bin/env bash
+status=ok
+[[ "${DNS_TEST_AI_SA_STATE:-healthy}" == "healthy" ]] || status=fail
+printf '{"status":"%s","checks":[{"name":"ai-ipsec-selected-egress","status":"%s"}]}\n' \
+  "$([[ "$status" == "ok" ]] && printf healthy || printf unhealthy)" \
+  "$status"
+[[ "$status" == "ok" ]]
+EOF
+chmod +x "$metrics_health_stub"
+reset_state
+if ! PATH="$fakebin:$PATH" \
+   DNSCOMPLEX_MANAGER="$metrics_health_stub" \
+   DNS_TEST_CALLS="$calls" \
+   DNS_TEST_AI_SA_STATE=no-child \
+   python3 - "$metrics_exporter" <<'PY'
+import runpy
+import sys
+
+module = runpy.run_path(sys.argv[1], run_name="dnscomplex_metrics_test")
+assert module["ipsec_up"]("ai") == 0
+PY
+then
+  fail "metrics marked AI IPsec up without an installed CHILD_SA"
+fi
+
+reset_state
+if DNS_TEST_IPV4_CONNECTIVITY=0 \
+   run_health >"$tmpdir/health-ipv4-failed.json"; then
   fail "failed default IPv4 connectivity was not unhealthy"
 fi
 assert_health_check "$tmpdir/health-ipv4-failed.json" default-ipv4-connectivity fail
@@ -1432,10 +1676,8 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
 PY
 
 reset_state
-DNS_TEST_PYTHONPATH="$fakepy" \
-DNS_TEST_IPV4_CONNECTIVITY=1 \
 DNS_TEST_IPV6_CONNECTIVITY=0 \
-run_manager health --json >"$tmpdir/health-ipv6-failed.json"
+run_health >"$tmpdir/health-ipv6-failed.json"
 assert_health_check "$tmpdir/health-ipv6-failed.json" default-ipv4-connectivity ok
 assert_health_check "$tmpdir/health-ipv6-failed.json" default-ipv6-connectivity warn
 
@@ -1444,10 +1686,8 @@ cp "$config" "$ipv6_off_config"
 printf '%s\n' 'DEFAULT_IPV6_MODE=off' >>"$ipv6_off_config"
 reset_state
 DNS_TEST_CONFIG="$ipv6_off_config" \
-DNS_TEST_PYTHONPATH="$fakepy" \
-DNS_TEST_IPV4_CONNECTIVITY=1 \
 DNS_TEST_IPV6_CONNECTIVITY=0 \
-run_manager health --json >"$tmpdir/health-ipv6-off.json"
+run_health >"$tmpdir/health-ipv6-off.json"
 assert_health_check "$tmpdir/health-ipv6-off.json" default-ipv6-connectivity ok
 assert_not_contains "$socket_calls" 'connect family=10'
 
@@ -1455,6 +1695,8 @@ reset_state
 rm -f "$run_dir/smartdns.last_restart"
 DNS_TEST_SCENARIO=post_restart_blocking \
 DNS_TEST_REAL_SLEEP=1 \
+DNS_TEST_AI_VIP=10.64.0.1 \
+DNS_TEST_CN_VIP=10.64.0.2 \
 run_manager watchdog >"$tmpdir/blocked.log" 2>&1 &
 blocked_pid=$!
 for _ in $(seq 1 100); do
@@ -1466,7 +1708,10 @@ if [[ ! -f "$blocking" ]]; then
   fail "blocking post-restart probe did not start"
 fi
 second_started=$(monotonic_millis)
-DNS_TEST_SCENARIO=healthy run_manager watchdog >"$tmpdir/busy.log" 2>&1 ||
+DNS_TEST_SCENARIO=healthy \
+DNS_TEST_AI_VIP=10.64.0.1 \
+DNS_TEST_CN_VIP=10.64.0.2 \
+run_manager watchdog >"$tmpdir/busy.log" 2>&1 ||
   fail "busy watchdog invocation must coalesce"
 second_elapsed=$(( $(monotonic_millis) - second_started ))
 ((second_elapsed <= 1000)) || fail "busy watchdog did not return promptly: ${second_elapsed}ms"
