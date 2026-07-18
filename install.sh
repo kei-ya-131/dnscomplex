@@ -387,6 +387,27 @@ require_root() {
   [[ "$(id -u)" == "0" ]] || die "run as root"
 }
 
+acquire_installer_maintenance_lock() {
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  local lock_file=${DNSCOMPLEX_MAINTENANCE_LOCK:-/run/lock/dnscomplex-maintenance.lock}
+  local old_umask
+  command -v flock >/dev/null 2>&1 ||
+    die "flock is required before running the installer"
+  mkdir -p "$(dirname "$lock_file")"
+  old_umask=$(umask)
+  umask 077
+  if ! exec 8>"$lock_file"; then
+    umask "$old_umask"
+    die "could not open maintenance lock: $lock_file"
+  fi
+  umask "$old_umask"
+  chmod 0600 "$lock_file"
+  flock -n 8 ||
+    die "another dnscomplex maintenance operation is already running"
+  export DNSCOMPLEX_MAINTENANCE_LOCK_HELD=1
+  export DNSCOMPLEX_MAINTENANCE_LOCK="$lock_file"
+}
+
 target_path() {
   local path=$1
   [[ "$path" == /* ]] || die "target path must be absolute: $path"
@@ -3381,7 +3402,8 @@ write_env_var() {
 write_config_cmd() {
   need_root
   local tmp
-  tmp=$(mktemp)
+  mkdir -p "$(dirname "$CONFIG")"
+  tmp=$(mktemp "$(dirname "$CONFIG")/.config.env.XXXXXX")
 	  {
 	    write_env_var DNSCOMPLEX_VERSION "${DNSCOMPLEX_VERSION:-0.1.0}"
     write_env_var DEPLOY_MODE "${DEPLOY_MODE:-vlan-gateway}"
@@ -3482,8 +3504,8 @@ write_config_cmd() {
     write_env_var AI_XFRM_ID "$AI_XFRM_ID"
     write_env_var CN_XFRM_ID "$CN_XFRM_ID"
   } >"$tmp"
-  install -m 0600 "$tmp" "$CONFIG"
-  rm -f "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$CONFIG"
 }
 
 usage() {
@@ -3524,6 +3546,8 @@ Commands:
   soak [--duration 30m] [--clients 1000] [--dns-qps 50] [--profiles ai,cn,default] [--idle-resume] [--output-json PATH]
   wizard
   validate-config [--json] ENV_FILE
+  apply-config ENV_FILE
+  apply-config-json JSON_FILE
   render-config [--redacted]
   support-bundle [--output PATH] [--include-logs minimal|standard|full]
   backup [OUTPUT_TAR_GZ]
@@ -6138,6 +6162,156 @@ validate_config_file_cmd() {
   return "$rc"
 }
 
+apply_config_file_cmd() {
+  need_root
+  acquire_maintenance_lock
+  [[ $# -eq 1 ]] || die "usage: dnscomplex apply-config ENV_FILE"
+  local source_file=$1
+  [[ -f "$source_file" && ! -L "$source_file" ]] ||
+    die "config candidate must be a regular file: $source_file"
+  validate_config_file_cmd "$source_file"
+
+  (
+    set -e
+    local config_dir staged="" backup="" had_config=0 repair_rc=0 rollback_rc=0
+    cleanup_config_apply() {
+      [[ -z "$staged" ]] || rm -f -- "$staged"
+      [[ -z "$backup" ]] || rm -f -- "$backup"
+    }
+    trap cleanup_config_apply EXIT HUP INT TERM
+    config_dir=$(dirname "$CONFIG")
+    mkdir -p "$config_dir"
+    staged=$(mktemp "$config_dir/.config.env.apply.XXXXXX")
+    install -m 0600 "$source_file" "$staged"
+    if [[ -e "$CONFIG" || -L "$CONFIG" ]]; then
+      backup=$(mktemp "$config_dir/.config.env.rollback.XXXXXX")
+      rm -f "$backup"
+      cp -a -- "$CONFIG" "$backup"
+      had_config=1
+    fi
+    mv -f "$staged" "$CONFIG"
+    staged=""
+
+    set +e
+    "$0" fix
+    repair_rc=$?
+    set -e
+    if [[ "$repair_rc" != "0" ]]; then
+      if [[ "$had_config" == "1" ]]; then
+        mv -f "$backup" "$CONFIG"
+        backup=""
+      else
+        rm -f "$CONFIG"
+      fi
+      set +e
+      "$0" fix
+      rollback_rc=$?
+      set -e
+      if [[ "$rollback_rc" != "0" ]]; then
+        warn "config apply failed and rollback repair was incomplete"
+      fi
+      die "config apply failed; previous config was restored"
+    fi
+    [[ -z "$backup" ]] || rm -f "$backup"
+    backup=""
+    log "configuration applied and repaired"
+  )
+}
+
+apply_config_json_cmd() {
+  need_root
+  acquire_maintenance_lock
+  [[ $# -eq 1 ]] || die "usage: dnscomplex apply-config-json JSON_FILE"
+  [[ -f "$1" && ! -L "$1" ]] ||
+    die "JSON update must be a regular file: $1"
+  (
+    set -e
+    local candidate=""
+    cleanup_config_json() {
+      [[ -z "$candidate" ]] || rm -f -- "$candidate"
+    }
+    trap cleanup_config_json EXIT HUP INT TERM
+    candidate=$(mktemp)
+    DNSCOMPLEX_ALLOWED_CONFIG_KEYS="$(config_schema_keys)" \
+      python3 - "$CONFIG" "$1" "$candidate" <<'PY'
+import json
+import os
+import shlex
+import sys
+
+config_path, update_path, output_path = sys.argv[1:4]
+allowed_order = [
+    key for key in os.environ.get("DNSCOMPLEX_ALLOWED_CONFIG_KEYS", "").splitlines()
+    if key
+]
+allowed = set(allowed_order)
+secret_keys = {
+    "AI_IPSEC_USERNAME",
+    "AI_IPSEC_PASSWORD",
+    "CN_IPSEC_USERNAME",
+    "CN_IPSEC_PASSWORD",
+    "DNSCOMPLEX_WEB_PASSWORD",
+    "AI_XRAY_URI",
+    "CN_XRAY_URI",
+    "AI_XRAY_OUTBOUND_JSON",
+    "CN_XRAY_OUTBOUND_JSON",
+}
+masked_secret = "********"
+
+with open(update_path, "r", encoding="utf-8") as fh:
+    updates = json.load(fh)
+if not isinstance(updates, dict):
+    raise SystemExit("config JSON update must be an object")
+
+current = {}
+raw_lines = []
+if os.path.exists(config_path):
+    with open(config_path, "r", encoding="utf-8") as fh:
+        raw_lines = fh.readlines()
+    for raw in raw_lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        try:
+            current[key] = shlex.split(value, posix=True)[0] if value else ""
+        except (ValueError, IndexError):
+            current[key] = value.strip("'\"")
+
+for key, value in updates.items():
+    if key not in allowed:
+        raise SystemExit(f"unsupported config key: {key}")
+    if isinstance(value, (dict, list)):
+        raise SystemExit(f"config value must be scalar: {key}")
+    if key in secret_keys and value == masked_secret:
+        continue
+    current[key] = "" if value is None else str(value)
+
+def quote(value):
+    return "'" + str(value).replace("'", "'\\''") + "'"
+
+lines = []
+seen = set()
+for raw in raw_lines:
+    if "=" in raw and not raw.lstrip().startswith("#"):
+        key = raw.split("=", 1)[0].strip()
+        if key in current:
+            lines.append(f"{key}={quote(current[key])}\n")
+            seen.add(key)
+            continue
+    lines.append(raw)
+for key in allowed_order:
+    if key in current and key not in seen:
+        lines.append(f"{key}={quote(current[key])}\n")
+
+with open(output_path, "w", encoding="utf-8") as fh:
+    fh.writelines(lines)
+os.chmod(output_path, 0o600)
+PY
+    apply_config_file_cmd "$candidate"
+  )
+}
+
 redact_stream() {
   python3 -c '
 import re
@@ -6381,9 +6555,20 @@ acquire_maintenance_lock() {
   chmod 0600 "$MAINTENANCE_LOCK"
   if ! flock -n 8; then
     exec 8>&-
-    die "another dnscomplex backup, restore, or update is already running"
+    die "another dnscomplex maintenance operation is already running"
   fi
-  DNSCOMPLEX_MAINTENANCE_LOCK_HELD=1
+  export DNSCOMPLEX_MAINTENANCE_LOCK_HELD=1
+}
+
+persistent_mutator_command() {
+  case "${1:-}" in
+    fix|update-geosite|add-domain|remove-domain|set-socks|set-ipsec|set-web-password|set-local-host|set-egress|set-xray-uri|set-xray-json|test-xray|render-xray|set-update-time|refresh-nftsets|refresh-cn-overrides|mss-calibrate|update-software|metrics-sample|apply-config|apply-config-json|backup|restore)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 fs_path() {
@@ -7132,8 +7317,11 @@ test_cmd() {
 }
 
 main() {
-  load_config
   local cmd=${1:-help}
+  if persistent_mutator_command "$cmd"; then
+    acquire_maintenance_lock
+  fi
+  load_config
   shift || true
   case "$cmd" in
     status) status_cmd "$@" ;;
@@ -7169,6 +7357,8 @@ main() {
     soak) soak_cmd "$@" ;;
     wizard) wizard_cmd "$@" ;;
     validate-config) validate_config_file_cmd "$@" ;;
+    apply-config) apply_config_file_cmd "$@" ;;
+    apply-config-json) apply_config_json_cmd "$@" ;;
     render-config) render_config_cmd "$@" ;;
     support-bundle) support_bundle_cmd "$@" ;;
     backup) backup_cmd "$@" ;;
@@ -8594,38 +8784,18 @@ def parse_config():
                 data[key] = value.strip("'\"")
     return data
 
-def quote_value(value):
-    return "'" + str(value).replace("'", "'\\''") + "'"
-
 def write_config(updated):
-    current = parse_config()
-    for k, v in updated.items():
-        if k not in CONFIG_KEYS:
-            continue
-        value = str(v)
-        if k in SECRET_KEYS and value == MASKED_SECRET:
-            continue
-        current[k] = value
-    lines = []
-    seen = set()
-    if os.path.exists(CONFIG):
-        with open(CONFIG, "r", encoding="utf-8") as fh:
-            for raw in fh:
-                if "=" in raw and not raw.lstrip().startswith("#"):
-                    key = raw.split("=", 1)[0].strip()
-                    if key in current:
-                        lines.append(f"{key}={quote_value(current[key])}\n")
-                        seen.add(key)
-                        continue
-                lines.append(raw)
-    for key in CONFIG_KEYS:
-        if key in current and key not in seen:
-            lines.append(f"{key}={quote_value(current[key])}\n")
-    tmp = CONFIG + ".webtmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.writelines(lines)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, CONFIG)
+    with tempfile.NamedTemporaryFile("w", delete=False) as fh:
+        json.dump(updated, fh, ensure_ascii=False)
+        path = fh.name
+    try:
+        os.chmod(path, 0o600)
+        return run([DNSCOMPLEX, "apply-config-json", path], 300)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 def safe_config():
     cfg = parse_config()
@@ -8685,26 +8855,19 @@ def apply_config_text(text):
     validation = validate_config_text(text)
     if not validation.get("ok"):
         return {"ok": False, "code": validation.get("code", 1), "output": validation.get("output", "")}
-    tmp = CONFIG + ".wizardtmp"
-    backup = CONFIG + ".wizardbak"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    with tempfile.NamedTemporaryFile("w", delete=False) as fh:
         fh.write(text)
         if not text.endswith("\n"):
             fh.write("\n")
-    os.chmod(tmp, 0o600)
-    if os.path.exists(CONFIG):
-        with open(CONFIG, "r", encoding="utf-8", errors="replace") as src, open(backup, "w", encoding="utf-8") as dst:
-            dst.write(src.read())
-        os.chmod(backup, 0o600)
-    os.replace(tmp, CONFIG)
-    result = run([DNSCOMPLEX, "fix"], 180)
-    if not result.get("ok") and os.path.exists(backup):
-        os.replace(backup, CONFIG)
-        rollback = run([DNSCOMPLEX, "fix"], 180)
-        result["output"] += "\nrollback:\n" + rollback.get("output", "")
-    elif os.path.exists(backup):
-        os.unlink(backup)
-    return result
+        path = fh.name
+    try:
+        os.chmod(path, 0o600)
+        return run([DNSCOMPLEX, "apply-config", path], 300)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 def update_status():
     cfg = parse_config()
@@ -9046,7 +9209,7 @@ def active_connections():
     return rows[:300]
 
 def metrics_current():
-    out = shell_output(["/usr/local/lib/dnscomplex-metrics/exporter.py", "--sample"], 15)
+    out = shell_output([DNSCOMPLEX, "metrics-sample"], 30)
     try:
         return json.loads(out)
     except json.JSONDecodeError:
@@ -9374,8 +9537,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             if self.path == "/api/config":
-                write_config(payload)
-                result = run([DNSCOMPLEX, "fix"], 180)
+                result = write_config(payload)
                 self.send_json(result)
                 return
             if self.path == "/api/wizard/validate":
@@ -9683,6 +9845,7 @@ main() {
   validate_config
   require_debian13
   require_root
+  acquire_installer_maintenance_lock
   install_packages
   render_all
   if [[ "$DRY_RUN" == "1" ]]; then
