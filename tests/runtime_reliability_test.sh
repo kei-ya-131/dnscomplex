@@ -519,6 +519,15 @@ fi
 exec /usr/bin/tar "$@"
 EOF
 
+cat >"$fakebin/dnscomplex-fix-stub" <<'EOF'
+#!/usr/bin/env bash
+printf 'fix-stub %s\n' "$*" >>"$DNS_TEST_CALLS"
+[[ "${1:-}" == "fix" ]] || exit 64
+[[ "${DNSCOMPLEX_MAINTENANCE_LOCK_HELD:-0}" == "1" ]] || exit 65
+( : >&8 ) 2>/dev/null || exit 66
+[[ "${DNS_TEST_FIX_FAIL:-0}" != "1" ]]
+EOF
+
 cat >"$fakebin/dig" <<'EOF'
 #!/usr/bin/env bash
 printf 'dig %s\n' "$*" >>"$DNS_TEST_CALLS"
@@ -621,7 +630,23 @@ run_manager() {
   DNS_TEST_NOW="${DNS_TEST_NOW:-}" \
   DNSCOMPLEX_FORCE_SERVICE_STATE="${DNSCOMPLEX_FORCE_SERVICE_STATE:-1}" \
   DNSCOMPLEX_CONFIG="${DNS_TEST_CONFIG:-$config}" \
-  "$manager" "$@"
+    "$manager" "$@"
+}
+
+run_manager_with_fix_stub() {
+  PATH="$fakebin:$PATH" \
+  DNSCOMPLEX_CONFIG="$config" \
+  DNSCOMPLEX_BASE="$state" \
+  DNSCOMPLEX_RUN_DIR="$run_dir" \
+  DNSCOMPLEX_FS_ROOT="$fake_root" \
+  DNSCOMPLEX_MAINTENANCE_LOCK="$tmpdir/maintenance.lock" \
+  DNS_TEST_CALLS="$calls" \
+  DNS_TEST_FIX_FAIL="${DNS_TEST_FIX_FAIL:-0}" \
+  bash -c '
+    source "$1"
+    shift
+    main "$@"
+  ' "$fakebin/dnscomplex-fix-stub" "$manager" "$@"
 }
 
 reset_state() {
@@ -1285,13 +1310,52 @@ lock_elapsed=$(( $(monotonic_millis) - lock_started ))
 ((lock_elapsed <= 1000)) ||
   fail "overlapping backup did not fail promptly: ${lock_elapsed}ms"
 assert_contains "$tmpdir/second-locked-backup.log" \
-  'another dnscomplex backup, restore, or update is already running'
+  'another dnscomplex maintenance operation is already running'
+cp "$config" "$tmpdir/config-before-locked-mutator.env"
+lock_started=$(monotonic_millis)
+if run_manager set-web-password locked-mutator-password \
+   >"$tmpdir/locked-mutator.log" 2>&1; then
+  fail "persistent config mutation bypassed the backup maintenance lock"
+fi
+lock_elapsed=$(( $(monotonic_millis) - lock_started ))
+((lock_elapsed <= 1000)) ||
+  fail "locked config mutation did not fail promptly: ${lock_elapsed}ms"
+cmp -s "$config" "$tmpdir/config-before-locked-mutator.env" ||
+  fail "blocked config mutation changed config.env"
+assert_contains "$tmpdir/locked-mutator.log" \
+  'another dnscomplex maintenance operation is already running'
 wait "$maintenance_pid"
 maintenance_pid=""
 [[ -f "$first_archive" ]] || fail "locked backup did not complete"
 rm -f "$tar_blocking"
 run_manager backup "$second_archive" >"$tmpdir/backup-lock-release.log" 2>&1
 [[ -f "$second_archive" ]] || fail "maintenance lock was not released after backup"
+
+cp "$config" "$tmpdir/config-before-json-apply.env"
+config_json="$tmpdir/config-update.json"
+printf '%s\n' \
+  '{"DNSCOMPLEX_WEB_PASSWORD":"transaction-password","DNSCOMPLEX_UPDATE_TIME":"03:15"}' \
+  >"$config_json"
+reset_state
+run_manager_with_fix_stub apply-config-json "$config_json"
+assert_contains "$config" "DNSCOMPLEX_WEB_PASSWORD='transaction-password'"
+assert_contains "$config" "DNSCOMPLEX_UPDATE_TIME='03:15'"
+assert_contains "$config" "AI_IPSEC_USERNAME='fixture-ai'"
+assert_contains "$calls" 'fix-stub fix'
+
+printf '%s\n' '{"DNSCOMPLEX_WEB_PASSWORD":"********"}' >"$config_json"
+run_manager_with_fix_stub apply-config-json "$config_json"
+assert_contains "$config" "DNSCOMPLEX_WEB_PASSWORD='transaction-password'"
+
+cp "$config" "$tmpdir/config-before-failed-json-apply.env"
+printf '%s\n' '{"DNSCOMPLEX_UPDATE_TIME":"02:45"}' >"$config_json"
+if DNS_TEST_FIX_FAIL=1 run_manager_with_fix_stub apply-config-json "$config_json" \
+   >"$tmpdir/failed-json-apply.log" 2>&1; then
+  fail "failed config repair was reported as a successful config transaction"
+fi
+cmp -s "$config" "$tmpdir/config-before-failed-json-apply.env" ||
+  fail "failed config transaction did not restore the previous config"
+cp "$tmpdir/config-before-json-apply.env" "$config"
 
 nested_archive="$tmpdir/nested-lock-backup.tar.gz"
 PATH="$fakebin:$PATH" \

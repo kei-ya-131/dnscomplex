@@ -381,6 +381,7 @@ run_rendered_manager() {
   DNSCOMPLEX_ROOT="$manager_root" MANAGER="$manager" bash -c '
     source "$MANAGER"
     need_root() { :; }
+    acquire_maintenance_lock() { :; }
     main "$@"
   ' _ "$@"
 }
@@ -748,9 +749,8 @@ installer_main_body=$(awk '
   END { printf "%s", last }
 ' "$repo_root/install.sh")
 case "$installer_main_body" in
-  *render_all*validate_rendered_install*enable_services*'dnscomplex update-geosite'*\
-'dnscomplex routes up'*'dnscomplex refresh-nftsets'*'dnscomplex test'*) ;;
-  *) fail "installer must preflight before service changes and run final validation automatically" ;;
+  *acquire_installer_maintenance_lock*install_packages*render_all*validate_rendered_install*enable_services*'dnscomplex update-geosite'*'dnscomplex routes up'*'dnscomplex refresh-nftsets'*'dnscomplex test'*) ;;
+  *) fail "installer must lock, preflight before service changes, and run final validation automatically" ;;
 esac
 assert_not_contains "$repo_root/install.sh" 'apt-get install -y smartdns'
 assert_not_contains "$repo_root/install.sh" 'https://sing-box.app/deb-install.sh'
@@ -759,6 +759,16 @@ assert_not_contains "$repo_root/install.sh" 'systemd-resolved cron dnsutils'
 
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'ThreadingHTTPServer'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'CONFIG_KEYS'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
+  '[DNSCOMPLEX, "apply-config-json", path]'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
+  '[DNSCOMPLEX, "apply-config", path]'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
+  '[DNSCOMPLEX, "metrics-sample"]'
+assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
+  'os.replace(tmp, CONFIG)'
+assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
+  'CONFIG + ".wizardbak"'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'AI_EGRESS_MODE'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'AI_QUIC_POLICY'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" 'LOCAL_DOMAIN_IPV6_POLICY'
@@ -1093,6 +1103,9 @@ assert_not_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'SmartDNS listeners and direct DNS positive controls are unavailable'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'acquire_maintenance_lock'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'tmp=$(mktemp "$(dirname "$CONFIG")/.config.env.XXXXXX")'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'mv -f "$tmp" "$CONFIG"'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'snapshot_copy'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'sqlite_backup'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'src.backup(dst)'
@@ -1137,6 +1150,31 @@ case "$update_software_impl_body" in
 esac
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'rollback_component_update "$before"'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'Debian package changes remain managed by apt/dpkg'
+for mutator in \
+  fix update-geosite add-domain remove-domain set-socks set-ipsec \
+  set-web-password set-local-host set-egress set-xray-uri set-xray-json \
+  test-xray render-xray set-update-time refresh-nftsets \
+  refresh-cn-overrides mss-calibrate update-software metrics-sample \
+  apply-config apply-config-json backup restore; do
+  bash -c 'source "$1"; persistent_mutator_command "$2"' \
+    _ "$tmpdir/root/usr/local/sbin/dnscomplex" "$mutator" ||
+    fail "persistent command is not covered by the maintenance lock: $mutator"
+done
+for read_only in status doctor trace-domain render-config support-bundle; do
+  if bash -c 'source "$1"; persistent_mutator_command "$2"' \
+     _ "$tmpdir/root/usr/local/sbin/dnscomplex" "$read_only"; then
+    fail "read-only command unnecessarily takes the maintenance lock: $read_only"
+  fi
+done
+manager_main_body=$(awk '
+  /^main\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$tmpdir/root/usr/local/sbin/dnscomplex")
+case "$manager_main_body" in
+  *persistent_mutator_command*acquire_maintenance_lock*load_config*'case "$cmd" in'*) ;;
+  *) fail "manager must lock persistent commands before loading shared config" ;;
+esac
 restore_body=$(awk '
   /^restore_cmd\(\) \{/ { inside=1 }
   inside { print }
