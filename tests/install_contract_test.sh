@@ -411,6 +411,18 @@ assert_local_host_rejected 'reject-macbook-air' 'macbook-air.local' '192.0.2.31'
 assert_local_host_rejected 'reject-host-injection' $'safe.local\nmacbookair.local' '192.0.2.32'
 assert_local_host_rejected 'reject-out-of-range-ipv4' 'router.local' '256.1.1.1'
 
+cat >"$manager_root/etc/dnscomplex/config.env" <<'EOF'
+DEPLOY_MODE=routeros-policy
+LINUX_LAN_IPV4=192.168.8.200
+SINGBOX_SOCKS_LISTEN=192.168.8.200
+SINGBOX_SOCKS_PORT=10800
+EOF
+set_socks_reject_log="$tmpdir/set-socks-policy-reject.log"
+if run_rendered_manager set-socks 0.0.0.0 1080 >"$set_socks_reject_log" 2>&1; then
+  fail "routeros-policy set-socks accepted a non-VM listen address"
+fi
+assert_contains "$set_socks_reject_log" 'routeros-policy SOCKS listen must match LINUX_LAN_IPV4'
+
 wizard_output=$(run_rendered_manager wizard)
 for wizard_value in \
   'ROUTEROS_LAN_IPV4=192.168.8.253' \
@@ -918,6 +930,35 @@ assert_contains "$repo_root/install.sh" 'if [[ "$DEPLOY_MODE" == "routeros-polic
 [[ ! -f "$policy_tmp/root/etc/dnsmasq.d/dnscomplex.conf" ]] || fail "routeros-policy must not enable Linux DHCP"
 DNSCOMPLEX_ROOT="$policy_tmp/root" bash "$repo_root/install.sh" --dry-run --config "$policy_tmp/config.env"
 [[ "$(grep -Ec '^[[:space:]]*nohook[[:space:]]+resolv[.]conf[[:space:]]*$' "$policy_tmp/root/etc/dhcpcd.conf")" == "1" ]] || fail "routeros-policy dhcpcd nohook must be idempotent"
+
+policy_defaults_tmp=$(mktemp -d)
+cat >"$policy_defaults_tmp/config.env" <<'EOF'
+DNSCOMPLEX_NONINTERACTIVE=1
+DEPLOY_MODE=routeros-policy
+WAN_IFACE=ens18
+ROUTEROS_LAN_IPV4=192.168.50.253
+LINUX_LAN_IPV4=192.168.50.200
+LAN_CLIENT_IPV4_CIDR=192.168.50.0/24
+AI_IPSEC_USERNAME=ai-user
+AI_IPSEC_PASSWORD=ai-pass
+CN_IPSEC_USERNAME=cn-user
+CN_IPSEC_PASSWORD=cn-pass
+EOF
+DNSCOMPLEX_ROOT="$policy_defaults_tmp/root" bash "$repo_root/install.sh" --dry-run --config "$policy_defaults_tmp/config.env"
+assert_contains "$policy_defaults_tmp/root/etc/dnscomplex/config.env" "SINGBOX_SOCKS_LISTEN='192.168.50.200'"
+assert_contains "$policy_defaults_tmp/root/etc/dnscomplex/config.env" "SINGBOX_SOCKS_PORT='10800'"
+assert_contains "$policy_defaults_tmp/root/etc/sing-box/config.json" '"listen": "192.168.50.200"'
+assert_contains "$policy_defaults_tmp/root/etc/sing-box/config.json" '"listen_port": 10800'
+
+cat >>"$policy_defaults_tmp/config.env" <<'EOF'
+SINGBOX_SOCKS_LISTEN=0.0.0.0
+SINGBOX_SOCKS_PORT=1080
+EOF
+if DNSCOMPLEX_ROOT="$policy_defaults_tmp/invalid-root" \
+  bash "$repo_root/install.sh" --dry-run --config "$policy_defaults_tmp/config.env" >/dev/null 2>&1; then
+  fail "routeros-policy installer accepted a non-VM SOCKS listen address"
+fi
+rm -rf "$policy_defaults_tmp"
 rm -rf "$policy_tmp"
 
 single_policy_tmp=$(mktemp -d)
