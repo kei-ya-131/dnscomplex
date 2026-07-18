@@ -40,6 +40,7 @@ GITHUB_RELEASE_POLICY="latest"
 DNSCOMPLEX_NFTSET_REFRESH_INTERVAL="5m"
 DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT="2h"
 IPSEC_TCP_MSS=1200
+DNSCOMPLEX_IPSEC_BOOT_TIMEOUT=90
 AI_MARK="0x301"
 CN_MARK="0x351"
 AI_MARK_DEC="769"
@@ -101,7 +102,8 @@ Optional variables:
   LOCAL_DOMAIN_IPV6_POLICY=ipv4_only|allow
   SINGBOX_DNS_LISTEN SINGBOX_DNS_PORT
   DNSCOMPLEX_WEB_LISTEN DNSCOMPLEX_WEB_PORT DNSCOMPLEX_WEB_PASSWORD DNSCOMPLEX_UPDATE_TIME
-  DNSCOMPLEX_NFTSET_REFRESH_INTERVAL DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT IPSEC_TCP_MSS
+  DNSCOMPLEX_NFTSET_REFRESH_INTERVAL DNSCOMPLEX_NFTSET_REFRESH_TIMEOUT
+  IPSEC_TCP_MSS DNSCOMPLEX_IPSEC_BOOT_TIMEOUT
   DEFAULT_DNS_UPSTREAMS DEFAULT_DNS_STRATEGY AI_DNS_UPSTREAMS CN_DNS_UPSTREAMS
   DEFAULT_IPV6_MODE=auto|on|off
   AI_GEOSITE_SOURCES AI_SUPPORT_DOMAINS SING_GEOSITE_RULESET_BASE_URL
@@ -227,6 +229,7 @@ load_config() {
   : "${HA_FAILOVER_POLICY:=primary-secondary-routeros}"
   : "${PROMETHEUS_MODE:=exporter-only}"
   : "${IPSEC_TCP_MSS:=1200}"
+  : "${DNSCOMPLEX_IPSEC_BOOT_TIMEOUT:=90}"
   : "${DNSCOMPLEX_NONINTERACTIVE:=0}"
 
   case "$DEFAULT_DNS_STRATEGY" in
@@ -330,11 +333,13 @@ validate_config() {
   [[ "$DNSCOMPLEX_WEB_PORT" =~ ^[0-9]+$ ]] || die "DNSCOMPLEX_WEB_PORT must be numeric"
   [[ "$DNSCOMPLEX_METRICS_PORT" =~ ^[0-9]+$ ]] || die "DNSCOMPLEX_METRICS_PORT must be numeric"
   [[ "$IPSEC_TCP_MSS" =~ ^[0-9]+$ ]] || die "IPSEC_TCP_MSS must be numeric"
+  [[ "$DNSCOMPLEX_IPSEC_BOOT_TIMEOUT" =~ ^[0-9]+$ ]] || die "DNSCOMPLEX_IPSEC_BOOT_TIMEOUT must be numeric"
   ((DNSCOMPLEX_WEB_PORT >= 1 && DNSCOMPLEX_WEB_PORT <= 65535)) || die "DNSCOMPLEX_WEB_PORT must be 1-65535"
   ((XRAY_AI_SOCKS_PORT >= 1 && XRAY_AI_SOCKS_PORT <= 65535)) || die "XRAY_AI_SOCKS_PORT must be 1-65535"
   ((XRAY_CN_SOCKS_PORT >= 1 && XRAY_CN_SOCKS_PORT <= 65535)) || die "XRAY_CN_SOCKS_PORT must be 1-65535"
   ((DNSCOMPLEX_METRICS_PORT >= 1 && DNSCOMPLEX_METRICS_PORT <= 65535)) || die "DNSCOMPLEX_METRICS_PORT must be 1-65535"
   ((IPSEC_TCP_MSS >= 536 && IPSEC_TCP_MSS <= 1460)) || die "IPSEC_TCP_MSS must be 536-1460"
+  ((DNSCOMPLEX_IPSEC_BOOT_TIMEOUT >= 15 && DNSCOMPLEX_IPSEC_BOOT_TIMEOUT <= 110)) || die "DNSCOMPLEX_IPSEC_BOOT_TIMEOUT must be 15-110 seconds"
   [[ "$DNSCOMPLEX_UPDATE_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "DNSCOMPLEX_UPDATE_TIME must be HH:MM"
   case "$DNSCOMPLEX_UPDATE_CHANNEL" in stable|beta|pinned) ;; *) die "DNSCOMPLEX_UPDATE_CHANNEL must be stable, beta, or pinned" ;; esac
   case "$GITHUB_RELEASE_POLICY" in latest|pinned) ;; *) die "GITHUB_RELEASE_POLICY must be latest or pinned" ;; esac
@@ -681,6 +686,7 @@ HA_HEALTH_URL='$HA_HEALTH_URL'
 HA_FAILOVER_POLICY='$HA_FAILOVER_POLICY'
 PROMETHEUS_MODE='$PROMETHEUS_MODE'
 IPSEC_TCP_MSS='$IPSEC_TCP_MSS'
+DNSCOMPLEX_IPSEC_BOOT_TIMEOUT='$DNSCOMPLEX_IPSEC_BOOT_TIMEOUT'
 AI_MARK='$AI_MARK'
 CN_MARK='$CN_MARK'
 AI_MARK_DEC='$AI_MARK_DEC'
@@ -2173,11 +2179,36 @@ ExecStop=/usr/local/sbin/dnscomplex ipsec-ifaces down
 WantedBy=multi-user.target
 EOF
 
+  write_file /etc/systemd/system/dnscomplex-ipsec-ready.service <<EOF
+[Unit]
+Description=dnscomplex wait for selected IPsec egress
+After=network-online.target dnscomplex-ipsec-ifaces.service strongswan-starter.service strongswan-swanctl.service strongswan.service ipsec.service
+Wants=network-online.target
+Requires=dnscomplex-ipsec-ifaces.service
+Before=dnscomplex-routing.service
+OnSuccess=dnscomplex-routing.service
+StartLimitIntervalSec=5min
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/dnscomplex ipsec-ready
+TimeoutStartSec=120s
+Restart=on-failure
+RestartSec=15s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
   write_file /etc/systemd/system/dnscomplex-routing.service <<EOF
 [Unit]
 Description=dnscomplex policy routing
-After=network-online.target dnscomplex-ipsec-ifaces.service
-Wants=network-online.target dnscomplex-ipsec-ifaces.service
+Requires=dnscomplex-ipsec-ready.service
+After=network-online.target nftables.service dnscomplex-ipsec-ifaces.service dnscomplex-ipsec-ready.service
+Wants=network-online.target nftables.service
+PartOf=nftables.service
 
 [Service]
 Type=oneshot
@@ -2479,6 +2510,7 @@ load_config() {
   : "${HA_FAILOVER_POLICY:=primary-secondary-routeros}"
   : "${PROMETHEUS_MODE:=exporter-only}"
   : "${IPSEC_TCP_MSS:=1200}"
+  : "${DNSCOMPLEX_IPSEC_BOOT_TIMEOUT:=90}"
   : "${APPLE_PRIVATE_RELAY_BLOCK:=1}"
   : "${AI_GEOSITE_SOURCES:=openai anthropic}"
   : "${AI_SUPPORT_DOMAINS:=meta.ai}"
@@ -2594,6 +2626,7 @@ HA_HEALTH_URL
 HA_FAILOVER_POLICY
 PROMETHEUS_MODE
 IPSEC_TCP_MSS
+DNSCOMPLEX_IPSEC_BOOT_TIMEOUT
 APPLE_PRIVATE_RELAY_BLOCK
 AI_MARK
 CN_MARK
@@ -3204,6 +3237,7 @@ write_config_cmd() {
     write_env_var HA_FAILOVER_POLICY "$HA_FAILOVER_POLICY"
     write_env_var PROMETHEUS_MODE "$PROMETHEUS_MODE"
     write_env_var IPSEC_TCP_MSS "$IPSEC_TCP_MSS"
+    write_env_var DNSCOMPLEX_IPSEC_BOOT_TIMEOUT "$DNSCOMPLEX_IPSEC_BOOT_TIMEOUT"
     write_env_var APPLE_PRIVATE_RELAY_BLOCK "$APPLE_PRIVATE_RELAY_BLOCK"
     write_env_var AI_MARK "$AI_MARK"
     write_env_var CN_MARK "$CN_MARK"
@@ -3264,6 +3298,7 @@ Commands:
   support-bundle [--output PATH] [--include-logs minimal|standard|full]
   backup [OUTPUT_TAR_GZ]
   restore INPUT_TAR_GZ
+  ipsec-ready
   ipsec-ifaces up|down
   routes up|down
 EOF
@@ -3311,6 +3346,9 @@ status_cmd() {
     xray-dnscomplex.service \
     dnscomplex-web.service \
     dnscomplex-metrics.service \
+    dnscomplex-ipsec-ifaces.service \
+    dnscomplex-ipsec-ready.service \
+    dnscomplex-routing.service \
     dnscomplex-health.timer \
     dnscomplex-update.timer \
     dnscomplex-cn-overrides.timer \
@@ -4050,6 +4088,167 @@ mss_recommended_value() {
   printf '%s\n' "$value"
 }
 
+profile_uses_ipsec() {
+  case "$1" in
+    ai) [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" ]] ;;
+    cn) [[ "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+ipsec_deadline_remaining() {
+  local deadline=$1 now
+  now=$(date +%s)
+  REPLY=$((deadline - now))
+  ((REPLY > 0))
+}
+
+wait_for_ipsec_underlay() {
+  local deadline=$1 iface expected gateway addresses parsed_addresses routes
+  if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
+    iface=$WAN_IFACE
+    expected=${LINUX_LAN_IPV4%%/*}
+    gateway=${ROUTEROS_LAN_IPV4%%/*}
+  else
+    iface="${WAN_IFACE}.${TRANSIT_VLAN_ID}"
+    expected=${LINUX_TRANSIT_IPV4%%/*}
+    gateway=${ROUTEROS_TRANSIT_IPV4%%/*}
+  fi
+
+  while true; do
+    addresses=$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null || true)
+    parsed_addresses=$(awk '{split($4, address, "/"); print address[1]}' <<<"$addresses")
+    routes=$(ip -4 route show default dev "$iface" 2>/dev/null || true)
+    if grep -Fxq "$expected" <<<"$parsed_addresses" &&
+      grep -Fq "default via $gateway dev $iface" <<<"$routes"; then
+      log "IPsec underlay ready: $iface has $expected via $gateway"
+      return 0
+    fi
+    if ! ipsec_deadline_remaining "$deadline"; then
+      warn "timed out waiting for $expected and default route via $gateway on $iface"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+wait_for_swanctl_vici() {
+  local deadline=$1 probe_timeout
+  while true; do
+    ipsec_deadline_remaining "$deadline" || {
+      warn "timed out waiting for the strongSwan VICI daemon"
+      return 1
+    }
+    probe_timeout=$REPLY
+    ((probe_timeout > 2)) && probe_timeout=2
+    if timeout --signal=TERM --kill-after=1s "${probe_timeout}s" \
+      swanctl --stats >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+ipsec_vip_from_sas() {
+  local child=$1
+  awk -v child="$child" '
+    $1 == child ":" {
+      in_child = 1
+      next
+    }
+    /^[[:alnum:]_-]+:/ {
+      in_child = 0
+    }
+    in_child && $0 ~ /local .*\[[0-9.]+\]/ {
+      line = $0
+      sub(/^.*\[/, "", line)
+      sub(/\].*$/, "", line)
+      print line
+      exit
+    }
+  '
+}
+
+ipsec_child_ready() {
+  local child=$1 sas vip
+  sas=$(timeout --signal=TERM --kill-after=1s 5s swanctl --list-sas 2>/dev/null || true)
+  grep -Eq "^${child}: #[0-9]+, ESTABLISHED" <<<"$sas" || return 1
+  vip=$(ipsec_vip_from_sas "$child" <<<"$sas")
+  [[ -n "$vip" ]]
+}
+
+run_swanctl_bounded() {
+  local timeout_seconds=$1 output rc
+  shift
+  mkdir -p "$RUN_DIR"
+  output=$(mktemp "$RUN_DIR/.swanctl.XXXXXX") || return 1
+  chmod 0600 "$output"
+  if timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" \
+    swanctl "$@" >"$output" 2>&1; then
+    rm -f "$output"
+    return 0
+  else
+    rc=$?
+  fi
+  cat "$output" >&2
+  rm -f "$output"
+  return "$rc"
+}
+
+ipsec_ready_cmd() {
+  need_root
+  local timeout_seconds=${DNSCOMPLEX_IPSEC_BOOT_TIMEOUT:-90}
+  local deadline profile selected=0 remaining
+  [[ "$timeout_seconds" =~ ^[0-9]+$ ]] && ((timeout_seconds >= 1 && timeout_seconds <= 110)) ||
+    die "DNSCOMPLEX_IPSEC_BOOT_TIMEOUT must be 1-110 seconds at runtime"
+
+  for profile in ai cn; do
+    if profile_uses_ipsec "$profile"; then
+      selected=1
+    fi
+  done
+  if [[ "$selected" == "0" ]]; then
+    log "no IPsec egress profile selected; readiness check skipped"
+    return 0
+  fi
+
+  deadline=$(($(date +%s) + timeout_seconds))
+  wait_for_ipsec_underlay "$deadline" || return 1
+  wait_for_swanctl_vici "$deadline" || return 1
+  ipsec_deadline_remaining "$deadline" || {
+    warn "IPsec readiness deadline expired before configuration load"
+    return 1
+  }
+  remaining=$REPLY
+  if ! run_swanctl_bounded "$remaining" --load-all --noprompt; then
+    warn "strongSwan configuration could not be loaded"
+    return 1
+  fi
+
+  for profile in ai cn; do
+    profile_uses_ipsec "$profile" || continue
+    if ! ipsec_child_ready "$profile"; then
+      ipsec_deadline_remaining "$deadline" || {
+        warn "$profile IPsec readiness deadline expired before initiation"
+        return 1
+      }
+      remaining=$REPLY
+      if ! run_swanctl_bounded "$remaining" --initiate --child "$profile"; then
+        warn "$profile IPsec child could not be initiated"
+        return 1
+      fi
+    fi
+    while ! ipsec_child_ready "$profile"; do
+      if ! ipsec_deadline_remaining "$deadline"; then
+        warn "$profile IPsec child did not obtain an established SA and virtual IPv4"
+        return 1
+      fi
+      sleep 1
+    done
+    log "$profile IPsec child is established with a virtual IPv4"
+  done
+}
+
 ipsec_ifaces_cmd() {
   need_root
   local action=${1:-}
@@ -4075,23 +4274,12 @@ ipsec_ifaces_cmd() {
 }
 
 ipsec_vip() {
-  local child=$1
-  swanctl --list-sas 2>/dev/null | awk -v child="$child" '
-    $1 == child ":" {
-      in_child = 1
-      next
-    }
-    /^[[:alnum:]_-]+:/ {
-      in_child = 0
-    }
-    in_child && $0 ~ /local .*\[[0-9.]+\]/ {
-      line = $0
-      sub(/^.*\[/, "", line)
-      sub(/\].*$/, "", line)
-      print line
-      exit
-    }
-  '
+  local child=$1 sas
+  if ! sas=$(timeout --signal=TERM --kill-after=1s 5s \
+    swanctl --list-sas 2>/dev/null); then
+    return 1
+  fi
+  ipsec_vip_from_sas "$child" <<<"$sas"
 }
 
 delete_nft_rules_by_comment() {
@@ -4105,8 +4293,11 @@ delete_nft_rules_by_comment() {
 }
 
 sync_ipsec_nat() {
-  nft list chain inet dnscomplex postrouting >/dev/null 2>&1 || \
-    nft add chain inet dnscomplex postrouting '{ type nat hook postrouting priority srcnat; policy accept; }'
+  local failed=0
+  if ! nft list chain inet dnscomplex postrouting >/dev/null 2>&1; then
+    nft add chain inet dnscomplex postrouting \
+      '{ type nat hook postrouting priority srcnat; policy accept; }' || return 1
+  fi
 
   delete_nft_rules_by_comment postrouting dnscomplex-ai-snat
   delete_nft_rules_by_comment postrouting dnscomplex-cn-snat
@@ -4115,20 +4306,31 @@ sync_ipsec_nat() {
   if [[ "${AI_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
     ai_vip=$(ipsec_vip ai || true)
     if [[ -n "$ai_vip" ]]; then
-      nft add rule inet dnscomplex postrouting oifname "ipsec-ai" ip daddr @ai4 snat ip to "$ai_vip" comment "dnscomplex-ai-snat"
+      if ! nft add rule inet dnscomplex postrouting oifname "ipsec-ai" \
+        ip daddr @ai4 snat ip to "$ai_vip" comment "dnscomplex-ai-snat"; then
+        warn "AI IPsec SNAT rule could not be installed"
+        failed=1
+      fi
     else
       warn "AI IPsec virtual IPv4 is not available yet; SNAT rule not installed"
+      failed=1
     fi
   fi
 
   if [[ "${CN_EGRESS_MODE:-ipsec}" == "ipsec" ]]; then
     cn_vip=$(ipsec_vip cn || true)
     if [[ -n "$cn_vip" ]]; then
-      nft add rule inet dnscomplex postrouting oifname "ipsec-cn" ip daddr @cn4 snat ip to "$cn_vip" comment "dnscomplex-cn-snat"
+      if ! nft add rule inet dnscomplex postrouting oifname "ipsec-cn" \
+        ip daddr @cn4 snat ip to "$cn_vip" comment "dnscomplex-cn-snat"; then
+        warn "CN IPsec SNAT rule could not be installed"
+        failed=1
+      fi
     else
       warn "CN IPsec virtual IPv4 is not available yet; SNAT rule not installed"
+      failed=1
     fi
   fi
+  return "$failed"
 }
 
 sync_singbox_ipsec_bind_addresses() {
@@ -4231,8 +4433,8 @@ routes_cmd() {
     up)
       ensure_policy_route_profile ai || return 1
       ensure_policy_route_profile cn || return 1
-      sync_ipsec_nat || true
-      sync_singbox_ipsec_bind_addresses || true
+      sync_ipsec_nat || return 1
+      sync_singbox_ipsec_bind_addresses || return 1
       ;;
     down)
       ip rule del fwmark "$AI_MARK" table "$AI_TABLE" priority 10301 2>/dev/null || true
@@ -4261,17 +4463,17 @@ fix_cmd() {
     systemctl restart systemd-networkd dnsmasq radvd nftables || true
   fi
   restart_ipsec_service || true
-  systemctl restart dnscomplex-ipsec-ifaces dnscomplex-routing || true
+  systemctl restart dnscomplex-ipsec-ifaces || true
   systemctl enable --now dnscomplex-metrics dnscomplex-metrics-sample.timer 2>/dev/null || true
   systemctl enable --now xray-dnscomplex 2>/dev/null || true
   systemctl restart dnscomplex-metrics || true
   apply_egress_stack_cmd || true
   write_update_timer_cmd || true
   systemctl reset-failed dnscomplex-update.service dnscomplex-update.timer 2>/dev/null || true
-  swanctl --load-all >/tmp/dnscomplex-swanctl-load.log 2>&1 || cat /tmp/dnscomplex-swanctl-load.log >&2
-  swanctl --initiate --child ai || true
-  swanctl --initiate --child cn || true
-  "$0" routes up || true
+  "$0" ipsec-ready || warn "selected IPsec egress did not become ready during repair"
+  "$0" routes up || warn "policy routing could not be restored during repair"
+  systemctl reset-failed dnscomplex-ipsec-ready dnscomplex-routing 2>/dev/null || true
+  systemctl restart dnscomplex-ipsec-ready dnscomplex-routing 2>/dev/null || true
   render_adguard_runtime || true
   restart_dns_stack || true
   "$0" refresh-nftsets || true
@@ -4903,21 +5105,38 @@ repair_policy_routes_if_needed() {
   return "$failed"
 }
 
+ipsec_child_established() {
+  local child=$1 sas
+  if ! sas=$(timeout 5 swanctl --list-sas 2>/dev/null); then
+    return 1
+  fi
+  grep -Eq "^${child}: #[0-9]+, ESTABLISHED" <<<"$sas"
+}
+
 repair_ipsec_children_if_needed() {
   command -v swanctl >/dev/null 2>&1 || return 0
-  local child mode failed=0
+  local child mode failed=0 config_loaded=0
+  IPSEC_CHILDREN_REPAIRED=0
   for child in ai cn; do
     case "$child" in
       ai) mode=${AI_EGRESS_MODE:-ipsec} ;;
       cn) mode=${CN_EGRESS_MODE:-ipsec} ;;
     esac
     [[ "$mode" == "ipsec" ]] || continue
-    if ! timeout 5 swanctl --list-sas 2>/dev/null |
-      grep -Eq "^${child}: #[0-9]+, ESTABLISHED"; then
+    if ! ipsec_child_established "$child"; then
+      if [[ "$config_loaded" == "0" ]]; then
+        if ! timeout 10 swanctl --load-all --noprompt >/dev/null 2>&1; then
+          warn "strongSwan configuration could not be reloaded"
+          return 1
+        fi
+        config_loaded=1
+      fi
       timeout 15 swanctl --initiate --child "$child" >/dev/null 2>&1 || {
         warn "$child IPsec child is not established"
         failed=1
+        continue
       }
+      IPSEC_CHILDREN_REPAIRED=1
     fi
   done
   return "$failed"
@@ -4942,8 +5161,12 @@ watchdog_locked_cmd() {
   if [[ "${XRAY_ENABLED:-1}" == "1" ]]; then
     restart_watchdog_unit_if_inactive xray-dnscomplex || return 1
   fi
-  repair_policy_routes_if_needed || return 1
   repair_ipsec_children_if_needed || return 1
+  if [[ "${IPSEC_CHILDREN_REPAIRED:-0}" == "1" ]]; then
+    routes_cmd up || return 1
+  else
+    repair_policy_routes_if_needed || return 1
+  fi
 
   if smartdns_listener_round; then
     return 0
@@ -5326,7 +5549,8 @@ apply_egress_stack_cmd() {
   systemctl daemon-reload
   systemctl enable --now xray-dnscomplex 2>/dev/null || true
   systemctl restart xray-dnscomplex sing-box || true
-  "$0" routes up || true
+  "$0" ipsec-ready
+  "$0" routes up
 }
 
 set_egress_cmd() {
@@ -6237,6 +6461,7 @@ main() {
     support-bundle) support_bundle_cmd "$@" ;;
     backup) backup_cmd "$@" ;;
     restore) restore_cmd "$@" ;;
+    ipsec-ready) ipsec_ready_cmd "$@" ;;
     ipsec-ifaces) ipsec_ifaces_cmd "$@" ;;
     routes) routes_cmd "$@" ;;
     help|--help|-h) usage ;;
@@ -8607,18 +8832,19 @@ enable_services() {
     systemctl enable --now systemd-networkd nftables dnsmasq radvd
   fi
   systemctl restart nftables || true
-  systemctl enable --now dnscomplex-ipsec-ifaces dnscomplex-routing dnscomplex-health.timer dnscomplex-update.timer dnscomplex-cn-overrides.timer dnscomplex-nftset-refresh.timer dnscomplex-metrics-sample.timer
-  systemctl restart dnscomplex-health.timer \
-    dnscomplex-update.timer \
-    dnscomplex-cn-overrides.timer \
-    dnscomplex-nftset-refresh.timer \
-    dnscomplex-metrics-sample.timer
+  systemctl enable --now dnscomplex-ipsec-ifaces
   for ipsec_unit in strongswan-swanctl strongswan-starter strongswan ipsec; do
     if systemctl list-unit-files "${ipsec_unit}.service" >/dev/null 2>&1; then
       systemctl enable --now "$ipsec_unit" && ipsec_enabled=1 && break
     fi
   done
   [[ "$ipsec_enabled" == "1" ]] || warn "no strongSwan systemd unit found; IPsec may need manual service setup"
+  systemctl enable --now dnscomplex-ipsec-ready dnscomplex-routing dnscomplex-health.timer dnscomplex-update.timer dnscomplex-cn-overrides.timer dnscomplex-nftset-refresh.timer dnscomplex-metrics-sample.timer
+  systemctl restart dnscomplex-health.timer \
+    dnscomplex-update.timer \
+    dnscomplex-cn-overrides.timer \
+    dnscomplex-nftset-refresh.timer \
+    dnscomplex-metrics-sample.timer
   systemctl enable --now smartdns AdGuardHome sing-box xray-dnscomplex
   systemctl enable --now dnscomplex-web
   systemctl enable --now dnscomplex-metrics

@@ -81,6 +81,7 @@ assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.timer"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.timer"
+assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-web.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics.service"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.service"
@@ -396,8 +397,40 @@ assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.timer" 
 assert_not_contains "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.timer" 'OnUnitActiveSec=6h'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.service" 'ExecStart=/usr/local/sbin/dnscomplex refresh-nftsets'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-nftset-refresh.timer" 'OnUnitActiveSec=5m'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service" \
+  'After=network-online.target dnscomplex-ipsec-ifaces.service strongswan-starter.service strongswan-swanctl.service strongswan.service ipsec.service'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service" \
+  'Before=dnscomplex-routing.service'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service" \
+  'ExecStart=/usr/local/sbin/dnscomplex ipsec-ready'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service" \
+  'TimeoutStartSec=120s'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service" \
+  'OnSuccess=dnscomplex-routing.service'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-ipsec-ready.service" \
+  'Restart=on-failure'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-routing.service" \
+  'Requires=dnscomplex-ipsec-ready.service'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-routing.service" \
+  'After=network-online.target nftables.service dnscomplex-ipsec-ifaces.service dnscomplex-ipsec-ready.service'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-routing.service" \
+  'PartOf=nftables.service'
 assert_contains "$repo_root/install.sh" 'dnscomplex-cn-overrides.timer'
 assert_contains "$repo_root/install.sh" 'dnscomplex-nftset-refresh.timer'
+assert_contains "$repo_root/install.sh" 'dnscomplex-ipsec-ready'
+enable_services_body=$(awk '
+  /^enable_services\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$repo_root/install.sh")
+ipsec_enable_line=$(grep -nF 'for ipsec_unit in' <<<"$enable_services_body")
+ready_enable_line=$(grep -nF 'systemctl enable --now dnscomplex-ipsec-ready' <<<"$enable_services_body")
+[[ -n "$ipsec_enable_line" && -n "$ready_enable_line" ]] ||
+  fail "service enable order markers are missing"
+ipsec_enable_line=${ipsec_enable_line%%:*}
+ready_enable_line=${ready_enable_line%%:*}
+((ipsec_enable_line < ready_enable_line)) ||
+  fail "selected strongSwan unit must start before IPsec readiness"
 assert_not_contains "$repo_root/install.sh" 'dhcpcd --rebind "$WAN_IFACE"'
 assert_contains "$repo_root/install.sh" 'systemctl restart dnscomplex-health.timer'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'apply_runtime_network_settings'
@@ -406,6 +439,9 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'ipv6_tcp_available'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'unit_exists'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'print_unit_state'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'ipsec_vip'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'wait_for_ipsec_underlay'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'swanctl --load-all --noprompt'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'ipsec-ready) ipsec_ready_cmd "$@" ;;'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'sync_ipsec_nat'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'sync_singbox_ipsec_bind_addresses'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'inet4_bind_address'
@@ -817,6 +853,19 @@ case "$watchdog_body" in
     fail "watchdog contains unconditional heavy repair work"
     ;;
 esac
+fix_body=$(awk '
+  /^fix_cmd\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$tmpdir/root/usr/local/sbin/dnscomplex")
+case "$fix_body" in
+  *'swanctl --initiate --child ai'*|*'swanctl --initiate --child cn'*)
+    fail "fix command initiates unselected IPsec profiles"
+    ;;
+esac
+# shellcheck disable=SC2016
+grep -Fq '"$0" ipsec-ready' <<<"$fix_body" ||
+  fail "fix command does not use profile-aware IPsec readiness"
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'flock -n 9'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'future SmartDNS restart timestamp clamped to the current time'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'write_smartdns_restart_epoch'
