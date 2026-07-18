@@ -456,17 +456,25 @@ case "${1:-} ${2:-}" in
       full) cn_rule_token=0x351/0xffffffff ;;
       zero) cn_rule_token=0x351/0x0 ;;
     esac
+    ai_rule_from="from all"
+    ai_rule_suffix=""
+    case "${DNS_TEST_AI_RULE_SHAPE_STATE:-simple}" in
+      restricted) ai_rule_from="from 10.0.0.0/8" ;;
+      suppressed) ai_rule_suffix=" suppress_prefixlength 0" ;;
+    esac
     case "${DNS_TEST_ROUTE_STATE:-complete}" in
       missing_rule|missing_all)
         printf '10351: from all fwmark %s lookup 351\n' "$cn_rule_token"
         ;;
       missing_cn)
         [[ -n "$(grep -F 'ip rule del priority 10301' "$DNS_TEST_CALLS" || true)" ]] ||
-          printf '10301: from all fwmark %s lookup 301\n' "$ai_rule_token"
+          printf '10301: %s fwmark %s lookup 301%s\n' \
+            "$ai_rule_from" "$ai_rule_token" "$ai_rule_suffix"
         ;;
       *)
         [[ -n "$(grep -F 'ip rule del priority 10301' "$DNS_TEST_CALLS" || true)" ]] ||
-          printf '10301: from all fwmark %s lookup 301\n' "$ai_rule_token"
+          printf '10301: %s fwmark %s lookup 301%s\n' \
+            "$ai_rule_from" "$ai_rule_token" "$ai_rule_suffix"
         [[ -n "$(grep -F 'ip rule del priority 10351' "$DNS_TEST_CALLS" || true)" ]] ||
           printf '10351: from all fwmark %s lookup 351\n' "$cn_rule_token"
         ;;
@@ -480,6 +488,9 @@ case "${1:-} ${2:-}" in
         ;;
       negated-target)
         printf '100: not from all fwmark 0x301/0xffffffaf lookup 301\n'
+        ;;
+      negated-restricted)
+        printf '100: not from 10.0.0.0/8 fwmark 0x301/0xffffffaf lookup 301\n'
         ;;
     esac
     if [[ "${DNS_TEST_CN_RULE_CONFLICT:-none}" == "zero-mask" ]]; then
@@ -754,6 +765,7 @@ run_manager() {
   DNS_TEST_ROUTE_APPLY_STICKY_PROFILE="${DNS_TEST_ROUTE_APPLY_STICKY_PROFILE:-}" \
   DNS_TEST_AI_RULE_MASK_STATE="${DNS_TEST_AI_RULE_MASK_STATE:-none}" \
   DNS_TEST_CN_RULE_MASK_STATE="${DNS_TEST_CN_RULE_MASK_STATE:-none}" \
+  DNS_TEST_AI_RULE_SHAPE_STATE="${DNS_TEST_AI_RULE_SHAPE_STATE:-simple}" \
   DNS_TEST_AI_RULE_CONFLICT="${DNS_TEST_AI_RULE_CONFLICT:-none}" \
   DNS_TEST_CN_RULE_CONFLICT="${DNS_TEST_CN_RULE_CONFLICT:-none}" \
   DNS_TEST_AI_RULE_SAME_PRIORITY_CONFLICT="${DNS_TEST_AI_RULE_SAME_PRIORITY_CONFLICT:-none}" \
@@ -1012,6 +1024,18 @@ assert_not_contains "$calls" 'dig '
 
 DNS_TEST_AI_RULE_CONFLICT=negated-target run_watchdog healthy
 assert_not_contains "$calls" 'ip rule add fwmark 0x301 table 301'
+
+if DNS_TEST_AI_RULE_CONFLICT=negated-restricted \
+   run_watchdog healthy >"$tmpdir/rule-negated-restricted.log" 2>&1; then
+  fail "watchdog accepted a negated rule with a restrictive source selector"
+fi
+assert_not_contains "$calls" 'dig '
+
+for shape_state in restricted suppressed; do
+  DNS_TEST_AI_RULE_SHAPE_STATE="$shape_state" run_watchdog healthy
+  assert_contains "$calls" 'ip rule del priority 10301'
+  assert_contains "$calls" 'ip rule add fwmark 0x301 table 301'
+done
 
 for same_priority_conflict in stale duplicate; do
   DNS_TEST_AI_RULE_SAME_PRIORITY_CONFLICT="$same_priority_conflict" \
@@ -1757,6 +1781,25 @@ DNS_TEST_AI_RULE_CONFLICT=negated-target \
 run_health >"$tmpdir/health-ipsec-rule-negated-nonmatch.json"
 assert_health_check "$tmpdir/health-ipsec-rule-negated-nonmatch.json" \
   ai-ipsec-selected-egress ok
+
+reset_state
+if DNS_TEST_AI_RULE_CONFLICT=negated-restricted \
+   run_health >"$tmpdir/health-ipsec-rule-negated-restricted.json"; then
+  fail "health accepted a negated rule with a restrictive source selector"
+fi
+assert_health_detail_contains "$tmpdir/health-ipsec-rule-negated-restricted.json" \
+  ai-ipsec-selected-egress 'policy_rule=False'
+
+for shape_state in restricted suppressed; do
+  reset_state
+  if DNS_TEST_AI_RULE_SHAPE_STATE="$shape_state" \
+     run_health >"$tmpdir/health-ipsec-rule-shape-${shape_state}.json"; then
+    fail "health accepted an AI policy rule with $shape_state semantics"
+  fi
+  assert_health_detail_contains \
+    "$tmpdir/health-ipsec-rule-shape-${shape_state}.json" \
+    ai-ipsec-selected-egress 'policy_rule=False'
+done
 
 for same_priority_conflict in stale duplicate; do
   reset_state
