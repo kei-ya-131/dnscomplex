@@ -336,6 +336,14 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'actual_mask == 0xFFFFFFFF'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'IPSEC_RULE_HIGHER_CONFLICT'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'ip rule del priority "$priority"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'priority = "10301"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'priority = "10351"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'policy route repair did not produce a valid runtime state'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'StrongSwan SA state could not be queried'

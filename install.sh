@@ -4576,13 +4576,25 @@ ipsec_interface_is_up() {
   grep -Eq '<([^>]*,)?UP(,[^>]*)?>' <<<"$output"
 }
 
-ipsec_policy_rule_present() {
-  local expected_mark=$1 expected_table=$2 rules line mark_token table_token
-  local mark_value mask_value table_value expected_table_value field
+inspect_ipsec_policy_rule() {
+  local expected_mark=$1 expected_table=$2 expected_priority=$3
+  local rules line priority_token mark_token table_token
+  local priority_value mark_value mask_value table_value field
+  local expected_mark_value expected_table_value expected_priority_value
   local -a fields
+  IPSEC_RULE_EXACT=0
+  IPSEC_RULE_HIGHER_CONFLICT=0
+  [[ "$expected_mark" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ &&
+     "$expected_table" =~ ^[0-9]+$ &&
+     "$expected_priority" =~ ^[0-9]+$ ]] || return 1
+  expected_mark_value=$((expected_mark))
+  expected_table_value=$((10#$expected_table))
+  expected_priority_value=$((10#$expected_priority))
   rules=$(ip rule show 2>/dev/null) || return 1
   while IFS= read -r line; do
     IFS=$' \t' read -r -a fields <<<"$line"
+    ((${#fields[@]} > 0)) || continue
+    priority_token=${fields[0]%:}
     mark_token=""
     table_token=""
     for ((field = 0; field < ${#fields[@]}; field++)); do
@@ -4595,7 +4607,8 @@ ipsec_policy_rule_present() {
         table_token=${fields[field + 1]}
       fi
     done
-    [[ -n "$mark_token" && -n "$table_token" ]] || continue
+    [[ "$priority_token" =~ ^[0-9]+$ &&
+       -n "$mark_token" ]] || continue
     mark_value=${mark_token%%/*}
     if [[ "$mark_token" == */* ]]; then
       mask_value=${mark_token#*/}
@@ -4603,19 +4616,41 @@ ipsec_policy_rule_present() {
       mask_value=0xffffffff
     fi
     [[ "$mark_value" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ &&
-       "$mask_value" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ &&
-       "$expected_mark" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ &&
-       "$table_token" =~ ^[0-9]+$ &&
-       "$expected_table" =~ ^[0-9]+$ ]] || continue
-    table_value=$((10#$table_token))
-    expected_table_value=$((10#$expected_table))
-    if ((mark_value == expected_mark &&
-         mask_value == 0xffffffff &&
-         table_value == expected_table_value)); then
-      return 0
+       "$mask_value" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ]] || continue
+    priority_value=$((10#$priority_token))
+    mark_value=$((mark_value))
+    mask_value=$((mask_value))
+    ((mark_value >= 0 && mark_value <= 0xffffffff &&
+      mask_value >= 0 && mask_value <= 0xffffffff)) || continue
+    if ((priority_value < expected_priority_value &&
+         (expected_mark_value & mask_value) == (mark_value & mask_value))); then
+      IPSEC_RULE_HIGHER_CONFLICT=1
+    fi
+    if [[ "$table_token" =~ ^[0-9]+$ ]]; then
+      table_value=$((10#$table_token))
+      if ((priority_value == expected_priority_value &&
+           mark_value == expected_mark_value &&
+           mask_value == 0xffffffff &&
+           table_value == expected_table_value)); then
+        IPSEC_RULE_EXACT=1
+      fi
     fi
   done <<<"$rules"
-  return 1
+}
+
+ipsec_policy_rule_present() {
+  inspect_ipsec_policy_rule "$@" || return 1
+  [[ "$IPSEC_RULE_EXACT" == "1" &&
+     "$IPSEC_RULE_HIGHER_CONFLICT" == "0" ]]
+}
+
+ipsec_policy_priority_present() {
+  local expected_priority=$1 rules
+  rules=$(ip rule show 2>/dev/null) || return 1
+  awk -v expected="${expected_priority}:" '
+    $1 == expected { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' <<<"$rules"
 }
 
 ipsec_policy_route_matches() {
@@ -4643,16 +4678,18 @@ ipsec_policy_route_matches() {
 }
 
 ipsec_profile_runtime_ready() {
-  local profile=$1 sas=$2 mark table device failed=0
+  local profile=$1 sas=$2 mark table priority device failed=0
   case "$profile" in
     ai)
       mark=$AI_MARK
       table=$AI_TABLE
+      priority=10301
       device=ipsec-ai
       ;;
     cn)
       mark=$CN_MARK
       table=$CN_TABLE
+      priority=10351
       device=ipsec-cn
       ;;
     *)
@@ -4679,7 +4716,7 @@ ipsec_profile_runtime_ready() {
     warn "$device interface is missing or down"
     failed=1
   fi
-  if ! ipsec_policy_rule_present "$mark" "$table"; then
+  if ! ipsec_policy_rule_present "$mark" "$table" "$priority"; then
     warn "$profile IPsec fwmark policy rule is missing"
     failed=1
   fi
@@ -4894,7 +4931,7 @@ sync_singbox_ipsec_bind_addresses() {
 }
 
 ensure_policy_route_profile() {
-  local profile=$1 mode mark table priority device vip
+  local profile=$1 mode mark table priority device vip attempt
   case "$profile" in
     ai)
       mode=${AI_EGRESS_MODE:-ipsec}
@@ -4925,13 +4962,32 @@ ensure_policy_route_profile() {
       ;;
   esac
 
-  if ! ip rule show >/dev/null 2>&1; then
+  if ! inspect_ipsec_policy_rule "$mark" "$table" "$priority"; then
     warn "could not inspect policy rules for $profile"
     return 1
   fi
-  if ! ipsec_policy_rule_present "$mark" "$table"; then
+  if [[ "$IPSEC_RULE_HIGHER_CONFLICT" == "1" ]]; then
+    warn "$profile has a higher-priority fwmark rule that conflicts with dnscomplex"
+    return 1
+  fi
+  if [[ "$IPSEC_RULE_EXACT" != "1" ]]; then
+    for ((attempt = 0; attempt < 16; attempt++)); do
+      ipsec_policy_priority_present "$priority" || break
+      if ! ip rule del priority "$priority"; then
+        warn "could not remove the stale $profile policy rule"
+        return 1
+      fi
+    done
+    if ipsec_policy_priority_present "$priority"; then
+      warn "too many stale rules remain at $profile policy priority $priority"
+      return 1
+    fi
     if ! ip rule add fwmark "$mark" table "$table" priority "$priority"; then
       warn "could not install the $profile policy rule"
+      return 1
+    fi
+    if ! ipsec_policy_rule_present "$mark" "$table" "$priority"; then
+      warn "the $profile policy rule did not become authoritative"
       return 1
     fi
   fi
@@ -5304,32 +5360,52 @@ def ipsec_interface_up(device):
     match = re.search(r"<([^>]*)>", proc.stdout)
     return bool(match and "UP" in match.group(1).split(","))
 
-def ipsec_policy_rule_present(rules, expected_mark, expected_table):
+def ipsec_policy_rule_present(
+    rules, expected_mark, expected_table, expected_priority
+):
     try:
         mark_number = int(expected_mark, 0)
         table_number = int(expected_table, 10)
+        priority_number = int(expected_priority, 10)
     except ValueError:
         return False
+    exact = False
+    higher_conflict = False
     for line in rules.splitlines():
         tokens = line.split()
         try:
+            actual_priority = int(tokens[0].rstrip(":"), 10)
             mark_index = tokens.index("fwmark")
-            lookup_index = tokens.index("lookup")
             mark_parts = tokens[mark_index + 1].split("/", 1)
             actual_mark = int(mark_parts[0], 0)
             actual_mask = (
                 int(mark_parts[1], 0) if len(mark_parts) == 2 else 0xFFFFFFFF
             )
+        except (ValueError, IndexError):
+            continue
+        if not (
+            0 <= actual_mark <= 0xFFFFFFFF
+            and 0 <= actual_mask <= 0xFFFFFFFF
+        ):
+            continue
+        if (
+            actual_priority < priority_number
+            and (mark_number & actual_mask) == (actual_mark & actual_mask)
+        ):
+            higher_conflict = True
+        try:
+            lookup_index = tokens.index("lookup")
             actual_table = int(tokens[lookup_index + 1], 10)
         except (ValueError, IndexError):
             continue
         if (
-            actual_mark == mark_number
+            actual_priority == priority_number
+            and actual_mark == mark_number
             and actual_mask == 0xFFFFFFFF
             and actual_table == table_number
         ):
-            return True
-    return False
+            exact = True
+    return exact and not higher_conflict
 
 def ipsec_policy_route_matches(table, device, vip):
     if not vip:
@@ -5350,11 +5426,13 @@ def ipsec_policy_route_matches(table, device, vip):
             return True
     return False
 
-def ipsec_runtime_state(sas, rules, profile, mark, table):
+def ipsec_runtime_state(sas, rules, profile, mark, table, priority):
     state = ipsec_sa_state(sas, profile)
     device = "ipsec-" + profile
     state["interface_up"] = ipsec_interface_up(device)
-    state["policy_rule"] = ipsec_policy_rule_present(rules, mark, table)
+    state["policy_rule"] = ipsec_policy_rule_present(
+        rules, mark, table, priority
+    )
     state["route_source_matches"] = ipsec_policy_route_matches(
         table, device, state["ready_vip"]
     )
@@ -5524,10 +5602,14 @@ for profile in ["ai", "cn"]:
         if profile == "ai":
             mark = cfg.get("AI_MARK", "0x301")
             table = cfg.get("AI_TABLE", "301")
+            priority = "10301"
         else:
             mark = cfg.get("CN_MARK", "0x351")
             table = cfg.get("CN_TABLE", "351")
-        state = ipsec_runtime_state(sas, rules, profile, mark, table)
+            priority = "10351"
+        state = ipsec_runtime_state(
+            sas, rules, profile, mark, table, priority
+        )
         ok = state["ok"]
         ipsec_ok = ipsec_ok and ok
         detail = (
@@ -5765,7 +5847,7 @@ write_smartdns_restart_epoch() {
 
 repair_policy_routes_if_needed() {
   command -v ip >/dev/null 2>&1 || return 0
-  local profile mode mark table device vip sas failed=0
+  local profile mode mark table priority device vip sas failed=0
   if ! ip rule show >/dev/null 2>&1; then
     warn "policy routes could not be inspected"
     return 1
@@ -5776,18 +5858,20 @@ repair_policy_routes_if_needed() {
         mode=${AI_EGRESS_MODE:-ipsec}
         mark=$AI_MARK
         table=$AI_TABLE
+        priority=10301
         device=ipsec-ai
         ;;
       cn)
         mode=${CN_EGRESS_MODE:-ipsec}
         mark=$CN_MARK
         table=$CN_TABLE
+        priority=10351
         device=ipsec-cn
         ;;
     esac
     [[ "$mode" == "ipsec" ]] || continue
     vip=$(ipsec_vip "$profile" || true)
-    if ! ipsec_policy_rule_present "$mark" "$table" ||
+    if ! ipsec_policy_rule_present "$mark" "$table" "$priority" ||
        ! ipsec_policy_route_matches "$table" "$device" "$vip"; then
       if ! ensure_policy_route_profile "$profile"; then
         warn "$profile policy route is missing and could not be repaired"

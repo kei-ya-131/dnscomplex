@@ -458,16 +458,25 @@ case "${1:-} ${2:-}" in
     esac
     case "${DNS_TEST_ROUTE_STATE:-complete}" in
       missing_rule|missing_all)
-        printf '101: from all fwmark %s lookup 351\n' "$cn_rule_token"
+        printf '10351: from all fwmark %s lookup 351\n' "$cn_rule_token"
         ;;
       missing_cn)
-        printf '100: from all fwmark %s lookup 301\n' "$ai_rule_token"
+        [[ -n "$(grep -F 'ip rule del priority 10301' "$DNS_TEST_CALLS" || true)" ]] ||
+          printf '10301: from all fwmark %s lookup 301\n' "$ai_rule_token"
         ;;
       *)
-        printf '100: from all fwmark %s lookup 301\n' "$ai_rule_token"
-        printf '101: from all fwmark %s lookup 351\n' "$cn_rule_token"
+        [[ -n "$(grep -F 'ip rule del priority 10301' "$DNS_TEST_CALLS" || true)" ]] ||
+          printf '10301: from all fwmark %s lookup 301\n' "$ai_rule_token"
+        [[ -n "$(grep -F 'ip rule del priority 10351' "$DNS_TEST_CALLS" || true)" ]] ||
+          printf '10351: from all fwmark %s lookup 351\n' "$cn_rule_token"
         ;;
     esac
+    if [[ "${DNS_TEST_AI_RULE_CONFLICT:-none}" == "zero-mask" ]]; then
+      printf '100: from all fwmark 0x301/0x0 lookup 301\n'
+    fi
+    if [[ "${DNS_TEST_CN_RULE_CONFLICT:-none}" == "zero-mask" ]]; then
+      printf '101: from all fwmark 0x351/0x0 lookup 351\n'
+    fi
     if grep -Fq 'ip rule add fwmark 0x301 table 301' "$DNS_TEST_CALLS"; then
       printf '10301: from all fwmark 0x301 lookup 301\n'
     fi
@@ -727,6 +736,8 @@ run_manager() {
   DNS_TEST_ROUTE_APPLY_STICKY_PROFILE="${DNS_TEST_ROUTE_APPLY_STICKY_PROFILE:-}" \
   DNS_TEST_AI_RULE_MASK_STATE="${DNS_TEST_AI_RULE_MASK_STATE:-none}" \
   DNS_TEST_CN_RULE_MASK_STATE="${DNS_TEST_CN_RULE_MASK_STATE:-none}" \
+  DNS_TEST_AI_RULE_CONFLICT="${DNS_TEST_AI_RULE_CONFLICT:-none}" \
+  DNS_TEST_CN_RULE_CONFLICT="${DNS_TEST_CN_RULE_CONFLICT:-none}" \
   DNS_TEST_IPSEC_FAIL_CHILD="${DNS_TEST_IPSEC_FAIL_CHILD:-}" \
   DNS_TEST_IPSEC_START_EMPTY="${DNS_TEST_IPSEC_START_EMPTY:-0}" \
   DNS_TEST_IPSEC_STARTED="$ipsec_started" \
@@ -965,7 +976,14 @@ DNS_TEST_AI_RULE_MASK_STATE=full run_watchdog healthy
 assert_not_contains "$calls" 'ip rule add fwmark 0x301 table 301'
 
 DNS_TEST_AI_RULE_MASK_STATE=zero run_watchdog healthy
+assert_contains "$calls" 'ip rule del priority 10301'
 assert_contains "$calls" 'ip rule add fwmark 0x301 table 301'
+
+if DNS_TEST_AI_RULE_CONFLICT=zero-mask \
+   run_watchdog healthy >"$tmpdir/rule-higher-conflict.log" 2>&1; then
+  fail "watchdog accepted a higher-priority fwmark rule with a zero mask"
+fi
+assert_not_contains "$calls" 'dig '
 
 if DNS_TEST_ROUTE_STATE=missing_rule DNS_TEST_ROUTE_APPLY_FAIL=rule \
    run_watchdog healthy >"$tmpdir/rule-repair-failure.log" 2>&1; then
@@ -1681,6 +1699,14 @@ if DNS_TEST_AI_RULE_MASK_STATE=zero \
   fail "health accepted an AI fwmark rule with a zero mask"
 fi
 assert_health_detail_contains "$tmpdir/health-ipsec-rule-zero-mask.json" \
+  ai-ipsec-selected-egress 'policy_rule=False'
+
+reset_state
+if DNS_TEST_AI_RULE_CONFLICT=zero-mask \
+   run_health >"$tmpdir/health-ipsec-rule-higher-conflict.json"; then
+  fail "health accepted a higher-priority fwmark rule with a zero mask"
+fi
+assert_health_detail_contains "$tmpdir/health-ipsec-rule-higher-conflict.json" \
   ai-ipsec-selected-egress 'policy_rule=False'
 
 reset_state
