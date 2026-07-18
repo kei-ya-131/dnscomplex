@@ -15,8 +15,8 @@ SMARTDNS_AI_PORT=6054
 SMARTDNS_CN_PORT=6055
 SINGBOX_DNS_LISTEN="127.0.0.1"
 SINGBOX_DNS_PORT=1053
-SINGBOX_SOCKS_LISTEN="0.0.0.0"
-SINGBOX_SOCKS_PORT=1080
+SINGBOX_SOCKS_LISTEN=""
+SINGBOX_SOCKS_PORT=""
 SINGBOX_HTTP_LISTEN="0.0.0.0"
 SINGBOX_HTTP_PORT=1081
 XRAY_ENABLED=1
@@ -190,8 +190,20 @@ load_config() {
   : "${LOCAL_DOMAIN_IPV6_POLICY:=ipv4_only}"
   : "${DEPLOY_MODE:=vlan-gateway}"
   : "${LAN_IPV6_GATEWAY:=$(ipv6_gateway_from_prefix "${LAN_IPV6_PREFIX:-fd00:88::/64}")}"
-  : "${SINGBOX_SOCKS_LISTEN:=0.0.0.0}"
-  : "${SINGBOX_SOCKS_PORT:=1080}"
+  if [[ -z "${SINGBOX_SOCKS_LISTEN:-}" ]]; then
+    if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
+      SINGBOX_SOCKS_LISTEN=${LINUX_LAN_IPV4:-}
+    else
+      SINGBOX_SOCKS_LISTEN=0.0.0.0
+    fi
+  fi
+  if [[ -z "${SINGBOX_SOCKS_PORT:-}" ]]; then
+    if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
+      SINGBOX_SOCKS_PORT=10800
+    else
+      SINGBOX_SOCKS_PORT=1080
+    fi
+  fi
   : "${SINGBOX_HTTP_LISTEN:=0.0.0.0}"
   : "${SINGBOX_HTTP_PORT:=1081}"
   : "${XRAY_ENABLED:=1}"
@@ -286,8 +298,8 @@ collect_interactive_config() {
     prompt_var LAN_DHCP_END "LAN DHCP end IPv4"
     prompt_var LAN_IPV6_PREFIX "LAN IPv6 prefix"
   fi
-  prompt_var SINGBOX_SOCKS_LISTEN "SOCKS listen address" "0.0.0.0"
-  prompt_var SINGBOX_SOCKS_PORT "SOCKS listen port" "1080"
+  prompt_var SINGBOX_SOCKS_LISTEN "SOCKS listen address" "$([[ "$DEPLOY_MODE" == "routeros-policy" ]] && printf '%s' "$LINUX_LAN_IPV4" || printf '0.0.0.0')"
+  prompt_var SINGBOX_SOCKS_PORT "SOCKS listen port" "$([[ "$DEPLOY_MODE" == "routeros-policy" ]] && printf '10800' || printf '1080')"
   prompt_var DNSCOMPLEX_WEB_LISTEN "Management web listen address" "$(default_web_listen)"
   prompt_var DNSCOMPLEX_WEB_PORT "Management web listen port" "8088"
   prompt_var DNSCOMPLEX_WEB_PASSWORD "Management web password" "$DNSCOMPLEX_WEB_PASSWORD"
@@ -328,6 +340,11 @@ validate_config() {
     require_var "$name"
   done
   [[ "$SINGBOX_SOCKS_PORT" =~ ^[0-9]+$ ]] || die "SINGBOX_SOCKS_PORT must be numeric"
+  ((SINGBOX_SOCKS_PORT >= 1 && SINGBOX_SOCKS_PORT <= 65535)) || die "SINGBOX_SOCKS_PORT must be 1-65535"
+  if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
+    [[ "$SINGBOX_SOCKS_LISTEN" == "${LINUX_LAN_IPV4%%/*}" ]] ||
+      die "routeros-policy SOCKS listen must match LINUX_LAN_IPV4"
+  fi
   [[ "$XRAY_AI_SOCKS_PORT" =~ ^[0-9]+$ ]] || die "XRAY_AI_SOCKS_PORT must be numeric"
   [[ "$XRAY_CN_SOCKS_PORT" =~ ^[0-9]+$ ]] || die "XRAY_CN_SOCKS_PORT must be numeric"
   [[ "$DNSCOMPLEX_WEB_PORT" =~ ^[0-9]+$ ]] || die "DNSCOMPLEX_WEB_PORT must be numeric"
@@ -2594,8 +2611,20 @@ load_config() {
   : "${SMARTDNS_DEFAULT_PORT:=6053}"
   : "${SMARTDNS_AI_PORT:=6054}"
   : "${SMARTDNS_CN_PORT:=6055}"
-  : "${SINGBOX_SOCKS_LISTEN:=0.0.0.0}"
-  : "${SINGBOX_SOCKS_PORT:=1080}"
+  if [[ -z "${SINGBOX_SOCKS_LISTEN:-}" ]]; then
+    if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
+      SINGBOX_SOCKS_LISTEN=${LINUX_LAN_IPV4:-}
+    else
+      SINGBOX_SOCKS_LISTEN=0.0.0.0
+    fi
+  fi
+  if [[ -z "${SINGBOX_SOCKS_PORT:-}" ]]; then
+    if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
+      SINGBOX_SOCKS_PORT=10800
+    else
+      SINGBOX_SOCKS_PORT=1080
+    fi
+  fi
   : "${SINGBOX_DNS_LISTEN:=127.0.0.1}"
   : "${SINGBOX_DNS_PORT:=1053}"
   : "${SINGBOX_HTTP_LISTEN:=0.0.0.0}"
@@ -5541,10 +5570,16 @@ test_local_name_cmd() {
 set_socks_cmd() {
   need_root
   [[ $# -eq 2 ]] || die "usage: dnscomplex set-socks LISTEN PORT"
-  local listen=$1
+  local listen=$1 expected_listen
   local port=$2
   [[ "$port" =~ ^[0-9]+$ ]] || die "SOCKS port must be numeric"
   ((port >= 1 && port <= 65535)) || die "SOCKS port must be 1-65535"
+  if [[ "${DEPLOY_MODE:-}" == "routeros-policy" ]]; then
+    expected_listen=${LINUX_LAN_IPV4:-}
+    expected_listen=${expected_listen%%/*}
+    [[ -n "$expected_listen" && "$listen" == "$expected_listen" ]] ||
+      die "routeros-policy SOCKS listen must match LINUX_LAN_IPV4"
+  fi
 
   local tmp
   tmp=$(mktemp)
@@ -5974,7 +6009,7 @@ json_escape() {
 }
 
 validate_loaded_config() {
-  local errors=0 ports port_seen="" port name cidr
+  local errors=0 ports port_seen="" port name cidr expected_socks_listen
   case "${DEPLOY_MODE:-}" in vlan-gateway|routeros-policy) ;; *) printf 'error: DEPLOY_MODE must be vlan-gateway or routeros-policy\n'; errors=$((errors + 1)) ;; esac
   case "${DEFAULT_DNS_STRATEGY:-prefer_ipv6}" in prefer_ipv4|prefer_ipv6) ;; *) printf 'error: DEFAULT_DNS_STRATEGY must be prefer_ipv4 or prefer_ipv6\n'; errors=$((errors + 1)) ;; esac
   case "${DEFAULT_IPV6_MODE:-auto}" in auto|on|off) ;; *) printf 'error: DEFAULT_IPV6_MODE must be auto, on, or off\n'; errors=$((errors + 1)) ;; esac
@@ -5998,6 +6033,14 @@ validate_loaded_config() {
   case "${CN_EGRESS_MODE:-ipsec}" in ipsec|xray) ;; *) printf 'error: CN_EGRESS_MODE must be ipsec or xray\n'; errors=$((errors + 1)) ;; esac
   case "${AI_QUIC_POLICY:-reject}" in reject|allow) ;; *) printf 'error: AI_QUIC_POLICY must be reject or allow\n'; errors=$((errors + 1)) ;; esac
   case "${CN_QUIC_POLICY:-reject}" in reject|allow) ;; *) printf 'error: CN_QUIC_POLICY must be reject or allow\n'; errors=$((errors + 1)) ;; esac
+  expected_socks_listen=${LINUX_LAN_IPV4:-}
+  expected_socks_listen=${expected_socks_listen%%/*}
+  if [[ "${DEPLOY_MODE:-}" == "routeros-policy" &&
+        ( -z "$expected_socks_listen" ||
+          "${SINGBOX_SOCKS_LISTEN:-}" != "$expected_socks_listen" ) ]]; then
+    printf 'error: routeros-policy SOCKS listen must match LINUX_LAN_IPV4\n'
+    errors=$((errors + 1))
+  fi
   if [[ "${AI_EGRESS_MODE:-ipsec}" == "xray" ]]; then
     [[ -n "${AI_XRAY_URI:-}" || -n "${AI_XRAY_OUTBOUND_JSON:-}" ]] || { printf 'error: AI xray mode requires AI_XRAY_URI or AI_XRAY_OUTBOUND_JSON\n'; errors=$((errors + 1)); }
   fi
