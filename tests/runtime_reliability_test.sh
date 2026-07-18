@@ -1044,6 +1044,9 @@ writer_pid=""
 
 tar -tzf "$archive" | grep -Fxq './var/lib/dnscomplex/metrics.sqlite3' ||
   fail "backup archive is missing the SQLite snapshot"
+if tar -tzf "$archive" | grep -Fxq './'; then
+  fail "backup archive contains the filesystem root entry"
+fi
 if tar -tzf "$archive" | grep -Eq 'metrics[.]sqlite3-(wal|shm|journal)$'; then
   fail "backup contains transient SQLite sidecar files"
 fi
@@ -1059,6 +1062,41 @@ db.close()
 PY
 [[ "$(file_mode "$archive")" == "600" ]] ||
   fail "backup archive mode is not 0600"
+
+restore_root="$tmpdir/restore-root-mode"
+mkdir -p "$restore_root"
+chmod 0711 "$restore_root"
+tar -xzf "$archive" -C "$restore_root"
+[[ "$(file_mode "$restore_root")" == "711" ]] ||
+  fail "backup extraction changed the restore root mode"
+
+legacy_stage="$tmpdir/legacy-backup-stage"
+legacy_archive="$tmpdir/legacy-backup.tar.gz"
+legacy_restore_root="$tmpdir/legacy-restore-root"
+mkdir -p "$legacy_stage/etc/dnscomplex" "$legacy_restore_root"
+printf 'legacy-fixture\n' >"$legacy_stage/etc/dnscomplex/config.env"
+chmod 0700 "$legacy_stage"
+chmod 0711 "$legacy_restore_root"
+/usr/bin/tar -czf "$legacy_archive" -C "$legacy_stage" .
+if /usr/bin/tar --help 2>&1 | grep -Fq -- '--no-overwrite-dir'; then
+  PATH="$fakebin:$PATH" \
+  DNSCOMPLEX_CONFIG="$config" \
+  DNSCOMPLEX_BASE="$state" \
+  DNSCOMPLEX_RUN_DIR="$run_dir" \
+  DNSCOMPLEX_FS_ROOT="$legacy_restore_root" \
+  DNSCOMPLEX_MAINTENANCE_LOCK="$tmpdir/legacy-restore.lock" \
+  DNS_TEST_CALLS="$calls" \
+  bash -c '
+    source "$1"
+    load_config
+    fix_cmd() { :; }
+    restore_cmd "$2"
+  ' _ "$manager" "$legacy_archive"
+  [[ "$(file_mode "$legacy_restore_root")" == "711" ]] ||
+    fail "legacy backup restore changed the filesystem root mode"
+  [[ "$(cat "$legacy_restore_root/etc/dnscomplex/config.env")" == "legacy-fixture" ]] ||
+    fail "legacy backup restore did not extract the archived state"
+fi
 
 first_archive="$tmpdir/first-locked-backup.tar.gz"
 second_archive="$tmpdir/second-locked-backup.tar.gz"

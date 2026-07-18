@@ -936,6 +936,16 @@ case "$update_software_body" in
   *acquire_maintenance_lock*write_config_cmd*update_software_impl*) ;;
   *) fail "software update must acquire maintenance lock before mutation" ;;
 esac
+update_software_impl_body=$(awk '
+  /^update_software_impl\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$tmpdir/root/usr/local/sbin/dnscomplex")
+case "$update_software_impl_body" in
+  *'systemctl restart "${UPDATED_SERVICES[@]}"'*'"$0" ipsec-ready'*'"$0" routes up'*\
+'post-update health validation'*'"$0" test'*) ;;
+  *) fail "software update must restore selected egress before post-update validation" ;;
+esac
 restore_body=$(awk '
   /^restore_cmd\(\) \{/ { inside=1 }
   inside { print }
@@ -944,6 +954,10 @@ restore_body=$(awk '
 case "$restore_body" in
   *acquire_maintenance_lock*) ;;
   *) fail "restore must share the maintenance lock" ;;
+esac
+case "$restore_body" in
+  *'tar --no-overwrite-dir -xzf'*'-C "$(fs_path /)"'*) ;;
+  *) fail "restore must preserve existing directory metadata inside the selected filesystem root" ;;
 esac
 
 printf 'install contract test: ok\n'

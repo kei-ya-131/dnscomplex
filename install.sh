@@ -6151,6 +6151,9 @@ update_software_impl() {
     else
       update_software_stage "no GitHub component changed; no service restart needed"
     fi
+    update_software_stage "restore selected egress readiness"
+    "$0" ipsec-ready
+    "$0" routes up
     update_software_stage "post-update health validation"
     if "$0" test; then
       :
@@ -6333,6 +6336,7 @@ backup_cmd() {
   (
     set -e
     local stage="" verify="" temp_output="" rel live_db archived_db
+    local -a archive_paths=()
     cleanup_backup_stage() {
       [[ -z "$stage" ]] || rm -rf -- "$stage"
       [[ -z "$verify" ]] || rm -rf -- "$verify"
@@ -6354,6 +6358,9 @@ backup_cmd() {
       etc/nftables.d/dnscomplex.nft \
       var/lib/dnscomplex; do
       snapshot_copy "$stage" "$rel"
+      if [[ -e "$stage/$rel" || -L "$stage/$rel" ]]; then
+        archive_paths+=("./$rel")
+      fi
     done
 
     rm -f \
@@ -6367,7 +6374,8 @@ backup_cmd() {
       sqlite_backup "$live_db" "$archived_db"
     fi
 
-    tar -czf "$temp_output" -C "$stage" .
+    ((${#archive_paths[@]} > 0)) || die "no dnscomplex state was available to back up"
+    tar -czf "$temp_output" -C "$stage" -- "${archive_paths[@]}"
     tar -tzf "$temp_output" >/dev/null
     if tar -tzf "$temp_output" | grep -Eq 'metrics[.]sqlite3-(wal|shm|journal)$'; then
       die "backup archive contains transient SQLite sidecar files"
@@ -6398,7 +6406,7 @@ restore_cmd() {
   need_root
   [[ $# -eq 1 ]] || die "usage: dnscomplex restore INPUT_TAR_GZ"
   acquire_maintenance_lock
-  tar -xzf "$1" -C /
+  tar --no-overwrite-dir -xzf "$1" -C "$(fs_path /)"
   fix_cmd
 }
 
