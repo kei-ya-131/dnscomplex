@@ -4580,10 +4580,12 @@ inspect_ipsec_policy_rule() {
   local expected_mark=$1 expected_table=$2 expected_priority=$3
   local rules line priority_token mark_token table_token
   local priority_value mark_value mask_value table_value field
+  local negated rule_matches
   local expected_mark_value expected_table_value expected_priority_value
   local -a fields
-  IPSEC_RULE_EXACT=0
+  IPSEC_RULE_EXACT_COUNT=0
   IPSEC_RULE_HIGHER_CONFLICT=0
+  IPSEC_RULE_SAME_PRIORITY_STALE=0
   [[ "$expected_mark" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ &&
      "$expected_table" =~ ^[0-9]+$ &&
      "$expected_priority" =~ ^[0-9]+$ ]] || return 1
@@ -4597,7 +4599,11 @@ inspect_ipsec_policy_rule() {
     priority_token=${fields[0]%:}
     mark_token=""
     table_token=""
+    negated=0
     for ((field = 0; field < ${#fields[@]}; field++)); do
+      if [[ "${fields[field]}" == "not" ]]; then
+        negated=1
+      fi
       if [[ "${fields[field]}" == "fwmark" &&
             $((field + 1)) -lt ${#fields[@]} ]]; then
         mark_token=${fields[field + 1]}
@@ -4607,41 +4613,69 @@ inspect_ipsec_policy_rule() {
         table_token=${fields[field + 1]}
       fi
     done
-    [[ "$priority_token" =~ ^[0-9]+$ &&
-       -n "$mark_token" ]] || continue
+    [[ "$priority_token" =~ ^[0-9]+$ ]] || continue
+    priority_value=$((10#$priority_token))
+    if [[ -z "$mark_token" ]]; then
+      if ((priority_value == expected_priority_value)); then
+        IPSEC_RULE_SAME_PRIORITY_STALE=1
+      fi
+      continue
+    fi
     mark_value=${mark_token%%/*}
     if [[ "$mark_token" == */* ]]; then
       mask_value=${mark_token#*/}
     else
       mask_value=0xffffffff
     fi
-    [[ "$mark_value" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ &&
-       "$mask_value" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ]] || continue
-    priority_value=$((10#$priority_token))
+    if [[ ! "$mark_value" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ||
+          ! "$mask_value" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ]]; then
+      if ((priority_value == expected_priority_value)); then
+        IPSEC_RULE_SAME_PRIORITY_STALE=1
+      fi
+      continue
+    fi
     mark_value=$((mark_value))
     mask_value=$((mask_value))
-    ((mark_value >= 0 && mark_value <= 0xffffffff &&
-      mask_value >= 0 && mask_value <= 0xffffffff)) || continue
-    if ((priority_value < expected_priority_value &&
-         (expected_mark_value & mask_value) == (mark_value & mask_value))); then
+    if ! ((mark_value >= 0 && mark_value <= 0xffffffff &&
+          mask_value >= 0 && mask_value <= 0xffffffff)); then
+      if ((priority_value == expected_priority_value)); then
+        IPSEC_RULE_SAME_PRIORITY_STALE=1
+      fi
+      continue
+    fi
+    if (((expected_mark_value & mask_value) == (mark_value & mask_value))); then
+      rule_matches=1
+    else
+      rule_matches=0
+    fi
+    if ((negated == 1)); then
+      rule_matches=$((1 - rule_matches))
+    fi
+    if ((priority_value < expected_priority_value && rule_matches == 1)); then
       IPSEC_RULE_HIGHER_CONFLICT=1
     fi
     if [[ "$table_token" =~ ^[0-9]+$ ]]; then
       table_value=$((10#$table_token))
       if ((priority_value == expected_priority_value &&
+           negated == 0 &&
            mark_value == expected_mark_value &&
            mask_value == 0xffffffff &&
            table_value == expected_table_value)); then
-        IPSEC_RULE_EXACT=1
+        IPSEC_RULE_EXACT_COUNT=$((IPSEC_RULE_EXACT_COUNT + 1))
+        continue
       fi
+    fi
+    if ((priority_value == expected_priority_value)); then
+      IPSEC_RULE_SAME_PRIORITY_STALE=1
     fi
   done <<<"$rules"
 }
 
 ipsec_policy_rule_present() {
   inspect_ipsec_policy_rule "$@" || return 1
-  [[ "$IPSEC_RULE_EXACT" == "1" &&
-     "$IPSEC_RULE_HIGHER_CONFLICT" == "0" ]]
+  [[ "$IPSEC_RULE_EXACT_COUNT" == "1" &&
+     "$IPSEC_RULE_HIGHER_CONFLICT" == "0" &&
+     "$IPSEC_RULE_SAME_PRIORITY_STALE" == "0" ]]
 }
 
 ipsec_policy_priority_present() {
@@ -4970,7 +5004,8 @@ ensure_policy_route_profile() {
     warn "$profile has a higher-priority fwmark rule that conflicts with dnscomplex"
     return 1
   fi
-  if [[ "$IPSEC_RULE_EXACT" != "1" ]]; then
+  if [[ "$IPSEC_RULE_EXACT_COUNT" != "1" ||
+        "$IPSEC_RULE_SAME_PRIORITY_STALE" == "1" ]]; then
     for ((attempt = 0; attempt < 16; attempt++)); do
       ipsec_policy_priority_present "$priority" || break
       if ! ip rule del priority "$priority"; then
@@ -5369,12 +5404,16 @@ def ipsec_policy_rule_present(
         priority_number = int(expected_priority, 10)
     except ValueError:
         return False
-    exact = False
+    exact_count = 0
     higher_conflict = False
+    same_priority_stale = False
     for line in rules.splitlines():
         tokens = line.split()
         try:
             actual_priority = int(tokens[0].rstrip(":"), 10)
+        except (ValueError, IndexError):
+            continue
+        try:
             mark_index = tokens.index("fwmark")
             mark_parts = tokens[mark_index + 1].split("/", 1)
             actual_mark = int(mark_parts[0], 0)
@@ -5382,30 +5421,48 @@ def ipsec_policy_rule_present(
                 int(mark_parts[1], 0) if len(mark_parts) == 2 else 0xFFFFFFFF
             )
         except (ValueError, IndexError):
+            if actual_priority == priority_number:
+                same_priority_stale = True
             continue
         if not (
             0 <= actual_mark <= 0xFFFFFFFF
             and 0 <= actual_mask <= 0xFFFFFFFF
         ):
+            if actual_priority == priority_number:
+                same_priority_stale = True
             continue
+        rule_matches = (
+            (mark_number & actual_mask) == (actual_mark & actual_mask)
+        )
+        if "not" in tokens:
+            rule_matches = not rule_matches
         if (
             actual_priority < priority_number
-            and (mark_number & actual_mask) == (actual_mark & actual_mask)
+            and rule_matches
         ):
             higher_conflict = True
         try:
             lookup_index = tokens.index("lookup")
             actual_table = int(tokens[lookup_index + 1], 10)
         except (ValueError, IndexError):
+            if actual_priority == priority_number:
+                same_priority_stale = True
             continue
         if (
             actual_priority == priority_number
+            and "not" not in tokens
             and actual_mark == mark_number
             and actual_mask == 0xFFFFFFFF
             and actual_table == table_number
         ):
-            exact = True
-    return exact and not higher_conflict
+            exact_count += 1
+        elif actual_priority == priority_number:
+            same_priority_stale = True
+    return (
+        exact_count == 1
+        and not higher_conflict
+        and not same_priority_stale
+    )
 
 def ipsec_policy_route_matches(table, device, vip):
     if not vip:
