@@ -471,11 +471,29 @@ case "${1:-} ${2:-}" in
           printf '10351: from all fwmark %s lookup 351\n' "$cn_rule_token"
         ;;
     esac
-    if [[ "${DNS_TEST_AI_RULE_CONFLICT:-none}" == "zero-mask" ]]; then
-      printf '100: from all fwmark 0x301/0x0 lookup 301\n'
-    fi
+    case "${DNS_TEST_AI_RULE_CONFLICT:-none}" in
+      zero-mask)
+        printf '100: from all fwmark 0x301/0x0 lookup 301\n'
+        ;;
+      negated-other)
+        printf '100: not from all fwmark 0x999 lookup 301\n'
+        ;;
+      negated-target)
+        printf '100: not from all fwmark 0x301/0xffffffaf lookup 301\n'
+        ;;
+    esac
     if [[ "${DNS_TEST_CN_RULE_CONFLICT:-none}" == "zero-mask" ]]; then
       printf '101: from all fwmark 0x351/0x0 lookup 351\n'
+    fi
+    if ! grep -Fq 'ip rule del priority 10301' "$DNS_TEST_CALLS"; then
+      case "${DNS_TEST_AI_RULE_SAME_PRIORITY_CONFLICT:-none}" in
+        stale)
+          printf '10301: from all fwmark 0x301/0x0 lookup 999\n'
+          ;;
+        duplicate)
+          printf '10301: from all fwmark 0x301 lookup 301\n'
+          ;;
+      esac
     fi
     if grep -Fq 'ip rule add fwmark 0x301 table 301' "$DNS_TEST_CALLS"; then
       printf '10301: from all fwmark 0x301 lookup 301\n'
@@ -738,6 +756,7 @@ run_manager() {
   DNS_TEST_CN_RULE_MASK_STATE="${DNS_TEST_CN_RULE_MASK_STATE:-none}" \
   DNS_TEST_AI_RULE_CONFLICT="${DNS_TEST_AI_RULE_CONFLICT:-none}" \
   DNS_TEST_CN_RULE_CONFLICT="${DNS_TEST_CN_RULE_CONFLICT:-none}" \
+  DNS_TEST_AI_RULE_SAME_PRIORITY_CONFLICT="${DNS_TEST_AI_RULE_SAME_PRIORITY_CONFLICT:-none}" \
   DNS_TEST_IPSEC_FAIL_CHILD="${DNS_TEST_IPSEC_FAIL_CHILD:-}" \
   DNS_TEST_IPSEC_START_EMPTY="${DNS_TEST_IPSEC_START_EMPTY:-0}" \
   DNS_TEST_IPSEC_STARTED="$ipsec_started" \
@@ -984,6 +1003,22 @@ if DNS_TEST_AI_RULE_CONFLICT=zero-mask \
   fail "watchdog accepted a higher-priority fwmark rule with a zero mask"
 fi
 assert_not_contains "$calls" 'dig '
+
+if DNS_TEST_AI_RULE_CONFLICT=negated-other \
+   run_watchdog healthy >"$tmpdir/rule-negated-conflict.log" 2>&1; then
+  fail "watchdog accepted a higher-priority negated rule that matches AI"
+fi
+assert_not_contains "$calls" 'dig '
+
+DNS_TEST_AI_RULE_CONFLICT=negated-target run_watchdog healthy
+assert_not_contains "$calls" 'ip rule add fwmark 0x301 table 301'
+
+for same_priority_conflict in stale duplicate; do
+  DNS_TEST_AI_RULE_SAME_PRIORITY_CONFLICT="$same_priority_conflict" \
+    run_watchdog healthy
+  assert_contains "$calls" 'ip rule del priority 10301'
+  assert_contains "$calls" 'ip rule add fwmark 0x301 table 301'
+done
 
 if DNS_TEST_ROUTE_STATE=missing_rule DNS_TEST_ROUTE_APPLY_FAIL=rule \
    run_watchdog healthy >"$tmpdir/rule-repair-failure.log" 2>&1; then
@@ -1708,6 +1743,31 @@ if DNS_TEST_AI_RULE_CONFLICT=zero-mask \
 fi
 assert_health_detail_contains "$tmpdir/health-ipsec-rule-higher-conflict.json" \
   ai-ipsec-selected-egress 'policy_rule=False'
+
+reset_state
+if DNS_TEST_AI_RULE_CONFLICT=negated-other \
+   run_health >"$tmpdir/health-ipsec-rule-negated-conflict.json"; then
+  fail "health accepted a higher-priority negated rule that matches AI"
+fi
+assert_health_detail_contains "$tmpdir/health-ipsec-rule-negated-conflict.json" \
+  ai-ipsec-selected-egress 'policy_rule=False'
+
+reset_state
+DNS_TEST_AI_RULE_CONFLICT=negated-target \
+run_health >"$tmpdir/health-ipsec-rule-negated-nonmatch.json"
+assert_health_check "$tmpdir/health-ipsec-rule-negated-nonmatch.json" \
+  ai-ipsec-selected-egress ok
+
+for same_priority_conflict in stale duplicate; do
+  reset_state
+  if DNS_TEST_AI_RULE_SAME_PRIORITY_CONFLICT="$same_priority_conflict" \
+     run_health >"$tmpdir/health-ipsec-rule-same-${same_priority_conflict}.json"; then
+    fail "health accepted AI rules with a same-priority $same_priority_conflict"
+  fi
+  assert_health_detail_contains \
+    "$tmpdir/health-ipsec-rule-same-${same_priority_conflict}.json" \
+    ai-ipsec-selected-egress 'policy_rule=False'
+done
 
 reset_state
 DNS_TEST_AI_RULE_MASK_STATE=full \

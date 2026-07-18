@@ -338,6 +338,10 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'IPSEC_RULE_HIGHER_CONFLICT'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'IPSEC_RULE_EXACT_COUNT'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'IPSEC_RULE_SAME_PRIORITY_STALE'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'ip rule del priority "$priority"'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
   'priority = "10301"'
