@@ -4118,9 +4118,25 @@ wait_for_ipsec_underlay() {
   while true; do
     addresses=$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null || true)
     parsed_addresses=$(awk '{split($4, address, "/"); print address[1]}' <<<"$addresses")
-    routes=$(ip -4 route show default dev "$iface" 2>/dev/null || true)
+    routes=$(ip -4 route show default 2>/dev/null || true)
     if grep -Fxq "$expected" <<<"$parsed_addresses" &&
-      grep -Fq "default via $gateway dev $iface" <<<"$routes"; then
+      awk -v gateway="$gateway" -v iface="$iface" '
+        $1 == "default" {
+          route_gateway = ""
+          route_iface = ""
+          for (i = 2; i <= NF; i++) {
+            if ($i == "via" && i < NF) {
+              route_gateway = $(i + 1)
+            } else if ($i == "dev" && i < NF) {
+              route_iface = $(i + 1)
+            }
+          }
+          if (route_gateway == gateway && route_iface == iface) {
+            found = 1
+          }
+        }
+        END { exit(found ? 0 : 1) }
+      ' <<<"$routes"; then
       log "IPsec underlay ready: $iface has $expected via $gateway"
       return 0
     fi
