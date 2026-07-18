@@ -1729,6 +1729,14 @@ tpm {
     load = no
 }
 EOF
+
+  write_file /etc/strongswan.d/charon/dhcp.conf <<'EOF'
+dhcp {
+    # The peers return virtual IPv4 addresses in IKEv2 configuration payloads.
+    # Loading this plugin would unnecessarily bind UDP/68 beside dhcpcd.
+    load = no
+}
+EOF
 }
 
 render_ipsec_ca_store() {
