@@ -1715,6 +1715,20 @@ resolve {
     load = no
 }
 EOF
+
+  write_file /etc/strongswan.d/charon/agent.conf <<'EOF'
+agent {
+    # EAP credentials are stored in swanctl.conf; no SSH agent key is used.
+    load = no
+}
+EOF
+
+  write_file /etc/strongswan.d/charon/tpm.conf <<'EOF'
+tpm {
+    # This VM has no TPM-backed IPsec key, so probing the TPM is unnecessary.
+    load = no
+}
+EOF
 }
 
 render_ipsec_ca_store() {
@@ -2227,6 +2241,11 @@ EOF
 [Unit]
 Requires=dnscomplex-network-ready.service
 After=dnscomplex-network-ready.service
+
+[Service]
+# sing-box 1.13 tries systemd-resolved integration even when resolved is
+# intentionally disabled.  Keep that no-op private to this service.
+BindReadOnlyPaths=/usr/bin/true:/usr/bin/resolvectl
 EOF
 
   write_file /etc/systemd/system/dnscomplex-network-ready.service <<'EOF'

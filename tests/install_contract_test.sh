@@ -76,6 +76,8 @@ assert_file "$tmpdir/root/etc/smartdns/smartdns.conf"
 assert_file "$tmpdir/root/etc/AdGuardHome/AdGuardHome.yaml"
 assert_file "$tmpdir/root/etc/swanctl/swanctl.conf"
 assert_file "$tmpdir/root/etc/strongswan.d/charon/resolve.conf"
+assert_file "$tmpdir/root/etc/strongswan.d/charon/agent.conf"
+assert_file "$tmpdir/root/etc/strongswan.d/charon/tpm.conf"
 assert_file "$tmpdir/root/etc/modules-load.d/dnscomplex.conf"
 assert_file "$tmpdir/root/etc/nftables.d/dnscomplex.nft"
 assert_file "$tmpdir/root/etc/systemd/system/dnscomplex-cn-overrides.service"
@@ -483,6 +485,8 @@ assert_contains "$tmpdir/root/etc/systemd/system/sing-box.service.d/dnscomplex.c
   'Requires=dnscomplex-network-ready.service'
 assert_contains "$tmpdir/root/etc/systemd/system/sing-box.service.d/dnscomplex.conf" \
   'After=dnscomplex-network-ready.service'
+assert_contains "$tmpdir/root/etc/systemd/system/sing-box.service.d/dnscomplex.conf" \
+  'BindReadOnlyPaths=/usr/bin/true:/usr/bin/resolvectl'
 assert_contains "$tmpdir/root/etc/systemd/system/AdGuardHome.service" \
   'Requires=dnscomplex-network-ready.service'
 assert_contains "$tmpdir/root/etc/systemd/system/AdGuardHome.service" \
@@ -681,6 +685,8 @@ assert_contains "$repo_root/install.sh" 'upgrade -y --with-new-pkgs'
 assert_contains "$repo_root/install.sh" 'update_release_if_needed'
 assert_contains "$repo_root/install.sh" 'conntrack'
 assert_contains "$repo_root/install.sh" 'libstrongswan-extra-plugins'
+assert_contains "$tmpdir/root/etc/strongswan.d/charon/agent.conf" 'load = no'
+assert_contains "$tmpdir/root/etc/strongswan.d/charon/tpm.conf" 'load = no'
 assert_contains "$repo_root/install.sh" 'dnscomplex update-geosite'
 assert_contains "$repo_root/install.sh" 'dnscomplex routes up || true'
 assert_contains "$repo_root/install.sh" 'doctor_cmd'
