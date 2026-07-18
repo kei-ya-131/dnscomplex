@@ -449,6 +449,11 @@ if run_rendered_manager set-socks 0.0.0.0 1080 >"$set_socks_reject_log" 2>&1; th
   fail "routeros-policy set-socks accepted a non-VM listen address"
 fi
 assert_contains "$set_socks_reject_log" 'routeros-policy SOCKS listen must match LINUX_LAN_IPV4'
+set_socks_port_reject_log="$tmpdir/set-socks-policy-port-reject.log"
+if run_rendered_manager set-socks 192.168.8.200 1080 >"$set_socks_port_reject_log" 2>&1; then
+  fail "routeros-policy set-socks accepted a port other than 10800"
+fi
+assert_contains "$set_socks_port_reject_log" 'routeros-policy SOCKS port must be 10800'
 
 wizard_output=$(run_rendered_manager wizard)
 for wizard_value in \
@@ -950,7 +955,7 @@ ROUTEROS_LAN_IPV4=192.168.50.253
 LINUX_LAN_IPV4=192.168.50.200
 LAN_CLIENT_IPV4_CIDR=192.168.50.0/24
 SINGBOX_SOCKS_LISTEN=192.168.50.200
-SINGBOX_SOCKS_PORT=1080
+SINGBOX_SOCKS_PORT=10800
 AI_IPSEC_USERNAME=ai-user
 AI_IPSEC_PASSWORD=ai-pass
 CN_IPSEC_USERNAME=cn-user
@@ -1028,6 +1033,16 @@ assert_contains "$policy_defaults_tmp/root/etc/dnscomplex/config.env" "SINGBOX_S
 assert_contains "$policy_defaults_tmp/root/etc/sing-box/config.json" '"listen": "192.168.50.200"'
 assert_contains "$policy_defaults_tmp/root/etc/sing-box/config.json" '"listen_port": 10800'
 
+cp "$policy_defaults_tmp/config.env" "$policy_defaults_tmp/wrong-port.env"
+cat >>"$policy_defaults_tmp/wrong-port.env" <<'EOF'
+SINGBOX_SOCKS_LISTEN=192.168.50.200
+SINGBOX_SOCKS_PORT=1080
+EOF
+if DNSCOMPLEX_ROOT="$policy_defaults_tmp/wrong-port-root" \
+  bash "$repo_root/install.sh" --dry-run --config "$policy_defaults_tmp/wrong-port.env" >/dev/null 2>&1; then
+  fail "routeros-policy installer accepted a SOCKS port other than 10800"
+fi
+
 cat >>"$policy_defaults_tmp/config.env" <<'EOF'
 SINGBOX_SOCKS_LISTEN=0.0.0.0
 SINGBOX_SOCKS_PORT=1080
@@ -1048,7 +1063,7 @@ ROUTEROS_LAN_IPV4=192.168.50.253
 LINUX_LAN_IPV4=192.168.50.200
 LAN_CLIENT_IPV4_CIDR=192.168.50.0/24
 SINGBOX_SOCKS_LISTEN=192.168.50.200
-SINGBOX_SOCKS_PORT=1080
+SINGBOX_SOCKS_PORT=10800
 AI_IPSEC_USERNAME=ai-user
 AI_IPSEC_PASSWORD=ai-pass
 CN_IPSEC_USERNAME=cn-user
