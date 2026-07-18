@@ -532,6 +532,11 @@ network_enable_line=${network_enable_line%%:*}
   fail "selected strongSwan unit must restart before IPsec readiness"
 assert_not_contains "$repo_root/install.sh" 'dhcpcd --rebind "$WAN_IFACE"'
 assert_contains "$repo_root/install.sh" 'systemctl restart dnscomplex-health.timer'
+assert_contains "$repo_root/install.sh" 'validate_rendered_install'
+assert_contains "$repo_root/install.sh" 'timeout 2 unshare --net -- smartdns -f'
+assert_contains "$repo_root/install.sh" '/opt/AdGuardHome/AdGuardHome --check-config'
+assert_contains "$repo_root/install.sh" 'systemd-analyze verify'
+assert_contains "$repo_root/install.sh" 'python3 -m py_compile'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'apply_runtime_network_settings'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'resolve_default_ipv6_mode'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'ipv6_tcp_available'
@@ -707,13 +712,46 @@ assert_contains "$tmpdir/root/etc/strongswan.d/swanctl.conf" \
   'load = test-vectors aesni aes rc2 sha2 sha1 md5 mgf1 rdrand random x509 pubkey pkcs1 pkcs7 pkcs12 dnskey sshkey pem openssl gcrypt pkcs8 af-alg gmp curve25519 hmac kdf drbg'
 assert_not_contains "$tmpdir/root/etc/strongswan.d/swanctl.conf" 'agent'
 assert_contains "$repo_root/install.sh" 'dnscomplex update-geosite'
-assert_contains "$repo_root/install.sh" 'dnscomplex routes up || true'
+assert_contains "$repo_root/install.sh" 'dnscomplex routes up'
+assert_contains "$repo_root/install.sh" 'dnscomplex test'
 assert_contains "$repo_root/install.sh" 'doctor_cmd'
 assert_contains "$repo_root/install.sh" 'DNSCOMPLEX_UPDATE_LAST_LOG'
 assert_contains "$repo_root/install.sh" 'prefetch-domain yes'
 assert_contains "$repo_root/install.sh" 'cache_enabled: false'
 assert_contains "$repo_root/install.sh" 'dnscomplex_conntrack_usage_ratio'
 assert_contains "$repo_root/install.sh" 'dnscomplex_dns_latency_ms'
+
+enable_services_body=$(awk '
+  /^enable_services\(\) \{/ { inside=1 }
+  inside { print }
+  inside && /^}/ { exit }
+' "$repo_root/install.sh")
+case "$enable_services_body" in
+  *'systemctl restart nftables || true'*)
+    fail "installer must not ignore nftables restart failure"
+    ;;
+esac
+
+installer_main_body=$(awk '
+  /^main\(\) \{/ {
+    inside=1
+    body=$0 ORS
+    next
+  }
+  inside {
+    body=body $0 ORS
+    if (/^}/) {
+      inside=0
+      last=body
+    }
+  }
+  END { printf "%s", last }
+' "$repo_root/install.sh")
+case "$installer_main_body" in
+  *render_all*validate_rendered_install*enable_services*'dnscomplex update-geosite'*\
+'dnscomplex routes up'*'dnscomplex refresh-nftsets'*'dnscomplex test'*) ;;
+  *) fail "installer must preflight before service changes and run final validation automatically" ;;
+esac
 assert_not_contains "$repo_root/install.sh" 'apt-get install -y smartdns'
 assert_not_contains "$repo_root/install.sh" 'https://sing-box.app/deb-install.sh'
 assert_not_contains "$repo_root/install.sh" 'AdGuardHome/master/scripts/install.sh'
