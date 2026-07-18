@@ -423,11 +423,13 @@ disable_systemd_ssh_generator() {
     die "$target is a directory; cannot mask systemd-ssh-generator"
   fi
   ln -sfn /dev/null "$target"
-  if [[ "$DRY_RUN" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
-    systemctl stop sshd-unix-local.socket sshd-vsock.socket sshd-unix-export.socket 2>/dev/null || true
-    systemctl reset-failed sshd-unix-local.socket sshd-vsock.socket sshd-unix-export.socket 2>/dev/null || true
-    systemctl daemon-reload
-  fi
+}
+
+apply_systemd_ssh_generator_disable() {
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl stop sshd-unix-local.socket sshd-vsock.socket sshd-unix-export.socket 2>/dev/null || true
+  systemctl reset-failed sshd-unix-local.socket sshd-vsock.socket sshd-unix-export.socket 2>/dev/null || true
 }
 
 run_cmd() {
@@ -1468,6 +1470,21 @@ EOF
       smartdns_upstream_line "$upstream" cn
     done < <(split_words "$CN_DNS_UPSTREAMS")
   } | write_file /etc/smartdns/smartdns.conf
+}
+
+validate_rendered_smartdns() {
+  local output rc
+  output=$(mktemp)
+  set +e
+  timeout 2 unshare --net -- smartdns -f -c /etc/smartdns/smartdns.conf -p - >"$output" 2>&1
+  rc=$?
+  set -e
+  if [[ "$rc" != "124" ]]; then
+    cat "$output" >&2
+    rm -f "$output"
+    die "SmartDNS configuration preflight failed"
+  fi
+  rm -f "$output"
 }
 
 render_local_hosts() {
@@ -3626,7 +3643,26 @@ restart_dns_stack() {
   fix_smartdns_wrapper
   ensure_smartdns_enabled
   systemctl restart smartdns sing-box AdGuardHome
-  wait_dns_ready || warn "DNS stack restarted but did not answer readiness probe within 10 seconds"
+  if ! wait_dns_ready; then
+    warn "DNS stack restarted but did not answer readiness probe within 10 seconds"
+    return 1
+  fi
+}
+
+validate_smartdns_config_cmd() {
+  local config_file output rc
+  config_file=$(fs_path /etc/smartdns/smartdns.conf)
+  output=$(mktemp)
+  set +e
+  timeout 2 unshare --net -- smartdns -f -c "$config_file" -p - >"$output" 2>&1
+  rc=$?
+  set -e
+  if [[ "$rc" != "124" ]]; then
+    cat "$output" >&2
+    rm -f "$output"
+    die "SmartDNS configuration preflight failed"
+  fi
+  rm -f "$output"
 }
 
 remove_macbook_air_local_override() {
@@ -3817,6 +3853,8 @@ update_geosite_cmd() {
   install_domain_files
   render_adguard_runtime
   sing-box check -c /etc/sing-box/config.json
+  /opt/AdGuardHome/AdGuardHome --check-config -c /etc/AdGuardHome/AdGuardHome.yaml
+  validate_smartdns_config_cmd
   restart_dns_stack
   refresh_nftsets_cmd || warn "nftset refresh failed after geosite update"
 }
@@ -6702,6 +6740,8 @@ test_cmd() {
   swan_log=$(mktemp)
   test_dns_cmd
   test_ipsec_cmd
+  validate_smartdns_config_cmd
+  /opt/AdGuardHome/AdGuardHome --check-config -c /etc/AdGuardHome/AdGuardHome.yaml
   sing-box check -c /etc/sing-box/config.json
   xray run -test -format=json -config /usr/local/etc/xray/config.json
   nft -c -f /etc/nftables.conf
@@ -9120,6 +9160,7 @@ EOF
 enable_services() {
   [[ "$DRY_RUN" == "1" ]] && return 0
   local ipsec_unit ipsec_enabled=0
+  apply_systemd_ssh_generator_disable
   apply_runtime_network_settings
   systemctl daemon-reload
   if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
@@ -9127,7 +9168,7 @@ enable_services() {
   else
     systemctl enable --now systemd-networkd nftables dnsmasq radvd
   fi
-  systemctl restart nftables || true
+  systemctl restart nftables
   systemctl enable --now dnscomplex-network-ready
   systemctl enable --now dnscomplex-ipsec-ifaces
   for ipsec_unit in strongswan-swanctl strongswan-starter strongswan ipsec; do
@@ -9151,8 +9192,84 @@ enable_services() {
   systemctl enable --now smartdns AdGuardHome sing-box xray-dnscomplex
   systemctl enable --now dnscomplex-web
   systemctl enable --now dnscomplex-metrics
-  systemctl restart smartdns AdGuardHome sing-box xray-dnscomplex || true
-  systemctl restart dnscomplex-web dnscomplex-metrics || true
+  systemctl restart smartdns AdGuardHome sing-box xray-dnscomplex
+  systemctl restart dnscomplex-web dnscomplex-metrics
+}
+
+validate_rendered_install() {
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  local swan_file=/etc/swanctl/swanctl.conf
+  local -a python_files=(
+    /usr/local/lib/dnscomplex-metrics/exporter.py
+    /usr/local/lib/dnscomplex-soak/runner.py
+    /usr/local/lib/dnscomplex-web/app.py
+    /usr/local/lib/dnscomplex-xray/render.py
+  )
+  local -a unit_files=(
+    /etc/systemd/system/AdGuardHome.service
+    /etc/systemd/system/dnscomplex-cn-overrides.service
+    /etc/systemd/system/dnscomplex-cn-overrides.timer
+    /etc/systemd/system/dnscomplex-health.service
+    /etc/systemd/system/dnscomplex-health.timer
+    /etc/systemd/system/dnscomplex-ipsec-ifaces.service
+    /etc/systemd/system/dnscomplex-ipsec-ready.service
+    /etc/systemd/system/dnscomplex-metrics-sample.service
+    /etc/systemd/system/dnscomplex-metrics-sample.timer
+    /etc/systemd/system/dnscomplex-metrics.service
+    /etc/systemd/system/dnscomplex-network-ready.service
+    /etc/systemd/system/dnscomplex-nftset-refresh.service
+    /etc/systemd/system/dnscomplex-nftset-refresh.timer
+    /etc/systemd/system/dnscomplex-routing.service
+    /etc/systemd/system/dnscomplex-update.service
+    /etc/systemd/system/dnscomplex-update.timer
+    /etc/systemd/system/dnscomplex-web.service
+    /etc/systemd/system/xray-dnscomplex.service
+  )
+
+  log "preflight: validate rendered configuration before service changes"
+  bash -n /usr/local/sbin/dnscomplex
+  python3 -m py_compile "${python_files[@]}"
+  validate_rendered_smartdns
+  /opt/AdGuardHome/AdGuardHome --check-config -c /etc/AdGuardHome/AdGuardHome.yaml
+  sing-box check -c /etc/sing-box/config.json
+  xray run -test -format=json -config /usr/local/etc/xray/config.json
+  nft -c -f /etc/nftables.conf
+  python3 - "$swan_file" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+depth = 0
+quoted = False
+escaped = False
+for char in text:
+    if escaped:
+        escaped = False
+        continue
+    if quoted and char == "\\":
+        escaped = True
+        continue
+    if char == '"':
+        quoted = not quoted
+        continue
+    if quoted:
+        if char == "\n":
+            raise SystemExit("newline inside quoted swanctl value")
+        continue
+    if char == "{":
+        depth += 1
+    elif char == "}":
+        depth -= 1
+        if depth < 0:
+            raise SystemExit("unbalanced swanctl closing brace")
+if quoted or depth:
+    raise SystemExit("unbalanced swanctl configuration")
+for required in ("connections {", "secrets {", "ai {", "cn {"):
+    if required not in text:
+        raise SystemExit(f"missing swanctl section: {required}")
+PY
+  systemd-analyze verify "${unit_files[@]}" smartdns.service sing-box.service
+  log "preflight: rendered configuration valid"
 }
 
 render_all() {
@@ -9194,11 +9311,13 @@ main() {
   if [[ "$DRY_RUN" == "1" ]]; then
     log "dry-run render complete under ${DNSCOMPLEX_ROOT:-/}"
   else
-    dnscomplex update-geosite
+    validate_rendered_install
     enable_services
-    dnscomplex routes up || true
-    dnscomplex refresh-nftsets || true
-    log "installed. Run: dnscomplex test"
+    dnscomplex update-geosite
+    dnscomplex routes up
+    dnscomplex refresh-nftsets
+    dnscomplex test
+    log "installed and validated"
     log "RouterOS commands: dnscomplex routeros-print"
   fi
 }
