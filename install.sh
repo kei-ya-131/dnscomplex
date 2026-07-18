@@ -6396,6 +6396,194 @@ fs_path() {
   fi
 }
 
+managed_backup_paths() {
+  cat <<'EOF'
+etc/dnscomplex
+etc/sing-box
+etc/smartdns
+etc/AdGuardHome
+etc/swanctl
+etc/strongswan.d/charon/resolve.conf
+etc/strongswan.d/charon/agent.conf
+etc/strongswan.d/charon/tpm.conf
+etc/strongswan.d/charon/dhcp.conf
+etc/strongswan.d/swanctl.conf
+etc/nftables.conf
+etc/nftables.d/dnscomplex.nft
+etc/modules-load.d/dnscomplex.conf
+etc/sysctl.d/90-dnscomplex.conf
+etc/dhcpcd.conf
+etc/nsswitch.conf
+etc/resolv.conf
+etc/systemd/network/10-dnscomplex-vlans.netdev
+etc/systemd/network/10-dnscomplex-trunk.network
+etc/systemd/network/20-dnscomplex-transit.network
+etc/systemd/network/30-dnscomplex-lan.network
+etc/dnsmasq.d/dnscomplex.conf
+etc/radvd.conf
+etc/systemd/system-generators/systemd-ssh-generator
+etc/systemd/system/smartdns.service.d/dnscomplex.conf
+etc/systemd/system/sing-box.service.d/dnscomplex.conf
+etc/systemd/system/AdGuardHome.service
+etc/systemd/system/xray-dnscomplex.service
+etc/systemd/system/dnscomplex-network-ready.service
+etc/systemd/system/dnscomplex-ipsec-ifaces.service
+etc/systemd/system/dnscomplex-ipsec-ready.service
+etc/systemd/system/dnscomplex-routing.service
+etc/systemd/system/dnscomplex-health.service
+etc/systemd/system/dnscomplex-health.timer
+etc/systemd/system/dnscomplex-update.service
+etc/systemd/system/dnscomplex-update.timer
+etc/systemd/system/dnscomplex-cn-overrides.service
+etc/systemd/system/dnscomplex-cn-overrides.timer
+etc/systemd/system/dnscomplex-nftset-refresh.service
+etc/systemd/system/dnscomplex-nftset-refresh.timer
+etc/systemd/system/dnscomplex-metrics.service
+etc/systemd/system/dnscomplex-metrics-sample.service
+etc/systemd/system/dnscomplex-metrics-sample.timer
+etc/systemd/system/dnscomplex-web.service
+etc/prometheus/dnscomplex.rules.yml
+usr/bin/sing-box
+usr/sbin/smartdns
+usr/local/bin/xray
+usr/local/share/xray
+usr/local/etc/xray
+usr/local/lib/smartdns
+usr/local/lib/dnscomplex-xray
+usr/local/lib/dnscomplex-soak
+usr/local/lib/dnscomplex-metrics
+usr/local/lib/dnscomplex-web
+usr/local/sbin/dnscomplex
+opt/AdGuardHome
+var/lib/smartdns
+var/lib/dnscomplex
+EOF
+}
+
+legacy_backup_paths() {
+  cat <<'EOF'
+etc/dnscomplex
+etc/sing-box
+etc/smartdns
+etc/AdGuardHome
+etc/swanctl
+etc/nftables.d/dnscomplex.nft
+var/lib/dnscomplex
+EOF
+}
+
+managed_service_units() {
+  cat <<'EOF'
+systemd-networkd.service
+nftables.service
+dnsmasq.service
+radvd.service
+systemd-resolved.service
+strongswan-swanctl.service
+strongswan-starter.service
+strongswan.service
+ipsec.service
+smartdns.service
+AdGuardHome.service
+sing-box.service
+xray-dnscomplex.service
+dnscomplex-network-ready.service
+dnscomplex-ipsec-ifaces.service
+dnscomplex-ipsec-ready.service
+dnscomplex-routing.service
+dnscomplex-health.timer
+dnscomplex-update.timer
+dnscomplex-cn-overrides.timer
+dnscomplex-nftset-refresh.timer
+dnscomplex-metrics.service
+dnscomplex-metrics-sample.timer
+dnscomplex-web.service
+sshd-unix-local.socket
+sshd-vsock.socket
+sshd-unix-export.socket
+EOF
+}
+
+service_state_supported() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  [[ -z "$FS_ROOT" || "$FS_ROOT" == "/" ||
+     "${DNSCOMPLEX_FORCE_SERVICE_STATE:-0}" == "1" ]]
+}
+
+snapshot_service_state() {
+  local destination=$1 unit load_state enabled active
+  : >"$destination"
+  service_state_supported || return 0
+  while IFS= read -r unit; do
+    [[ -n "$unit" ]] || continue
+    load_state=$(systemctl show --property=LoadState --value "$unit" 2>/dev/null || true)
+    [[ "$load_state" == "loaded" ]] || continue
+    enabled=$(systemctl is-enabled "$unit" 2>/dev/null || true)
+    enabled=${enabled%%$'\n'*}
+    case "$enabled" in
+      enabled|enabled-runtime|disabled|static|indirect|generated|alias|linked|linked-runtime|masked|masked-runtime|transient) ;;
+      *) enabled=unknown ;;
+    esac
+    active=$(systemctl is-active "$unit" 2>/dev/null || true)
+    active=${active%%$'\n'*}
+    case "$active" in
+      active|inactive|failed|activating|deactivating|reloading|maintenance) ;;
+      *) active=unknown ;;
+    esac
+    printf '%s\t%s\t%s\n' "$unit" "$enabled" "$active" >>"$destination"
+  done < <(managed_service_units)
+}
+
+validate_backup_archive() {
+  local archive=$1
+  python3 - "$archive" <<'PY'
+import pathlib
+import posixpath
+import sys
+import tarfile
+
+archive_path = sys.argv[1]
+seen = set()
+members = []
+total_size = 0
+try:
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            raw_name = member.name
+            name = raw_name
+            while name.startswith("./"):
+                name = name[2:]
+            name = name.rstrip("/")
+            if name in ("", "."):
+                continue
+            path = pathlib.PurePosixPath(name)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"unsafe archive path: {raw_name}")
+            if posixpath.normpath(name) != name:
+                raise ValueError(f"non-canonical archive path: {raw_name}")
+            if name in seen:
+                raise ValueError(f"duplicate archive path: {raw_name}")
+            if member.islnk() or member.ischr() or member.isblk() or member.isfifo():
+                raise ValueError(f"unsupported archive entry: {raw_name}")
+            if not (member.isfile() or member.isdir() or member.issym()):
+                raise ValueError(f"unsupported archive entry type: {raw_name}")
+            seen.add(name)
+            members.append((name, member.issym()))
+            total_size += member.size
+            if len(members) > 200_000 or total_size > 8 * 1024**3:
+                raise ValueError("backup archive exceeds safety limits")
+except (OSError, tarfile.TarError, ValueError) as exc:
+    raise SystemExit(f"invalid backup archive: {exc}")
+
+symlinks = {name for name, is_symlink in members if is_symlink}
+for name, _ in members:
+    parts = pathlib.PurePosixPath(name).parts
+    for index in range(1, len(parts)):
+        if "/".join(parts[:index]) in symlinks:
+            raise SystemExit(f"archive path descends through a symlink: {name}")
+PY
+}
+
 snapshot_copy() {
   local stage=$1 rel=$2 src dst
   src=$(fs_path "/$rel")
@@ -6403,6 +6591,169 @@ snapshot_copy() {
   [[ -e "$src" || -L "$src" ]] || return 0
   mkdir -p "$(dirname "$dst")"
   cp -a "$src" "$dst"
+}
+
+validate_service_state_snapshot() {
+  local state_file=$1 unit enabled active extra allowed_file recorded_file
+  [[ -f "$state_file" && ! -L "$state_file" ]] ||
+    die "backup service-state snapshot is missing or unsafe"
+  allowed_file=$(mktemp "$(dirname "$state_file")/.allowed-units.XXXXXX")
+  recorded_file=$(mktemp "$(dirname "$state_file")/.recorded-units.XXXXXX")
+  managed_service_units >"$allowed_file"
+  while IFS=$'\t' read -r unit enabled active extra; do
+    [[ -n "$unit" && -n "$enabled" && -n "$active" && -z "${extra:-}" ]] ||
+      die "backup service-state snapshot contains a malformed row"
+    grep -Fxq -- "$unit" "$allowed_file" ||
+      die "backup service-state snapshot contains an unmanaged unit: $unit"
+    if grep -Fxq -- "$unit" "$recorded_file"; then
+      die "backup service-state snapshot contains a duplicate unit: $unit"
+    fi
+    printf '%s\n' "$unit" >>"$recorded_file"
+    case "$enabled" in
+      enabled|enabled-runtime|disabled|static|indirect|generated|alias|linked|linked-runtime|masked|masked-runtime|transient|unknown) ;;
+      *) die "backup service-state snapshot has invalid enablement for $unit" ;;
+    esac
+    case "$active" in
+      active|inactive|failed|activating|deactivating|reloading|maintenance|unknown) ;;
+      *) die "backup service-state snapshot has invalid activity for $unit" ;;
+    esac
+  done <"$state_file"
+  rm -f -- "$allowed_file" "$recorded_file"
+}
+
+validate_backup_manifest() {
+  local stage=$1 manifest="$stage/.dnscomplex-backup/manifest.tsv"
+  local format="$stage/.dnscomplex-backup/format"
+  local status rel extra allowed_file recorded_file
+
+  [[ -f "$format" && ! -L "$format" ]] || die "backup format marker is missing or unsafe"
+  [[ "$(<"$format")" == "2" ]] || die "unsupported dnscomplex backup format"
+  [[ -f "$manifest" && ! -L "$manifest" ]] || die "backup manifest is missing or unsafe"
+  [[ -f "$stage/.dnscomplex-backup/service-state.tsv" &&
+     ! -L "$stage/.dnscomplex-backup/service-state.tsv" ]] ||
+    die "backup service-state snapshot is missing or unsafe"
+  validate_service_state_snapshot "$stage/.dnscomplex-backup/service-state.tsv"
+
+  allowed_file=$(mktemp "$stage/.dnscomplex-backup/.allowed-paths.XXXXXX")
+  recorded_file=$(mktemp "$stage/.dnscomplex-backup/.recorded-paths.XXXXXX")
+  managed_backup_paths >"$allowed_file"
+
+  while IFS=$'\t' read -r status rel extra; do
+    [[ -n "$status" && -n "$rel" && -z "${extra:-}" ]] ||
+      die "backup manifest contains a malformed row"
+    [[ "$status" == "present" || "$status" == "absent" ]] ||
+      die "backup manifest contains an invalid state for $rel"
+    grep -Fxq -- "$rel" "$allowed_file" ||
+      die "backup manifest contains an unmanaged path: $rel"
+    if grep -Fxq -- "$rel" "$recorded_file"; then
+      die "backup manifest contains a duplicate path: $rel"
+    fi
+    printf '%s\n' "$rel" >>"$recorded_file"
+    if [[ "$status" == "present" ]]; then
+      [[ -e "$stage/$rel" || -L "$stage/$rel" ]] ||
+        die "backup manifest marks a missing path as present: $rel"
+    elif [[ -e "$stage/$rel" || -L "$stage/$rel" ]]; then
+      die "backup manifest marks an archived path as absent: $rel"
+    fi
+  done <"$manifest"
+
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    grep -Fxq -- "$rel" "$recorded_file" ||
+      die "backup manifest omits managed path: $rel"
+  done <"$allowed_file"
+  rm -f -- "$allowed_file" "$recorded_file"
+}
+
+restore_service_state() {
+  local state_file=$1 unit enabled active extra
+  local failed=0
+  validate_service_state_snapshot "$state_file"
+  service_state_supported || {
+    warn "service state was not applied because this is an offline filesystem root"
+    return 0
+  }
+
+  systemctl daemon-reload
+  while IFS=$'\t' read -r unit enabled active extra; do
+    [[ -n "$unit" ]] || continue
+    case "$enabled" in
+      enabled)
+        systemctl unmask "$unit" >/dev/null 2>&1 || true
+        systemctl enable "$unit" || failed=1
+        ;;
+      enabled-runtime)
+        systemctl unmask "$unit" >/dev/null 2>&1 || true
+        systemctl enable --runtime "$unit" || failed=1
+        ;;
+      disabled)
+        systemctl unmask "$unit" >/dev/null 2>&1 || true
+        systemctl disable "$unit" || failed=1
+        ;;
+      masked)
+        systemctl mask "$unit" || failed=1
+        ;;
+      masked-runtime)
+        systemctl mask --runtime "$unit" || failed=1
+        ;;
+      static|indirect|generated|alias|linked|linked-runtime|transient|unknown)
+        ;;
+      *)
+        die "backup service-state snapshot has invalid enablement for $unit"
+        ;;
+    esac
+
+    case "$active" in
+      active|activating|reloading)
+        systemctl restart "$unit" || failed=1
+        ;;
+      inactive|failed|deactivating|maintenance|unknown)
+        systemctl stop "$unit" || failed=1
+        systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+        ;;
+      *)
+        die "backup service-state snapshot has invalid activity for $unit"
+        ;;
+    esac
+  done <"$state_file"
+  [[ "$failed" == "0" ]] || die "one or more restored service states could not be applied"
+}
+
+restore_v2_backup() {
+  local stage=$1 rel status extra src dst
+  local manifest="$stage/.dnscomplex-backup/manifest.tsv"
+  validate_backup_manifest "$stage"
+
+  while IFS=$'\t' read -r status rel extra; do
+    src="$stage/$rel"
+    dst=$(fs_path "/$rel")
+    [[ "$dst" != "/" && -n "$dst" ]] || die "refusing to replace the filesystem root"
+    rm -rf -- "$dst"
+    if [[ "$status" == "present" ]]; then
+      mkdir -p "$(dirname "$dst")"
+      cp -a -- "$src" "$dst"
+    fi
+  done <"$manifest"
+  restore_service_state "$stage/.dnscomplex-backup/service-state.tsv"
+}
+
+restore_legacy_backup() {
+  local stage=$1 rel src dst
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    src="$stage/$rel"
+    [[ -e "$src" || -L "$src" ]] || continue
+    dst=$(fs_path "/$rel")
+    mkdir -p "$(dirname "$dst")"
+    if [[ -d "$src" && ! -L "$src" ]]; then
+      mkdir -p "$dst"
+      cp -a -- "$src/." "$dst/"
+    else
+      rm -rf -- "$dst"
+      cp -a -- "$src" "$dst"
+    fi
+  done < <(legacy_backup_paths)
+  fix_cmd
 }
 
 sqlite_backup() {
@@ -6661,6 +7012,7 @@ backup_cmd() {
   (
     set -e
     local stage="" verify="" temp_output="" rel live_db archived_db
+    local present_count=0
     local -a archive_paths=()
     cleanup_backup_stage() {
       [[ -z "$stage" ]] || rm -rf -- "$stage"
@@ -6674,19 +7026,22 @@ backup_cmd() {
     verify=$(mktemp -d)
     temp_output=$(mktemp "$output_dir/.${output_base}.XXXXXX")
 
-    for rel in \
-      etc/dnscomplex \
-      etc/sing-box \
-      etc/smartdns \
-      etc/AdGuardHome \
-      etc/swanctl \
-      etc/nftables.d/dnscomplex.nft \
-      var/lib/dnscomplex; do
+    mkdir -p "$stage/.dnscomplex-backup"
+    printf '2\n' >"$stage/.dnscomplex-backup/format"
+    : >"$stage/.dnscomplex-backup/manifest.tsv"
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
       snapshot_copy "$stage" "$rel"
       if [[ -e "$stage/$rel" || -L "$stage/$rel" ]]; then
+        printf 'present\t%s\n' "$rel" >>"$stage/.dnscomplex-backup/manifest.tsv"
         archive_paths+=("./$rel")
+        present_count=$((present_count + 1))
+      else
+        printf 'absent\t%s\n' "$rel" >>"$stage/.dnscomplex-backup/manifest.tsv"
       fi
-    done
+    done < <(managed_backup_paths)
+    snapshot_service_state "$stage/.dnscomplex-backup/service-state.tsv"
+    archive_paths=("./.dnscomplex-backup" "${archive_paths[@]}")
 
     rm -f \
       "$stage/var/lib/dnscomplex/metrics.sqlite3-wal" \
@@ -6699,9 +7054,10 @@ backup_cmd() {
       sqlite_backup "$live_db" "$archived_db"
     fi
 
-    ((${#archive_paths[@]} > 0)) || die "no dnscomplex state was available to back up"
+    ((present_count > 0)) || die "no dnscomplex state was available to back up"
+    validate_backup_manifest "$stage"
     tar -czf "$temp_output" -C "$stage" -- "${archive_paths[@]}"
-    tar -tzf "$temp_output" >/dev/null
+    validate_backup_archive "$temp_output"
     if tar -tzf "$temp_output" | grep -Eq 'metrics[.]sqlite3-(wal|shm|journal)$'; then
       die "backup archive contains transient SQLite sidecar files"
     fi
@@ -6730,9 +7086,30 @@ PY
 restore_cmd() {
   need_root
   [[ $# -eq 1 ]] || die "usage: dnscomplex restore INPUT_TAR_GZ"
+  [[ -f "$1" && ! -L "$1" ]] || die "backup archive must be a regular file"
   acquire_maintenance_lock
-  tar --no-overwrite-dir -xzf "$1" -C "$(fs_path /)"
-  fix_cmd
+  (
+    set -e
+    local workspace="" stage="" archive_copy=""
+    cleanup_restore_stage() {
+      [[ -z "$workspace" ]] || rm -rf -- "$workspace"
+    }
+    trap cleanup_restore_stage EXIT
+    workspace=$(mktemp -d)
+    stage="$workspace/content"
+    archive_copy="$workspace/input.tar.gz"
+    mkdir -p "$stage"
+    cp -- "$1" "$archive_copy"
+    chmod 0600 "$archive_copy"
+    validate_backup_archive "$archive_copy"
+    tar -xzf "$archive_copy" -C "$stage"
+    if [[ -e "$stage/.dnscomplex-backup/format" ||
+          -L "$stage/.dnscomplex-backup/format" ]]; then
+      restore_v2_backup "$stage"
+    else
+      restore_legacy_backup "$stage"
+    fi
+  )
 }
 
 test_cmd() {

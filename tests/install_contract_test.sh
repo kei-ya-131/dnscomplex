@@ -1146,9 +1146,17 @@ case "$restore_body" in
   *acquire_maintenance_lock*) ;;
   *) fail "restore must share the maintenance lock" ;;
 esac
-case "$restore_body" in
-  *'tar --no-overwrite-dir -xzf'*'-C "$(fs_path /)"'*) ;;
-  *) fail "restore must preserve existing directory metadata inside the selected filesystem root" ;;
-esac
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'validate_backup_archive "$archive_copy"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'tar -xzf "$archive_copy" -C "$stage"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'restore_v2_backup "$stage"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'validate_backup_manifest "$stage"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'restore_service_state "$stage/.dnscomplex-backup/service-state.tsv"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  'cp -a -- "$src" "$dst"'
 
 printf 'install contract test: ok\n'
