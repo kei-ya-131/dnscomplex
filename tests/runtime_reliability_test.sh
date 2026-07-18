@@ -22,6 +22,18 @@ assert_call_count() {
   [[ "$count" == "$expected" ]] || fail "expected $expected '$needle' calls, got $count"
 }
 
+assert_call_before() {
+  local first=$1 second=$2 first_line second_line
+  first_line=$(grep -nF -- "$first" "$calls" | head -n1)
+  second_line=$(grep -nF -- "$second" "$calls" | head -n1)
+  [[ -n "$first_line" ]] || fail "missing '$first' in $calls"
+  [[ -n "$second_line" ]] || fail "missing '$second' in $calls"
+  first_line=${first_line%%:*}
+  second_line=${second_line%%:*}
+  ((first_line < second_line)) ||
+    fail "expected '$first' before '$second'"
+}
+
 file_mode() {
   stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
@@ -81,6 +93,7 @@ probe_pids="$tmpdir/probe-pids"
 nft_race="$tmpdir/nft-race"
 tar_blocking="$tmpdir/tar-blocking"
 socket_calls="$tmpdir/socket-calls"
+ipsec_started="$tmpdir/ipsec-started"
 mkdir -p "$state" "$run_dir" "$fake_root" "$fakebin" "$fakepy"
 
 cat >"$config" <<'EOF'
@@ -230,6 +243,10 @@ EOF
 cat >"$fakebin/nft" <<'EOF'
 #!/usr/bin/env bash
 printf 'nft %s\n' "$*" >>"$DNS_TEST_CALLS"
+if [[ "${DNS_TEST_NFT_ADD_FAIL:-0}" == "1" &&
+      "${1:-} ${2:-}" == "add rule" ]]; then
+  exit 9
+fi
 case "${1:-} ${2:-}" in
   "list table") exit 0 ;;
   "get element")
@@ -309,6 +326,29 @@ EOF
 cat >"$fakebin/ip" <<'EOF'
 #!/usr/bin/env bash
 printf 'ip %s\n' "$*" >>"$DNS_TEST_CALLS"
+underlay_iface=${DNS_TEST_UNDERLAY_IFACE:-eth0}
+underlay_ipv4=${DNS_TEST_UNDERLAY_IPV4:-192.168.8.200}
+underlay_gateway=${DNS_TEST_UNDERLAY_GATEWAY:-192.168.8.253}
+if [[ "$*" == "-4 -o addr show dev $underlay_iface scope global" ]]; then
+  case "${DNS_TEST_WAN_ADDRESS:-expected}" in
+    expected)
+      printf '2: %s    inet %s/24 brd 192.168.8.255 scope global %s\n' \
+        "$underlay_iface" "$underlay_ipv4" "$underlay_iface"
+      ;;
+    wrong)
+      printf '2: eth0    inet 192.168.8.201/24 brd 192.168.8.255 scope global eth0\n'
+      ;;
+    missing) ;;
+  esac
+  exit 0
+fi
+if [[ "$*" == "-4 route show default dev $underlay_iface" ]]; then
+  if [[ "${DNS_TEST_WAN_ROUTE:-expected}" == "expected" ]]; then
+    printf 'default via %s dev %s proto dhcp src %s\n' \
+      "$underlay_gateway" "$underlay_iface" "$underlay_ipv4"
+  fi
+  exit 0
+fi
 case "${DNS_TEST_ROUTE_APPLY_FAIL:-0}" in
   1|all)
     if [[ "${1:-} ${2:-}" == "rule add" || "${1:-} ${2:-}" == "route replace" ]]; then
@@ -359,13 +399,31 @@ EOF
 cat >"$fakebin/swanctl" <<'EOF'
 #!/usr/bin/env bash
 printf 'swanctl %s\n' "$*" >>"$DNS_TEST_CALLS"
+if [[ "${DNS_TEST_SWAN_SUCCESS_NOISE:-0}" == "1" &&
+      ( "${1:-}" == "--load-all" || "${1:-}" == "--initiate" ) ]]; then
+  printf 'simulated optional plugin warning\n' >&2
+fi
+if [[ "${1:-}" == "--stats" && "${DNS_TEST_VICI_AVAILABLE:-1}" != "1" ]]; then
+  exit 9
+fi
+if [[ "${1:-}" == "--load-all" && "${DNS_TEST_SWAN_LOAD_FAIL:-0}" == "1" ]]; then
+  exit 9
+fi
+ipsec_child_up() {
+  local child=$1
+  if [[ "${DNS_TEST_IPSEC_START_EMPTY:-0}" == "1" ]]; then
+    grep -Fxq "$child" "$DNS_TEST_IPSEC_STARTED" 2>/dev/null
+  else
+    [[ "${DNS_TEST_IPSEC_FAIL_CHILD:-}" != "$child" ]]
+  fi
+}
 if [[ "${1:-}" == "--list-sas" ]]; then
-  if [[ "${DNS_TEST_IPSEC_FAIL_CHILD:-}" != "ai" ]]; then
+  if ipsec_child_up ai; then
     printf 'ai: #1, ESTABLISHED\n'
     [[ -z "${DNS_TEST_AI_VIP:-}" ]] ||
       printf '  local 192.0.2.1[4500] [%s]\n' "$DNS_TEST_AI_VIP"
   fi
-  if [[ "${DNS_TEST_IPSEC_FAIL_CHILD:-}" != "cn" ]]; then
+  if ipsec_child_up cn; then
     printf 'cn: #2, ESTABLISHED\n'
     [[ -z "${DNS_TEST_CN_VIP:-}" ]] ||
       printf '  local 192.0.2.2[4500] [%s]\n' "$DNS_TEST_CN_VIP"
@@ -373,6 +431,9 @@ if [[ "${1:-}" == "--list-sas" ]]; then
 fi
 if [[ "${1:-}" == "--initiate" && "${3:-}" == "${DNS_TEST_IPSEC_FAIL_CHILD:-}" ]]; then
   exit 9
+fi
+if [[ "${1:-}" == "--initiate" && "${DNS_TEST_IPSEC_START_EMPTY:-0}" == "1" ]]; then
+  printf '%s\n' "${3:-}" >>"$DNS_TEST_IPSEC_STARTED"
 fi
 exit 0
 EOF
@@ -389,7 +450,8 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
-if [[ "${DNS_TEST_SCENARIO:-}" != "post_restart_blocking" ]]; then
+if [[ "${DNS_TEST_SCENARIO:-}" != "post_restart_blocking" ||
+      "${1:-}" != "dig" ]]; then
   exec "$@"
 fi
 "$@" &
@@ -492,6 +554,16 @@ run_manager() {
   DNS_TEST_ROUTE_STATE="${DNS_TEST_ROUTE_STATE:-complete}" \
   DNS_TEST_ROUTE_APPLY_FAIL="${DNS_TEST_ROUTE_APPLY_FAIL:-0}" \
   DNS_TEST_IPSEC_FAIL_CHILD="${DNS_TEST_IPSEC_FAIL_CHILD:-}" \
+  DNS_TEST_IPSEC_START_EMPTY="${DNS_TEST_IPSEC_START_EMPTY:-0}" \
+  DNS_TEST_IPSEC_STARTED="$ipsec_started" \
+  DNS_TEST_WAN_ADDRESS="${DNS_TEST_WAN_ADDRESS:-expected}" \
+  DNS_TEST_WAN_ROUTE="${DNS_TEST_WAN_ROUTE:-expected}" \
+  DNS_TEST_UNDERLAY_IFACE="${DNS_TEST_UNDERLAY_IFACE:-eth0}" \
+  DNS_TEST_UNDERLAY_IPV4="${DNS_TEST_UNDERLAY_IPV4:-192.168.8.200}" \
+  DNS_TEST_UNDERLAY_GATEWAY="${DNS_TEST_UNDERLAY_GATEWAY:-192.168.8.253}" \
+  DNS_TEST_VICI_AVAILABLE="${DNS_TEST_VICI_AVAILABLE:-1}" \
+  DNS_TEST_SWAN_LOAD_FAIL="${DNS_TEST_SWAN_LOAD_FAIL:-0}" \
+  DNS_TEST_SWAN_SUCCESS_NOISE="${DNS_TEST_SWAN_SUCCESS_NOISE:-0}" \
   DNS_TEST_AI_VIP="${DNS_TEST_AI_VIP:-}" \
   DNS_TEST_CN_VIP="${DNS_TEST_CN_VIP:-}" \
   DNS_TEST_INACTIVE_UNIT="${DNS_TEST_INACTIVE_UNIT:-}" \
@@ -499,6 +571,7 @@ run_manager() {
   DNS_TEST_MKTEMP_FAIL="${DNS_TEST_MKTEMP_FAIL:-}" \
   DNS_TEST_STATE_WRITE_FAIL="${DNS_TEST_STATE_WRITE_FAIL:-0}" \
   DNS_TEST_NFT_EXISTING="${DNS_TEST_NFT_EXISTING:-0}" \
+  DNS_TEST_NFT_ADD_FAIL="${DNS_TEST_NFT_ADD_FAIL:-0}" \
   DNS_TEST_NFT_BATCH_FAIL_PROFILE="${DNS_TEST_NFT_BATCH_FAIL_PROFILE:-}" \
   DNS_TEST_NFT_RACE_PROFILE="${DNS_TEST_NFT_RACE_PROFILE:-}" \
   DNS_TEST_NFT_RACE_STATE="$nft_race" \
@@ -520,7 +593,7 @@ reset_state() {
   : >"$calls"
   rm -f "$counter" "$second_round" "$restarted" "$restart_epoch" \
     "$restart_monotonic" "$blocking" "$probe_pids" "$nft_race" \
-    "$tar_blocking" "$socket_calls"
+    "$tar_blocking" "$socket_calls" "$ipsec_started"
 }
 
 run_watchdog() {
@@ -674,7 +747,109 @@ if DNS_TEST_IPSEC_FAIL_CHILD=ai \
   fail "failed IPsec child repair was reported as healthy"
 fi
 assert_contains "$calls" 'swanctl --initiate --child ai'
+assert_contains "$calls" 'swanctl --load-all --noprompt'
+assert_call_before 'swanctl --load-all --noprompt' 'swanctl --initiate --child ai'
 assert_not_contains "$calls" 'dig '
+
+reset_state
+DNS_TEST_IPSEC_START_EMPTY=1 DNS_TEST_ROUTE_STATE=missing_all \
+  DNS_TEST_AI_VIP=10.64.0.1 DNS_TEST_CN_VIP=10.64.0.2 \
+  run_manager watchdog
+assert_call_count 'timeout 10 swanctl --load-all --noprompt' 1
+assert_contains "$calls" 'swanctl --initiate --child ai'
+assert_contains "$calls" 'swanctl --initiate --child cn'
+assert_contains "$calls" 'ip route replace default dev ipsec-ai src 10.64.0.1 table 301'
+assert_contains "$calls" 'ip route replace default dev ipsec-cn src 10.64.0.2 table 351'
+assert_call_before 'swanctl --initiate --child ai' \
+  'ip route replace default dev ipsec-ai src 10.64.0.1 table 301'
+
+reset_state
+if DNS_TEST_NFT_ADD_FAIL=1 DNS_TEST_AI_VIP=10.64.0.1 \
+   DNS_TEST_CN_VIP=10.64.0.2 \
+   run_manager routes up >"$tmpdir/routes-nat-failure.log" 2>&1; then
+  fail "policy routes reported success after dynamic SNAT failure"
+fi
+assert_contains "$calls" 'nft add rule inet dnscomplex postrouting'
+
+reset_state
+DNS_TEST_IPSEC_START_EMPTY=1 \
+  DNS_TEST_AI_VIP=10.64.0.1 DNS_TEST_CN_VIP=10.64.0.2 \
+  DNS_TEST_SWAN_SUCCESS_NOISE=1 \
+  run_manager ipsec-ready >"$tmpdir/ipsec-ready-success.log" 2>&1
+assert_contains "$calls" 'ip -4 -o addr show dev eth0 scope global'
+assert_contains "$calls" 'swanctl --stats'
+assert_contains "$calls" 'swanctl --load-all --noprompt'
+assert_contains "$calls" 'swanctl --initiate --child ai'
+assert_contains "$calls" 'swanctl --initiate --child cn'
+assert_call_before 'ip -4 -o addr show dev eth0 scope global' 'swanctl --load-all --noprompt'
+assert_call_before 'swanctl --load-all --noprompt' 'swanctl --initiate --child ai'
+assert_not_contains "$tmpdir/ipsec-ready-success.log" 'simulated optional plugin warning'
+
+reset_state
+if DNS_TEST_WAN_ADDRESS=wrong DNS_TEST_REAL_SLEEP=1 \
+   DNSCOMPLEX_IPSEC_BOOT_TIMEOUT=1 \
+   run_manager ipsec-ready >"$tmpdir/ipsec-underlay-timeout.log" 2>&1; then
+  fail "IPsec readiness accepted the wrong DHCP address"
+fi
+assert_contains "$calls" 'ip -4 -o addr show dev eth0 scope global'
+assert_not_contains "$calls" 'swanctl --load-all --noprompt'
+
+reset_state
+if DNS_TEST_WAN_ROUTE=missing DNS_TEST_REAL_SLEEP=1 \
+   DNSCOMPLEX_IPSEC_BOOT_TIMEOUT=1 \
+   run_manager ipsec-ready >"$tmpdir/ipsec-route-timeout.log" 2>&1; then
+  fail "IPsec readiness accepted a missing RouterOS default route"
+fi
+assert_contains "$calls" 'ip -4 route show default dev eth0'
+assert_not_contains "$calls" 'swanctl --load-all --noprompt'
+
+reset_state
+if DNS_TEST_VICI_AVAILABLE=0 DNS_TEST_REAL_SLEEP=1 \
+   DNSCOMPLEX_IPSEC_BOOT_TIMEOUT=1 \
+   run_manager ipsec-ready >"$tmpdir/ipsec-vici-timeout.log" 2>&1; then
+  fail "IPsec readiness accepted an unavailable VICI daemon"
+fi
+assert_contains "$calls" 'swanctl --stats'
+assert_not_contains "$calls" 'swanctl --load-all --noprompt'
+
+ai_xray_boot_config="$tmpdir/ai-xray-boot.env"
+cp "$config" "$ai_xray_boot_config"
+printf '%s\n' 'AI_EGRESS_MODE=xray' >>"$ai_xray_boot_config"
+reset_state
+DNS_TEST_CONFIG="$ai_xray_boot_config" DNS_TEST_IPSEC_START_EMPTY=1 \
+  DNS_TEST_CN_VIP=10.64.0.2 \
+  run_manager ipsec-ready
+assert_not_contains "$calls" 'swanctl --initiate --child ai'
+assert_contains "$calls" 'swanctl --initiate --child cn'
+
+both_xray_boot_config="$tmpdir/both-xray-boot.env"
+cp "$ai_xray_boot_config" "$both_xray_boot_config"
+printf '%s\n' 'CN_EGRESS_MODE=xray' >>"$both_xray_boot_config"
+reset_state
+DNS_TEST_CONFIG="$both_xray_boot_config" run_manager ipsec-ready
+assert_not_contains "$calls" 'ip -4 -o addr show dev eth0 scope global'
+assert_not_contains "$calls" 'swanctl --load-all --noprompt'
+assert_not_contains "$calls" 'swanctl --initiate --child'
+
+vlan_boot_config="$tmpdir/vlan-boot.env"
+cat >"$vlan_boot_config" <<'EOF'
+DEPLOY_MODE=vlan-gateway
+WAN_IFACE=eth0
+TRANSIT_VLAN_ID=10
+LINUX_TRANSIT_IPV4=10.255.10.2
+ROUTEROS_TRANSIT_IPV4=10.255.10.1
+AI_EGRESS_MODE=ipsec
+CN_EGRESS_MODE=xray
+EOF
+reset_state
+DNS_TEST_CONFIG="$vlan_boot_config" DNS_TEST_IPSEC_START_EMPTY=1 \
+  DNS_TEST_UNDERLAY_IFACE=eth0.10 DNS_TEST_UNDERLAY_IPV4=10.255.10.2 \
+  DNS_TEST_UNDERLAY_GATEWAY=10.255.10.1 DNS_TEST_AI_VIP=10.64.0.1 \
+  run_manager ipsec-ready
+assert_contains "$calls" 'ip -4 -o addr show dev eth0.10 scope global'
+assert_contains "$calls" 'ip -4 route show default dev eth0.10'
+assert_contains "$calls" 'swanctl --initiate --child ai'
+assert_not_contains "$calls" 'swanctl --initiate --child cn'
 
 legacy_root="$tmpdir/legacy-root"
 mkdir -p "$legacy_root/etc/dnscomplex"
@@ -1016,7 +1191,10 @@ for _ in $(seq 1 100); do
   [[ -f "$blocking" ]] && break
   /bin/sleep 0.05
 done
-[[ -f "$blocking" ]] || fail "blocking post-restart probe did not start"
+if [[ ! -f "$blocking" ]]; then
+  cat "$tmpdir/blocked.log" >&2
+  fail "blocking post-restart probe did not start"
+fi
 second_started=$(monotonic_millis)
 DNS_TEST_SCENARIO=healthy run_manager watchdog >"$tmpdir/busy.log" 2>&1 ||
   fail "busy watchdog invocation must coalesce"
