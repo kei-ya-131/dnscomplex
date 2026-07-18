@@ -937,24 +937,63 @@ assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexDe
 
 secret_probe="$tmpdir/secret-probe.txt"
 cat >"$secret_probe" <<'EOF'
-AI_IPSEC_PASSWORD=super-secret-pass
+AI_IPSEC_PASSWORD='alpha beta gamma'
 AI_IPSEC_USERNAME=secret-user
-CN_IPSEC_PASSWORD=cn-super-secret
-AI_XRAY_OUTBOUND_JSON={"password":"json-secret","server":"203.0.113.8"}
+CN_IPSEC_PASSWORD='quote'\''inside value'
+AI_XRAY_OUTBOUND_JSON='{"password":"json secret with spaces","token":"nested token value","server":"203.0.113.8"}'
+CN_XRAY_OUTBOUND_JSON='{
+  "password": "multiline json secret"
+}'
 AI_XRAY_URI=vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls#ai
 GITHUB_TOKEN=redaction-probe-token-value
+{"password":"standalone json secret","token":"standalone token value"}
+password: colon secret with spaces
+Authorization: Bearer bearer-secret-value
 LAN=192.168.88.1 203.0.113.8 fd00:88::1 hostname router.local
 EOF
-redacted_probe=$(bash -c '
+assert_file "$tmpdir/root/usr/local/lib/dnscomplex-redact/redact.py"
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" \
+  '/usr/local/lib/dnscomplex-redact/redact.py'
+assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
+  '/usr/local/lib/dnscomplex-redact/redact.py'
+redacted_probe=$(DNSCOMPLEX_FS_ROOT="$tmpdir/root" bash -c '
   source "$1"
   redact_stream <"$2"
 ' _ "$tmpdir/root/usr/local/sbin/dnscomplex" "$secret_probe")
 case "$redacted_probe" in
-  *super-secret-pass*|*secret-user*|*cn-super-secret*|*json-secret*|*123e4567-e89b-12d3-a456-426614174000*|*redaction-probe-token-value*|*192.168.88.1*|*203.0.113.8*|*fd00:88::1*|*router.local*)
+  *"alpha beta gamma"*|*secret-user*|*"quote'inside value"*|\
+  *"json secret with spaces"*|*"nested token value"*|\
+  *"multiline json secret"*|*"standalone json secret"*|\
+  *"standalone token value"*|*"colon secret with spaces"*|\
+  *bearer-secret-value*|*123e4567-e89b-12d3-a456-426614174000*|\
+  *redaction-probe-token-value*|*192.168.88.1*|*203.0.113.8*|\
+  *fd00:88::1*|*router.local*)
     fail "support redaction leaked sensitive probe: $redacted_probe"
     ;;
 esac
 printf '%s\n' "$redacted_probe" | grep -Fq '[REDACTED' || fail "support redaction did not mark redacted values"
+redacted_probe_twice=$(printf '%s' "$redacted_probe" | \
+  DNSCOMPLEX_FS_ROOT="$tmpdir/root" bash -c '
+  source "$1"
+  redact_stream
+' _ "$tmpdir/root/usr/local/sbin/dnscomplex")
+[[ "$redacted_probe_twice" == "$redacted_probe" ]] ||
+  fail "support redaction is not idempotent"
+literal_secret_config="$tmpdir/redactor-literal-config.env"
+cat >"$literal_secret_config" <<'EOF'
+AI_IPSEC_PASSWORD='decoded secret with spaces'
+CN_IPSEC_PASSWORD='quote'\''inside value'
+EOF
+literal_redacted=$(printf '%s\n' \
+  "upstream echoed decoded secret with spaces" \
+  "peer rejected quote'inside value" |
+  python3 "$tmpdir/root/usr/local/lib/dnscomplex-redact/redact.py" \
+    --config "$literal_secret_config")
+case "$literal_redacted" in
+  *"decoded secret with spaces"*|*"quote'inside value"*)
+    fail "redactor leaked a decoded config secret in another log format"
+    ;;
+esac
 
 policy_tmp=$(mktemp -d)
 cat >"$policy_tmp/config.env" <<'EOF'
