@@ -217,9 +217,26 @@ EOF
 cat >"$fakebin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$DNS_TEST_CALLS"
+unit=${!#:-}
 case "${1:-}" in
+  show)
+    printf 'loaded\n'
+    exit 0
+    ;;
+  is-enabled)
+    if [[ "$unit" == "${DNS_TEST_DISABLED_UNIT:-}" ]]; then
+      [[ " $* " == *" --quiet "* ]] || printf 'disabled\n'
+      exit 1
+    fi
+    [[ " $* " == *" --quiet "* ]] || printf 'enabled\n'
+    exit 0
+    ;;
   is-active)
-    [[ "${3:-}" == "${DNS_TEST_INACTIVE_UNIT:-}" ]] && exit 3
+    if [[ "$unit" == "${DNS_TEST_INACTIVE_UNIT:-}" ]]; then
+      [[ " $* " == *" --quiet "* ]] || printf 'inactive\n'
+      exit 3
+    fi
+    [[ " $* " == *" --quiet "* ]] || printf 'active\n'
     exit 0
     ;;
   restart)
@@ -583,6 +600,7 @@ run_manager() {
   DNS_TEST_AI_VIP="${DNS_TEST_AI_VIP:-}" \
   DNS_TEST_CN_VIP="${DNS_TEST_CN_VIP:-}" \
   DNS_TEST_INACTIVE_UNIT="${DNS_TEST_INACTIVE_UNIT:-}" \
+  DNS_TEST_DISABLED_UNIT="${DNS_TEST_DISABLED_UNIT:-}" \
   DNS_TEST_RESTART_FAIL_UNIT="${DNS_TEST_RESTART_FAIL_UNIT:-}" \
   DNS_TEST_MKTEMP_FAIL="${DNS_TEST_MKTEMP_FAIL:-}" \
   DNS_TEST_STATE_WRITE_FAIL="${DNS_TEST_STATE_WRITE_FAIL:-0}" \
@@ -601,6 +619,7 @@ run_manager() {
   PYTHONPATH="${DNS_TEST_PYTHONPATH:-}" \
   DNS_TEST_REAL_SLEEP="${DNS_TEST_REAL_SLEEP:-0}" \
   DNS_TEST_NOW="${DNS_TEST_NOW:-}" \
+  DNSCOMPLEX_FORCE_SERVICE_STATE="${DNSCOMPLEX_FORCE_SERVICE_STATE:-1}" \
   DNSCOMPLEX_CONFIG="${DNS_TEST_CONFIG:-$config}" \
   "$manager" "$@"
 }
@@ -1051,12 +1070,20 @@ for rel in \
   etc/smartdns \
   etc/AdGuardHome \
   etc/swanctl \
+  etc/strongswan.d/charon \
   etc/nftables.d \
+  etc/systemd/system \
+  usr/local/sbin \
+  usr/local/lib/dnscomplex-web \
   var/lib/dnscomplex; do
   mkdir -p "$fake_root/$rel"
 done
 printf 'fixture\n' >"$fake_root/etc/dnscomplex/config.env"
 printf 'fixture\n' >"$fake_root/etc/nftables.d/dnscomplex.nft"
+printf 'dhcp-plugin-before\n' >"$fake_root/etc/strongswan.d/charon/dhcp.conf"
+printf 'web-unit-before\n' >"$fake_root/etc/systemd/system/dnscomplex-web.service"
+printf 'manager-before\n' >"$fake_root/usr/local/sbin/dnscomplex"
+printf 'web-before\n' >"$fake_root/usr/local/lib/dnscomplex-web/app.py"
 
 live_db="$fake_root/var/lib/dnscomplex/metrics.sqlite3"
 python3 - "$live_db" <<'PY'
@@ -1088,6 +1115,8 @@ writer_pid=$!
 archive="$tmpdir/live-backup.tar.gz"
 extract="$tmpdir/extracted"
 mkdir -p "$extract"
+DNS_TEST_INACTIVE_UNIT=systemd-resolved.service \
+DNS_TEST_DISABLED_UNIT=systemd-resolved.service \
 run_manager backup "$archive"
 kill "$writer_pid" 2>/dev/null || true
 wait "$writer_pid" 2>/dev/null || true
@@ -1095,6 +1124,18 @@ writer_pid=""
 
 tar -tzf "$archive" | grep -Fxq './var/lib/dnscomplex/metrics.sqlite3' ||
   fail "backup archive is missing the SQLite snapshot"
+tar -tzf "$archive" | grep -Fxq './.dnscomplex-backup/format' ||
+  fail "backup archive is missing its format marker"
+tar -tzf "$archive" | grep -Fxq './.dnscomplex-backup/manifest.tsv' ||
+  fail "backup archive is missing its managed-path manifest"
+tar -tzf "$archive" | grep -Fxq './.dnscomplex-backup/service-state.tsv' ||
+  fail "backup archive is missing its service-state snapshot"
+tar -tzf "$archive" | grep -Fxq './etc/strongswan.d/charon/dhcp.conf' ||
+  fail "backup archive is missing a managed strongSwan plugin configuration"
+tar -tzf "$archive" | grep -Fxq './etc/systemd/system/dnscomplex-web.service' ||
+  fail "backup archive is missing a managed systemd unit"
+tar -tzf "$archive" | grep -Fxq './usr/local/sbin/dnscomplex' ||
+  fail "backup archive is missing the management executable"
 if tar -tzf "$archive" | grep -Fxq './'; then
   fail "backup archive contains the filesystem root entry"
 fi
@@ -1113,6 +1154,62 @@ db.close()
 PY
 [[ "$(file_mode "$archive")" == "600" ]] ||
   fail "backup archive mode is not 0600"
+
+grep -Fxq $'present\tetc/strongswan.d/charon/dhcp.conf' \
+  "$extract/.dnscomplex-backup/manifest.tsv" ||
+  fail "backup manifest did not record a present managed path"
+grep -Fxq $'absent\tetc/systemd/network/10-dnscomplex-vlans.netdev' \
+  "$extract/.dnscomplex-backup/manifest.tsv" ||
+  fail "backup manifest did not record an absent managed path"
+grep -Fq $'smartdns.service\tenabled\tactive' \
+  "$extract/.dnscomplex-backup/service-state.tsv" ||
+  fail "backup did not capture an enabled active service"
+grep -Fq $'systemd-resolved.service\tdisabled\tinactive' \
+  "$extract/.dnscomplex-backup/service-state.tsv" ||
+  fail "backup did not capture a disabled inactive service"
+
+printf 'dhcp-plugin-after\n' >"$fake_root/etc/strongswan.d/charon/dhcp.conf"
+mkdir -p "$fake_root/etc/systemd/network"
+printf 'stale-network-file\n' \
+  >"$fake_root/etc/systemd/network/10-dnscomplex-vlans.netdev"
+printf 'must-survive\n' >"$fake_root/etc/unrelated.conf"
+reset_state
+DNS_TEST_INACTIVE_UNIT=systemd-resolved.service \
+DNS_TEST_DISABLED_UNIT=systemd-resolved.service \
+run_manager restore "$archive"
+[[ "$(cat "$fake_root/etc/strongswan.d/charon/dhcp.conf")" == "dhcp-plugin-before" ]] ||
+  fail "restore did not replace a changed managed file"
+[[ ! -e "$fake_root/etc/systemd/network/10-dnscomplex-vlans.netdev" ]] ||
+  fail "restore did not remove a managed file that was absent at backup time"
+[[ "$(cat "$fake_root/etc/unrelated.conf")" == "must-survive" ]] ||
+  fail "restore changed an unrelated file"
+assert_contains "$calls" 'systemctl daemon-reload'
+assert_contains "$calls" 'systemctl enable smartdns.service'
+assert_contains "$calls" 'systemctl restart smartdns.service'
+assert_contains "$calls" 'systemctl disable systemd-resolved.service'
+assert_contains "$calls" 'systemctl stop systemd-resolved.service'
+
+invalid_state_stage="$tmpdir/invalid-service-state-stage"
+invalid_state_archive="$tmpdir/invalid-service-state.tar.gz"
+cp -a "$extract" "$invalid_state_stage"
+{
+  printf 'smartdns.service\tenabled\tactive\n'
+  printf 'unmanaged-dangerous.service\tdisabled\tinactive\n'
+} >"$invalid_state_stage/.dnscomplex-backup/service-state.tsv"
+/usr/bin/tar -czf "$invalid_state_archive" -C "$invalid_state_stage" \
+  ./.dnscomplex-backup \
+  ./etc \
+  ./usr \
+  ./var
+printf 'must-not-change\n' >"$fake_root/etc/strongswan.d/charon/dhcp.conf"
+reset_state
+if run_manager restore "$invalid_state_archive" \
+   >"$tmpdir/invalid-service-state.log" 2>&1; then
+  fail "restore accepted an unmanaged service-state entry"
+fi
+[[ "$(cat "$fake_root/etc/strongswan.d/charon/dhcp.conf")" == "must-not-change" ]] ||
+  fail "restore changed managed files before validating all service-state metadata"
+assert_not_contains "$calls" 'systemctl daemon-reload'
 
 restore_root="$tmpdir/restore-root-mode"
 mkdir -p "$restore_root"
@@ -1148,6 +1245,26 @@ if /usr/bin/tar --help 2>&1 | grep -Fq -- '--no-overwrite-dir'; then
   [[ "$(cat "$legacy_restore_root/etc/dnscomplex/config.env")" == "legacy-fixture" ]] ||
     fail "legacy backup restore did not extract the archived state"
 fi
+
+malicious_archive="$tmpdir/malicious-backup.tar.gz"
+python3 - "$malicious_archive" <<'PY'
+import io
+import tarfile
+import sys
+
+with tarfile.open(sys.argv[1], "w:gz") as archive:
+    payload = b"escaped\n"
+    member = tarfile.TarInfo("../escaped-by-backup")
+    member.size = len(payload)
+    archive.addfile(member, io.BytesIO(payload))
+PY
+rm -f "$tmpdir/escaped-by-backup"
+if run_manager restore "$malicious_archive" \
+   >"$tmpdir/malicious-restore.log" 2>&1; then
+  fail "restore accepted an archive with path traversal"
+fi
+[[ ! -e "$tmpdir/escaped-by-backup" ]] ||
+  fail "restore wrote outside the target root"
 
 first_archive="$tmpdir/first-locked-backup.tar.gz"
 second_archive="$tmpdir/second-locked-backup.tar.gz"
