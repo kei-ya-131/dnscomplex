@@ -21,16 +21,20 @@
   - `vlan-gateway`: transit/LAN VLAN mode
 - Included example config: `examples/routeros-policy.config.env`
 
+Latest release: **v0.3.0**. See [fixes, validation and upgrade notes](docs/releases/v0.3.0.md).
+
 ## Repository Layout
 
 - `install.sh`: main installer and runtime renderer
-- `tests/install_contract_test.sh`: dry-run contract test
+- `tests/`: installer, runtime, configuration, routing and recovery regression tests
+- `tools/`: bounded profile data-plane probe
+- `docs/releases/`: public, deployment-independent release notes
 - `examples/routeros-policy.config.env`: non-interactive example config
 
 ## Quick Start
 
 1. Review and copy the example config.
-2. Replace all placeholder secrets such as `AI_IPSEC_USERNAME`, `AI_IPSEC_PASSWORD`, `CN_IPSEC_USERNAME`, and `CN_IPSEC_PASSWORD`.
+2. Replace the example VPN server names, remote ID, LAN addresses and all placeholder secrets such as `AI_IPSEC_USERNAME`, `AI_IPSEC_PASSWORD`, `CN_IPSEC_USERNAME`, and `CN_IPSEC_PASSWORD`.
 3. New users can generate a starter config with the runtime wizard after installation, or use the example file before installation:
 
 ```bash
@@ -66,7 +70,7 @@ dnscomplex test-xray ai
 dnscomplex refresh-nftsets
 dnscomplex routeros-print
 dnscomplex metrics-sample
-dnscomplex soak --duration 30m --clients 1000 --dns-qps 50 --profiles ai,cn,default
+dnscomplex soak --duration 60 --clients 50 --dns-qps 20 --profiles ai,cn,default
 dnscomplex validate-config /etc/dnscomplex/config.env
 dnscomplex render-config --redacted
 dnscomplex update-software --channel stable
@@ -79,13 +83,33 @@ Default service endpoints:
 - Web UI: `http://<vm-ip>:8088`
 - Metrics and RouterOS health probe: `http://<vm-ip>:9108/metrics`
 - Health probe JSON: `http://<vm-ip>:9108/healthz`
-- SOCKS: `<vm-ip>:1080`
+- SOCKS in `routeros-policy` mode: `<vm-ip>:10800` (the configured LAN address only)
 
 AI/CN Xray mode carries TCP/UDP through local Xray SOCKS inbounds. ICMP for AI/CN nftset destinations is blocked in Xray mode instead of falling back to default routing, so `ping` may fail by design.
 
+## Reliability and Verification
+
+Persistent web changes now run as durable operations. The API returns an operation ID; completion is reported only after validation, application and post-checks. A disconnected browser does not cancel or resubmit the operation. Failed recovery keeps its private backup and blocks conflicting changes.
+
+AI/CN routing remains domain-based. CN defaults cover the configured Chinese video domains, not every Chinese service. AI/CN readiness is checked separately and IPv6 bypass remains closed for those profiles; default traffic may use working IPv4 and IPv6.
+
+Run the main regression suite from a clean checkout:
+
+```bash
+bash -n install.sh
+bash tests/install_contract_test.sh
+python3 tests/web_operation_lifecycle_test.py
+python3 tests/web_operation_contract_test.py
+python3 tests/soak_resource_limits_test.py
+```
+
+The installer contract includes runtime reliability tests. Native namespace/wire tests require Linux, privileges and the binaries/versions described in their source; they are not represented as passing on other hosts. Historical one-off deployment helpers, their version-pinned acceptance tests, private baselines and captures are not distributed; they are not part of the installer or public regression suite.
+
 ## Updates and Support Bundles
 
-`DNSCOMPLEX_UPDATE_CHANNEL` controls runtime updates:
+The daily update timer refreshes domain/geosite/SRS data; it does not promise unattended Debian or proxy-core upgrades. Explicit `update-software` commands are separate.
+
+`DNSCOMPLEX_UPDATE_CHANNEL` controls explicit runtime updates:
 
 - `stable`: use latest non-prerelease GitHub releases.
 - `beta`: allow the newest non-draft GitHub release, including prereleases.
