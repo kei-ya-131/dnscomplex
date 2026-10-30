@@ -11,3 +11,17 @@ __pycache__/
 *.swp
 *.swo
 *.tmp
+
+# Isolated Codex implementation worktrees
+.worktrees/
+
+# Private investigation records and local agent state
+.superpowers/
+/AGENTS.md
+/docs/20*-investigation.md
+/docs/20*-research.md
+/docs/20*-repair.md
+/docs/20*-review.md
+/docs/20*-attribution.md
+/docs/routeros/
+/docs/superpowers/
