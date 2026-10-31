@@ -21,7 +21,7 @@
   - `vlan-gateway`: transit/LAN VLAN mode
 - Included example config: `examples/routeros-policy.config.env`
 
-Latest release: **v0.3.0**. See [fixes, validation and upgrade notes](docs/releases/v0.3.0.md).
+Latest release: **v0.3.1**. See [security fixes, validation and upgrade notes](docs/releases/v0.3.1.md).
 
 ## Repository Layout
 
@@ -81,9 +81,16 @@ dnscomplex support-bundle --include-logs standard
 Default service endpoints:
 
 - Web UI: `http://<vm-ip>:8088`
+- AdGuard Home: reach `127.0.0.1:3000` through the existing SOCKS/VPN management path. AdGuard requires its own login. On a new installation or a legacy installation with no users, username `admin` starts with the current `DNSCOMPLEX_WEB_PASSWORD` (8–72 UTF-8 bytes, as required for initialization). Existing AdGuard accounts and password hashes are preserved on reinstall and runtime updates; their independent passwords do not constrain the web password. Later dnscomplex password changes do not reset AdGuard.
 - Metrics and RouterOS health probe: `http://<vm-ip>:9108/metrics`
 - Health probe JSON: `http://<vm-ip>:9108/healthz`
 - SOCKS in `routeros-policy` mode: `<vm-ip>:10800` (the configured LAN address only)
+
+HTTP management remains available on the trusted LAN and through SOCKS. HTTP credentials and cookies are unencrypted on the LAN hop after the VPN exits; these fixes do not add transport encryption. Keep these listeners off the public Internet.
+
+Metrics HTTP endpoints and the dashboard read a cached sample instead of launching host probes per request. The existing sampler runs 15 seconds after its preceding run finishes; missing, invalid or over-60-second-old snapshots return unavailable. Incomplete collection is marked with `collection_complete` / `dnscomplex_collection_complete`; `/healthz` fails closed for incomplete data. A fresh `degraded` health result retains the existing successful health-probe status.
+
+AdGuard passwords are stored as BCrypt hashes in `/etc/AdGuardHome/AdGuardHome.yaml` (mode `0600`). For an independent password reset, follow [AdGuard's password-reset procedure](https://github.com/AdguardTeam/AdGuardHome/wiki/Configuration#password-reset): stop AdGuard first, replace only the intended user's hash using a local BCrypt tool, and restart. Do not use an online hash generator or paste passwords into command arguments.
 
 AI/CN Xray mode carries TCP/UDP through local Xray SOCKS inbounds. ICMP for AI/CN nftset destinations is blocked in Xray mode instead of falling back to default routing, so `ping` may fail by design.
 
@@ -102,6 +109,8 @@ python3 tests/web_operation_lifecycle_test.py
 python3 tests/web_operation_contract_test.py
 python3 tests/soak_resource_limits_test.py
 ```
+
+Local dry-runs and authentication regression tests require Python 3 with PyYAML and bcrypt; normal Debian installation provisions the distribution packages.
 
 The installer contract includes runtime reliability tests. Native namespace/wire tests require Linux, privileges and the binaries/versions described in their source; they are not represented as passing on other hosts. Historical one-off deployment helpers, their version-pinned acceptance tests, private baselines and captures are not distributed; they are not part of the installer or public regression suite.
 
