@@ -77,6 +77,7 @@ artifacts={
  'usr/local/lib/dnscomplex-web/app.py': 'PY',
  'usr/local/lib/dnscomplex-soak/runner.py': 'PY',
  'usr/local/lib/dnscomplex-config/candidate.py': 'CONFIG_PARSER',
+ 'usr/local/lib/dnscomplex-config/adguard-auth.py': 'ADGUARD_AUTH',
  'usr/local/libexec/dnscomplex-operation': 'OPERATION_HELPER',
  'usr/local/libexec/dnscomplex-restore-recover': 'RECOVERY',
 }
@@ -161,6 +162,9 @@ parser_mode=$(stat -c '%a' "$tmpdir/root/usr/local/lib/dnscomplex-config/candida
 [[ "$parser_mode" == "755" ]] || fail "candidate parser mode is not 0755"
 DNSCOMPLEX_FS_ROOT="$tmpdir/root" bash "$tmpdir/root/usr/local/sbin/dnscomplex" validate-config "$tmpdir/root/etc/dnscomplex/config.env"
 python3 "$repo_root/tests/config_candidate_safety_test.py"
+python3 "$repo_root/tests/adguard_auth_safety_test.py"
+python3 "$repo_root/tests/secret_file_creation_test.py"
+python3 "$repo_root/tests/metrics_resource_boundary_test.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-soak/runner.py"
 assert_file "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml"
@@ -1199,7 +1203,7 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
   '[DNSCOMPLEX, "apply-config", path]'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
-  '[DNSCOMPLEX, "metrics-sample"]'
+  '[sys.executable, "/usr/local/lib/dnscomplex-metrics/exporter.py", "--current"]'
 assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
   'os.replace(tmp, CONFIG)'
 assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
@@ -1372,7 +1376,7 @@ assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-web.service" 'ExecStart=/usr/bin/python3 /usr/local/lib/dnscomplex-web/app.py'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics.service" 'ExecStart=/usr/bin/python3 /usr/local/lib/dnscomplex-metrics/exporter.py'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.service" 'ExecStart=/usr/local/sbin/dnscomplex metrics-sample'
-assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.timer" 'OnUnitActiveSec=60s'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.timer" 'OnUnitInactiveSec=15s'
 assert_contains "$tmpdir/root/etc/systemd/system/xray-dnscomplex.service" 'ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json'
 assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexConntrackHigh'
 assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexAdGuardCacheEnabled'
@@ -1616,7 +1620,7 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'monotonic_millis) + 14
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'restart_watchdog_unit_if_inactive "$unit" || return 1'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'could not allocate SmartDNS probe state'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'trap cleanup_restart_epoch_temp EXIT HUP INT TERM'
-assert_contains "$repo_root/install.sh" 'cron dnsutils python3 coreutils util-linux'
+assert_contains "$repo_root/install.sh" 'cron dnsutils python3 python3-bcrypt python3-yaml coreutils util-linux'
 health_body=$(awk '
   /^health_cmd\(\) \{/ { inside=1 }
   inside { print }
