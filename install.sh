@@ -2,7 +2,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-DNSCOMPLEX_VERSION="0.3.0"
+DNSCOMPLEX_VERSION="0.3.1"
 DNSCOMPLEX_ROOT="${DNSCOMPLEX_ROOT:-}"
 CONFIG_PATH=""
 DRY_RUN=0
@@ -454,6 +454,35 @@ require_debian13() {
   [[ "${ID:-}" == "debian" && "${VERSION_ID:-}" == "13" ]] || die "this installer supports Debian 13 only; detected ${PRETTY_NAME:-unknown}"
 }
 
+validate_adguard_bootstrap_password() (
+  # BCrypt's limit is bytes, not shell characters. Existing AdGuard accounts
+  # have independent passwords and must not constrain the web password.
+  local LC_ALL=C existing work
+  local length=${#DNSCOMPLEX_WEB_PASSWORD}
+  ((length >= 8 && length <= 72)) && return 0
+  existing=$(target_path /etc/AdGuardHome/AdGuardHome.yaml) || exit 1
+  [[ -f "$existing" && ! -L "$existing" ]] ||
+    die "initial AdGuard password requires 8 to 72 UTF-8 bytes; no managed files were written"
+  if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+    [[ "$DRY_RUN" != "1" ]] ||
+      die "python3-yaml is required to validate existing AdGuard users during dry-run; no managed files were written"
+    require_debian13
+    require_root
+    export DEBIAN_FRONTEND=noninteractive
+    # Only the parser is needed before the write-free auth preflight. Install
+    # other packages and managed binaries through the normal installer later.
+    apt-get update || die "cannot prepare AdGuard validation dependency"
+    apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+      install -y python3-yaml || die "cannot install AdGuard validation dependency"
+  fi
+  work=$(mktemp -d) || exit 1
+  trap "rm -rf -- $(printf '%q' "$work")" EXIT
+  DNSCOMPLEX_ROOT="$work" render_adguard_auth || exit 1
+  printf '%s' "$DNSCOMPLEX_WEB_PASSWORD" | python3 \
+    "$work/usr/local/lib/dnscomplex-config/adguard-auth.py" --existing "$existing" --check ||
+    die "AdGuard bootstrap requires 8 to 72 UTF-8 bytes, or valid existing users; no managed files were written"
+)
+
 require_root() {
   [[ "$DRY_RUN" == "1" ]] && return 0
   [[ "$(id -u)" == "0" ]] || die "run as root"
@@ -538,6 +567,19 @@ write_file() {
   mkdir -p "$(dirname "$target")"
   cat >"$target"
 }
+
+write_private_file() (
+  local target temporary
+  target=$(target_path "$1") || exit 1
+  mkdir -p "$(dirname "$target")" || exit 1
+  umask 077
+  temporary=$(mktemp "${target}.XXXXXX") || exit 1
+  # Capture before Bash unwinds function-local variables on subshell exit.
+  trap "rm -f -- $(printf '%q' "$temporary")" EXIT
+  cat >"$temporary" || exit 1
+  chmod 0600 "$temporary" || exit 1
+  mv -f -- "$temporary" "$target" || exit 1
+)
 
 write_file_atomic() (
   local target temp
@@ -794,7 +836,7 @@ smartdns_static_address_line() {
 }
 
 save_runtime_config() {
-  write_file /etc/dnscomplex/config.env <<EOF
+  write_private_file /etc/dnscomplex/config.env <<EOF || return $?
 DNSCOMPLEX_VERSION='$DNSCOMPLEX_VERSION'
 DEPLOY_MODE='$DEPLOY_MODE'
 WAN_IFACE='$WAN_IFACE'
@@ -908,7 +950,7 @@ install_packages() {
     install -y \
     ca-certificates curl jq tar unzip iproute2 nftables conntrack dnsmasq radvd kmod \
     strongswan-swanctl strongswan-charon libcharon-extra-plugins libstrongswan-extra-plugins \
-    cron dnsutils python3 coreutils util-linux
+    cron dnsutils python3 python3-bcrypt python3-yaml coreutils util-linux
   if [[ "$PROMETHEUS_MODE" == "local" ]]; then
     apt-get \
       -o Dpkg::Options::=--force-confdef \
@@ -1017,6 +1059,7 @@ import json
 import os
 import shlex
 import sys
+import tempfile
 import urllib.parse
 
 
@@ -1306,11 +1349,17 @@ def main():
         sys.stdout.write(text)
     else:
         os.makedirs(os.path.dirname(args.output), exist_ok=True)
-        tmp = args.output + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, args.output)
+        fd, tmp = tempfile.mkstemp(prefix='.xray.', dir=os.path.dirname(args.output))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                os.fchmod(fh.fileno(), 0o600)
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, args.output)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
 
 if __name__ == "__main__":
@@ -1819,9 +1868,151 @@ EOF
   esac
 }
 
-render_adguard() {
-  local allow_rules
-  allow_rules=$(mktemp)
+render_adguard_auth() {
+  write_file /usr/local/lib/dnscomplex-config/adguard-auth.py <<'ADGUARD_AUTH'
+#!/usr/bin/env python3
+"""Keep AdGuard's native users across all dnscomplex configuration renders."""
+import argparse
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tempfile
+
+import yaml
+
+
+class AuthError(ValueError):
+    pass
+
+
+class UniqueLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        keys = [self.construct_object(key, deep=deep) for key, _ in node.value]
+        if len(keys) != len(set(keys)):
+            raise AuthError('duplicate configuration key')
+        return super().construct_mapping(node, deep=deep)
+
+
+def read_config(path, optional=False):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        if optional:
+            return '', {}, None
+        raise
+    with os.fdopen(fd, 'r', encoding='utf-8') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 16 * 1024 * 1024:
+            raise AuthError('unsafe configuration file')
+        text = stream.read(16 * 1024 * 1024 + 1)
+        if len(text) > 16 * 1024 * 1024:
+            raise AuthError('configuration too large')
+    data = yaml.load(text, Loader=UniqueLoader)
+    if not isinstance(data, dict):
+        raise AuthError('configuration must be an object')
+    node = yaml.compose(text, Loader=yaml.SafeLoader)
+    return text, data, node
+
+
+def users_from(data):
+    users = data.get('users', [])
+    if not isinstance(users, list):
+        raise AuthError('users must be a list')
+    names = set()
+    for user in users:
+        if not isinstance(user, dict) or set(user) != {'name', 'password'}:
+            raise AuthError('invalid user entry')
+        name, password = user['name'], user['password']
+        if not isinstance(name, str) or not name.strip() or name in names:
+            raise AuthError('invalid or duplicate user name')
+        if not isinstance(password, str) or not re.fullmatch(r'\$2[aby]\$(?:0[4-9]|[12][0-9]|3[01])\$[./A-Za-z0-9]{53}', password):
+            raise AuthError('user password must be a BCrypt hash')
+        names.add(name)
+    return users
+
+
+def initial_password():
+    password = sys.stdin.buffer.read(73)
+    if not 8 <= len(password) <= 72 or b'\0' in password:
+        raise AuthError('initial password must contain 8 to 72 UTF-8 bytes without NUL')
+    return password
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--candidate')
+    parser.add_argument('--existing', required=True)
+    parser.add_argument('--output')
+    parser.add_argument('--check', action='store_true')
+    args = parser.parse_args()
+    temporary = None
+    try:
+        _, existing, _ = read_config(args.existing, optional=True)
+        existing_users = users_from(existing)
+        if args.check:
+            if not existing_users:
+                initial_password()
+            return 0
+        if not args.candidate or not args.output:
+            raise AuthError('candidate and output required')
+        text, candidate, node = read_config(args.candidate)
+        # Validate both representations before choosing; never reset invalid auth.
+        candidate_users = users_from(candidate)
+        users = existing_users or candidate_users
+        if not users:
+            import bcrypt
+            password = initial_password()
+            users = [{'name': 'admin', 'password': bcrypt.hashpw(password, bcrypt.gensalt(rounds=10)).decode()}]
+        block = yaml.safe_dump({'users': users}, sort_keys=False, allow_unicode=True)
+        # Only replace the users field, retaining other renderer-owned formatting.
+        field = next(((key, value) for key, value in node.value if key.value == 'users'), None)
+        if field:
+            key, value = field
+            end = value.end_mark.index
+            while end < len(text) and text[end] in ' \t':
+                end += 1
+            if end < len(text) and text[end] == '\n':
+                end += 1
+            text = text[:key.start_mark.index] + block + text[end:]
+        else:
+            text = text.rstrip() + '\n' + block
+        final = yaml.load(text, Loader=UniqueLoader)
+        if users_from(final) != users:
+            raise AuthError('user publication mismatch')
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix='.adguard-auth.', dir=output.parent)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+        temporary = None
+        return 0
+    except (AuthError, OSError, ValueError, TypeError, yaml.YAMLError):
+        print('AdGuard authentication configuration invalid; existing configuration was not replaced', file=sys.stderr)
+        return 1
+    finally:
+        if temporary:
+            os.unlink(temporary)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
+ADGUARD_AUTH
+  chmod_target 0755 /usr/local/lib/dnscomplex-config/adguard-auth.py
+}
+
+render_adguard() (
+  local allow_rules candidate auth target
+  candidate=$(mktemp) || exit 1
+  allow_rules=$(mktemp) || { rm -f "$candidate"; exit 1; }
+  trap 'rm -f -- "$candidate" "$allow_rules"' EXIT
+  auth=$(target_path /usr/local/lib/dnscomplex-config/adguard-auth.py)
+  target=$(target_path /etc/AdGuardHome/AdGuardHome.yaml)
   write_adguard_allow_rules >"$allow_rules"
   {
     cat <<EOF
@@ -1903,9 +2094,10 @@ log:
   compress: false
 schema_version: 34
 EOF
-  } | write_file /etc/AdGuardHome/AdGuardHome.yaml
-  rm -f "$allow_rules"
-}
+  } >"$candidate" || exit 1
+  printf '%s' "$DNSCOMPLEX_WEB_PASSWORD" | python3 "$auth" \
+    --candidate "$candidate" --existing "$target" --output "$target"
+)
 
 render_adguard_service() {
   write_file /etc/systemd/system/AdGuardHome.service <<'EOF'
@@ -1934,7 +2126,7 @@ render_swanctl() {
   if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
     local_ip="$LINUX_LAN_IPV4"
   fi
-  write_file /etc/swanctl/swanctl.conf <<EOF
+  write_private_file /etc/swanctl/swanctl.conf <<EOF || return $?
 connections {
   ai {
     version = 2
@@ -6230,13 +6422,14 @@ EOF
 }
 
 render_adguard_runtime() {
-  local tmp rules allow_rules merged normalized adguard_config
+  local tmp rules allow_rules merged normalized cache_normalized adguard_config
   adguard_config=$(fs_path /etc/AdGuardHome/AdGuardHome.yaml)
   tmp=$(mktemp)
   rules=$(mktemp)
   allow_rules=$(mktemp)
   merged=$(mktemp)
   normalized=$(mktemp)
+  cache_normalized=$(mktemp)
   write_adguard_upstream_rules >"$rules"
   write_adguard_allow_rules >"$allow_rules"
 
@@ -6347,11 +6540,15 @@ EOF
 
   normalize_adguard_http_config "$tmp" "$normalized"
   mv "$normalized" "$tmp"
-  normalize_adguard_cache_config "$tmp" "$tmp.cache"
-  mv "$tmp.cache" "$tmp"
+  normalize_adguard_cache_config "$tmp" "$cache_normalized"
+  mv "$cache_normalized" "$tmp"
   merge_adguard_user_rules "$tmp" "$merged" "$allow_rules"
-  install -m 0644 "$merged" "$adguard_config"
-  rm -f "$tmp" "$rules" "$allow_rules" "$merged" "$normalized"
+  local auth auth_rc=0
+  auth=$(fs_path /usr/local/lib/dnscomplex-config/adguard-auth.py)
+  printf '%s' "$DNSCOMPLEX_WEB_PASSWORD" | python3 "$auth" \
+    --candidate "$merged" --existing "$adguard_config" --output "$adguard_config" || auth_rc=$?
+  rm -f "$tmp" "$rules" "$allow_rules" "$merged" "$normalized" "$cache_normalized"
+  return "$auth_rc"
 }
 
 apply_runtime_network_settings() {
@@ -6537,7 +6734,7 @@ write_env_var() {
 }
 
 write_config_values() {
-	    write_env_var DNSCOMPLEX_VERSION "${DNSCOMPLEX_VERSION:-0.3.0}" || return $?
+	    write_env_var DNSCOMPLEX_VERSION "${DNSCOMPLEX_VERSION:-0.3.1}" || return $?
     write_env_var DEPLOY_MODE "${DEPLOY_MODE:-vlan-gateway}" || return $?
 	    write_env_var WAN_IFACE "$WAN_IFACE" || return $?
     write_env_var TRANSIT_VLAN_ID "${TRANSIT_VLAN_ID:-}" || return $?
@@ -7236,7 +7433,7 @@ geosite_update_transaction() (
   mkdir -p "$stage_root"
   trap 'rm -rf -- "$stage_dir"' EXIT
 
-  for copy_rel in etc/dnscomplex etc/AdGuardHome etc/sing-box etc/smartdns var/lib/dnscomplex/geosite; do
+  for copy_rel in etc/dnscomplex etc/AdGuardHome etc/sing-box etc/smartdns var/lib/dnscomplex/geosite usr/local/lib/dnscomplex-config; do
     if [[ -e "$live_root/$copy_rel" || -L "$live_root/$copy_rel" ]]; then
       mkdir -p "$(dirname "$stage_root/$copy_rel")"
       cp -a -- "$live_root/$copy_rel" "$stage_root/$copy_rel"
@@ -16151,18 +16348,27 @@ PY
 render_metrics_exporter() {
   write_file /usr/local/lib/dnscomplex-metrics/exporter.py <<'PY'
 #!/usr/bin/env python3
+import fcntl
 import json
 import os
 import re
+import selectors
+import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONFIG = "/etc/dnscomplex/config.env"
 DB = "/var/lib/dnscomplex/metrics.sqlite3"
 DNSCOMPLEX = os.environ.get("DNSCOMPLEX_MANAGER", "/usr/local/sbin/dnscomplex")
+SNAPSHOT = os.environ.get("DNSCOMPLEX_METRICS_SNAPSHOT", "/run/dnscomplex/metrics-snapshot.json")
+SAMPLE_LOCK = os.environ.get("DNSCOMPLEX_METRICS_SAMPLE_LOCK", "/run/dnscomplex/metrics-sample.lock")
+COLLECTION_DEADLINE = 0.0
+COLLECTION_COMPLETE = True
 
 SERVICES = ["sing-box.service", "smartdns.service", "AdGuardHome.service", "nftables.service", "dnscomplex-web.service"]
 
@@ -16180,10 +16386,46 @@ def parse_config():
     return data
 
 def run(args, timeout=5):
+    global COLLECTION_COMPLETE
+    deadline = time.monotonic() + timeout
+    if COLLECTION_DEADLINE:
+        deadline = min(deadline, COLLECTION_DEADLINE)
+    output = bytearray()
+    process = None
     try:
-        return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
+        if time.monotonic() >= deadline:
+            raise TimeoutError('collection deadline')
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        with selectors.DefaultSelector() as selector:
+            os.set_blocking(process.stdout.fileno(), False)
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('command deadline')
+                if not selector.select(remaining):
+                    raise TimeoutError('command deadline')
+                block = os.read(process.stdout.fileno(), min(65536, 8 * 1024 * 1024 + 1 - len(output)))
+                if not block:
+                    break
+                output.extend(block)
+                if len(output) > 8 * 1024 * 1024:
+                    raise ValueError('command output limit')
+            result = process.wait(timeout=max(.001, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(args, result, output.decode('utf-8', errors='replace'))
     except Exception:
+        COLLECTION_COMPLETE = False
+        # Discard partial output instead of presenting a truncated count as exact.
         return subprocess.CompletedProcess(args, 1, "")
+    finally:
+        if process is not None:
+            # Descendants may still own stdout after the direct child exits.
+            import signal
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+            if process.poll() is None:
+                process.wait(timeout=2)
+            process.stdout.close()
 
 def service_up(name):
     return 1 if run(["systemctl", "is-active", "--quiet", name], 3).returncode == 0 else 0
@@ -16274,6 +16516,9 @@ def health_status_value(snapshot=None):
 
 def active_connection_metrics():
     proc = run(["conntrack", "-L"], 10)
+    if proc.returncode != 0:
+        global COLLECTION_COMPLETE
+        COLLECTION_COMPLETE = False
     profile_counts = {"ai": 0, "cn": 0, "default": 0}
     ipv4 = ipv6 = 0
     for line in proc.stdout.splitlines():
@@ -16303,6 +16548,15 @@ def service_restart_count(name):
         return 0
 
 def collect():
+    global COLLECTION_DEADLINE, COLLECTION_COMPLETE
+    COLLECTION_DEADLINE = time.monotonic() + 30
+    COLLECTION_COMPLETE = True
+    try:
+        return collect_values()
+    finally:
+        COLLECTION_DEADLINE = 0.0
+
+def collect_values():
     cfg = parse_config()
     health = health_snapshot()
     count = read_int("/proc/sys/net/netfilter/nf_conntrack_count")
@@ -16332,6 +16586,8 @@ def collect():
     for service in SERVICES:
         data["service_" + service.replace(".", "_").replace("-", "_")] = service_up(service)
         data["service_restarts_" + service.replace(".", "_").replace("-", "_")] = service_restart_count(service)
+    data['collection_complete'] = COLLECTION_COMPLETE
+    data['_health'] = health
     return data
 
 def ensure_db():
@@ -16364,7 +16620,7 @@ def ensure_db():
             if name not in existing and name != "ts":
                 con.execute(f"alter table samples add column {name} {kind}")
 
-def sample():
+def sample_values():
     ensure_db()
     data = collect()
     data["schema_version"] = 2
@@ -16381,10 +16637,60 @@ def sample():
             tuple(data.get(column, 0) for column in columns),
         )
         con.execute("delete from samples where ts < ?", (data["ts"] - 7 * 86400,))
+    publish_snapshot(data)
+    return {key: value for key, value in data.items() if key != '_health'}
+
+def sample():
+    os.makedirs(os.path.dirname(SAMPLE_LOCK), exist_ok=True)
+    fd = os.open(SAMPLE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {key: value for key, value in read_snapshot().items() if key != '_health'}
+        return sample_values()
+    finally:
+        os.close(fd)
+
+def publish_snapshot(data):
+    raw = json.dumps(data, ensure_ascii=False, allow_nan=False).encode('utf-8')
+    if len(raw) > 1024 * 1024:
+        raise ValueError('metrics snapshot too large')
+    parent = os.path.dirname(SNAPSHOT)
+    os.makedirs(parent, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix='.metrics.', dir=parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(path, SNAPSHOT)
+    finally:
+        if os.path.exists(path): os.unlink(path)
+
+def read_snapshot():
+    fd = os.open(SNAPSHOT, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        import stat
+        info = os.fstat(stream.fileno())
+        age = time.time() - info.st_mtime
+        if not stat.S_ISREG(info.st_mode) or not 0 <= age <= 60:
+            raise ValueError('missing or stale metrics snapshot')
+        raw = stream.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ValueError('metrics snapshot too large')
+    data = json.loads(raw)
+    if (not isinstance(data, dict) or not isinstance(data.get('_health'), dict) or
+            data['_health'].get('status') not in ('healthy', 'degraded', 'unhealthy') or
+            not isinstance(data.get('ts'), (int, float)) or not 0 <= time.time() - data['ts'] <= 60 or
+            not isinstance(data.get('collection_complete'), bool)):
+        raise ValueError('invalid metrics snapshot')
     return data
 
 def prometheus_text():
-    data = collect()
+    data = read_snapshot()
     lines = [
         "# HELP dnscomplex_conntrack_usage_ratio Conntrack usage ratio.",
         "# TYPE dnscomplex_conntrack_usage_ratio gauge",
@@ -16415,13 +16721,69 @@ def prometheus_text():
     for service in SERVICES:
         key = "service_" + service.replace(".", "_").replace("-", "_")
         lines.append(f"dnscomplex_service_up{{service=\"{service}\"}} {data[key]}")
+    lines.append(f"dnscomplex_collection_complete {int(data['collection_complete'])}")
     return "\n".join(lines) + "\n"
 
 def health_ok():
-    proc = run([DNSCOMPLEX, "health", "--json"], 12)
-    return proc.returncode == 0, proc.stdout or "{}"
+    data = read_snapshot()
+    health = data['_health']
+    return data['collection_complete'] and health['status'] != 'unhealthy', json.dumps(health)
+
+class RequestReader:
+    def __init__(self, connection, timeout):
+        self.connection = connection
+        self.deadline = time.monotonic() + timeout
+        self.buffer = bytearray()
+    def readline(self, size=65537):
+        size = min(size if size >= 0 else 65537, 65537)
+        while True:
+            end = self.buffer.find(b'\n') + 1
+            if end or len(self.buffer) >= size:
+                end = min(end or size, size)
+                result = bytes(self.buffer[:end]); del self.buffer[:end]
+                return result
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0: raise socket.timeout('request input deadline')
+            self.connection.settimeout(remaining)
+            block = self.connection.recv(min(8192, size - len(self.buffer)))
+            if not block:
+                result = bytes(self.buffer); self.buffer.clear(); return result
+            self.buffer.extend(block)
+    def close(self):
+        self.buffer.clear()
+
+class BoundedHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    max_requests = 16
+    request_queue_size = 32
+    def __init__(self, *args, **kwargs):
+        self.slots = threading.BoundedSemaphore(self.max_requests)
+        super().__init__(*args, **kwargs)
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.settimeout(.1)
+                request.sendall(b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+            except OSError: pass
+            finally: self.shutdown_request(request)
+            return
+        try: super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release(); raise
+    def process_request_thread(self, request, client_address):
+        try: super().process_request_thread(request, client_address)
+        finally: self.slots.release()
 
 class Handler(BaseHTTPRequestHandler):
+    input_timeout = 15
+    def setup(self):
+        super().setup()
+        self.rfile.close()
+        self.rfile = RequestReader(self.connection, self.input_timeout)
+    def parse_request(self):
+        result = super().parse_request()
+        self.connection.settimeout(5)
+        return result
     def log_message(self, fmt, *args):
         return
 
@@ -16434,6 +16796,19 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
+        if self.path not in ('/metrics', '/healthz', '/current'):
+            self.send(404, 'not found\n', 'text/plain; charset=utf-8')
+            return
+        try:
+            self.serve_snapshot()
+        except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            return
+        except (OSError, ValueError, KeyError, TypeError):
+            try:
+                self.send(503, '{"status":"unhealthy","error":"metrics snapshot unavailable"}', 'application/json; charset=utf-8')
+            except OSError: pass
+
+    def serve_snapshot(self):
         if self.path == "/metrics":
             self.send(200, prometheus_text(), "text/plain; version=0.0.4; charset=utf-8")
             return
@@ -16442,7 +16817,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200 if ok else 503, body, "application/json; charset=utf-8")
             return
         if self.path == "/current":
-            self.send(200, json.dumps(collect()), "application/json; charset=utf-8")
+            data = read_snapshot()
+            self.send(200, json.dumps({key: value for key, value in data.items() if key != '_health'}), "application/json; charset=utf-8")
             return
         self.send(404, "not found\n", "text/plain; charset=utf-8")
 
@@ -16450,10 +16826,17 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--sample":
         print(json.dumps(sample(), ensure_ascii=False))
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "--current":
+        try:
+            print(json.dumps({key: value for key, value in read_snapshot().items() if key != '_health'}))
+        except (OSError, ValueError, TypeError):
+            print('{"error":"metrics snapshot unavailable"}')
+            raise SystemExit(1)
+        return
     cfg = parse_config()
     listen = cfg.get("DNSCOMPLEX_METRICS_LISTEN", "0.0.0.0")
     port = int(cfg.get("DNSCOMPLEX_METRICS_PORT", "9108"))
-    ThreadingHTTPServer((listen, port), Handler).serve_forever()
+    BoundedHTTPServer((listen, port), Handler).serve_forever()
 
 if __name__ == "__main__":
     main()
@@ -16485,6 +16868,7 @@ After=network-online.target dnscomplex-metrics.service
 [Service]
 Type=oneshot
 Environment=DNSCOMPLEX_TIMER_MODE=1
+TimeoutStartSec=45s
 ExecStart=/usr/local/sbin/dnscomplex metrics-sample
 EOF
 
@@ -16493,9 +16877,9 @@ EOF
 Description=Sample dnscomplex metrics for management trends
 
 [Timer]
-OnBootSec=60s
-OnUnitActiveSec=60s
-AccuracySec=10s
+OnBootSec=1s
+OnUnitInactiveSec=15s
+AccuracySec=1s
 Persistent=true
 Unit=dnscomplex-metrics-sample.service
 
@@ -18417,7 +18801,7 @@ def active_connections():
     return rows[:300]
 
 def metrics_current():
-    out = shell_output([DNSCOMPLEX, "metrics-sample"], 30)
+    out = shell_output([sys.executable, "/usr/local/lib/dnscomplex-metrics/exporter.py", "--current"], 3)
     try:
         return json.loads(out)
     except json.JSONDecodeError:
@@ -19084,6 +19468,7 @@ validate_rendered_install() {
   local -a python_files=(
     /usr/local/libexec/dnscomplex-operation
     /usr/local/lib/dnscomplex-config/candidate.py
+    /usr/local/lib/dnscomplex-config/adguard-auth.py
     /usr/local/lib/dnscomplex-metrics/exporter.py
     /usr/local/lib/dnscomplex-redact/redact.py
     /usr/local/lib/dnscomplex-soak/runner.py
@@ -19192,6 +19577,7 @@ render_all() {
   render_geosite_seeds
   render_local_hosts
   render_smartdns
+  render_adguard_auth
   render_adguard
   render_adguard_service
   render_swanctl
@@ -19224,6 +19610,7 @@ main() {
   require_debian13
   require_root
   acquire_installer_maintenance_lock
+  validate_adguard_bootstrap_password
   close_existing_lan_alias_before_render
   install_packages
   render_all
