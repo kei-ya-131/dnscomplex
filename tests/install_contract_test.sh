@@ -162,7 +162,7 @@ parser_mode=$(stat -c '%a' "$tmpdir/root/usr/local/lib/dnscomplex-config/candida
 [[ "$parser_mode" == "755" ]] || fail "candidate parser mode is not 0755"
 DNSCOMPLEX_FS_ROOT="$tmpdir/root" bash "$tmpdir/root/usr/local/sbin/dnscomplex" validate-config "$tmpdir/root/etc/dnscomplex/config.env"
 python3 "$repo_root/tests/config_candidate_safety_test.py"
-python3 "$repo_root/tests/adguard_auth_safety_test.py"
+python3 "$repo_root/tests/adguard_auth_safety_test.py" --portable
 python3 "$repo_root/tests/secret_file_creation_test.py"
 python3 "$repo_root/tests/metrics_resource_boundary_test.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py"
@@ -670,7 +670,8 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '--include-logs minimal
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'adguard_cache_diagnostics'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'trace_domain_cmd'
 # shellcheck disable=SC2016
-assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'source="nftset:${hit,,}4"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'actual_outbound=unknown'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'IP membership does not reassign domain policy'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'status_cmd "$@" ;;'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'status [--verbose]'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set_socks_cmd'
