@@ -165,6 +165,7 @@ python3 "$repo_root/tests/config_candidate_safety_test.py"
 python3 "$repo_root/tests/adguard_auth_safety_test.py" --portable
 python3 "$repo_root/tests/secret_file_creation_test.py"
 python3 "$repo_root/tests/metrics_resource_boundary_test.py"
+python3 "$repo_root/tests/boot_lifecycle_test.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-soak/runner.py"
 assert_file "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml"
