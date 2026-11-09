@@ -1,0 +1,69 @@
+name: Debian 13 regression
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      native:
+        description: Run private namespace wire tests on a disposable hosted runner
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: validation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container: debian:13-slim
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install test tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git bash python3 python3-bcrypt python3-yaml jq nodejs curl xz-utils unzip zip procps util-linux coreutils findutils diffutils grep sed gawk openssl
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run existing regression suites
+        run: python3 tools/validate.py --suite core --output output/ci-core
+      - name: Preserve test evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: debian13-core-${{ github.run_attempt }}
+          path: output/ci-core/
+          if-no-files-found: error
+          retention-days: 7
+  native:
+    if: github.event_name == 'workflow_dispatch' && inputs.native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container:
+      image: debian:13-slim
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install native test tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git bash python3 python3-bcrypt python3-yaml jq nodejs iproute2 nftables openssl util-linux coreutils
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run isolated native tests
+        run: python3 tools/validate.py --suite native --output output/ci-native
+      - name: Preserve native evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: debian13-native-${{ github.run_attempt }}
+          path: output/ci-native/
+          if-no-files-found: error
+          retention-days: 7

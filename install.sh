@@ -9971,42 +9971,251 @@ probe_egress_cmd() {
 
 trace_domain_cmd() {
   [[ $# -eq 1 ]] || die "usage: dnscomplex trace-domain DOMAIN"
-  local domain=$1 profile=default source=default ips_v4 ips_v6 ip hit outbound=default
-  if grep -Rhs -F "$domain" "$GEO_DIR"/ai.sources "$GEO_DIR"/ai.custom "$GEO_DIR"/ai-support.sources /etc/dnscomplex/ai.domains 2>/dev/null | grep -Fxq "$domain"; then
-    profile=AI
-    source=ai-domain-list
-  elif grep -Rhs -F "$domain" "$GEO_DIR"/cn-video.sources "$GEO_DIR"/cn-video.custom /etc/dnscomplex/cn-video.domains 2>/dev/null | grep -Fxq "$domain"; then
-    profile=CN
-    source=cn-domain-list
-  fi
-  command -v dig >/dev/null 2>&1 || die "install dnsutils for dig"
-  ips_v4=$(dig +time=3 +tries=1 +short A "$domain" @127.0.0.1 -p 53 2>/dev/null | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || true)
-  ips_v6=$(dig +time=3 +tries=1 +short AAAA "$domain" @127.0.0.1 -p 53 2>/dev/null | grep ':' || true)
-  printf 'domain=%s\n' "$domain"
-  printf 'A=%s\n' "${ips_v4:-none}"
-  printf 'AAAA=%s\n' "${ips_v6:-none}"
-  while IFS= read -r ip; do
-    [[ -n "$ip" ]] || continue
-    hit=default
-    nft get element inet dnscomplex ai4 "{ $ip }" >/dev/null 2>&1 && hit=AI
-    nft get element inet dnscomplex cn4 "{ $ip }" >/dev/null 2>&1 && hit=CN
-    if [[ "$hit" == "AI" || "$hit" == "CN" ]]; then
-      profile=$hit
-      source="nftset:${hit,,}4"
-    fi
-    printf 'nftset[%s]=%s\n' "$ip" "$hit"
-  done <<<"$ips_v4"
-  printf 'profile=%s\nprofile_source=%s\n' "$profile" "$source"
-  case "$profile" in
-    AI) outbound=$(profile_outbound_tag ai) ;;
-    CN) outbound=$(profile_outbound_tag cn) ;;
-    *) outbound=default ;;
-  esac
-  printf 'expected_outbound=%s\n' "$outbound"
-  if [[ "$profile" =~ ^(AI|CN)$ && -n "$ips_v6" ]]; then
-    printf 'warning=%s\n' "$profile domain returned AAAA; AI/CN should remain IPv4-only"
-    return 1
-  fi
+  python3 - "$1" "$(fs_path /etc/sing-box/config.json)" "$FS_ROOT" <<'TRACE_DOMAIN'
+import ipaddress
+import json
+from pathlib import Path
+import re
+import resource
+import subprocess
+import sys
+import tempfile
+import time
+
+domain, config_path, root = sys.argv[1:]
+domain = (domain[:-1] if domain.endswith('.') else domain).lower()
+if (not domain or len(domain) > 253 or not all(
+        re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label)
+        for label in domain.split('.'))):
+    raise SystemExit('invalid domain name')
+try:
+    ipaddress.ip_address(domain)
+except ValueError:
+    pass
+else:
+    raise SystemExit('trace-domain requires a domain, not an IP address')
+
+deadline = time.monotonic() + 20
+limit = 8 * 1024 * 1024
+warnings = []
+
+def read_json(path):
+    with Path(path).open('rb') as stream:
+        data = stream.read(limit+1)
+    if len(data) > limit:
+        raise ValueError('diagnostic input exceeds bound')
+    return json.loads(data)
+
+def run(argv, cap=2):
+    remaining = deadline-time.monotonic()
+    if remaining <= 0:
+        return None
+    with tempfile.TemporaryFile() as output:
+        try:
+            def bound_files():
+                resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+            result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=output,
+                                    stderr=subprocess.DEVNULL, timeout=min(cap, remaining),
+                                    preexec_fn=bound_files)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode or output.tell() > limit:
+            return None
+        output.seek(0)
+        return output.read(limit).decode(errors='replace')
+
+def combine(values, mode):
+    if mode == 'and':
+        return False if False in values else (None if None in values else True)
+    return True if True in values else (None if None in values else False)
+
+def match(rule):
+    if not isinstance(rule, dict):
+        return None
+    if rule.get('type') == 'logical':
+        if rule.get('mode') not in ('and', 'or') or not isinstance(rule.get('rules'), list):
+            return None
+        value = combine([match(item) for item in rule['rules']], rule['mode'])
+    else:
+        values = []
+        for key in ('domain', 'domain_suffix', 'domain_keyword'):
+            entries = rule.get(key, [])
+            if isinstance(entries, str):
+                entries = [entries]
+            if not isinstance(entries, list) or not all(isinstance(item, str) for item in entries):
+                return None
+            for entry in entries:
+                entry = entry.lower()
+                if key == 'domain':
+                    values.append(domain == entry)
+                elif key == 'domain_suffix':
+                    values.append(domain == entry.lstrip('.') or domain.endswith('.'+entry.lstrip('.')))
+                else:
+                    values.append(entry in domain)
+        # Do not emulate RE2/AdGuard/IP rules with different Python semantics.
+        unsupported = set(rule)-{'type', 'invert', 'domain', 'domain_suffix', 'domain_keyword'}
+        has_regex = bool(rule.get('domain_regex'))
+        value = combine(values + ([None] if has_regex else []), 'or') if values or has_regex else None
+        if unsupported-{'domain_regex'}:
+            value = None
+    return (not value) if rule.get('invert') and value is not None else value
+
+profile, source, outbound = 'unknown', 'insufficient-rule-evidence', 'unknown'
+matches = []
+try:
+    config = read_json(config_path)
+    route = config['route']
+    sets = {item['tag']: item for item in route['rule_set']}
+    cache = {}
+    def set_match(tag):
+        if tag in cache:
+            return cache[tag]
+        spec = sets[tag]
+        if spec.get('type') != 'local':
+            return None
+        path = Path(root + spec['path']) if root else Path(spec['path'])
+        if spec.get('format') == 'source' or path.suffix == '.json':
+            data = read_json(path)
+        else:
+            with tempfile.TemporaryDirectory(prefix='dnscomplex-trace-') as td:
+                target = Path(td)/'rule.json'
+                if run(['sing-box', 'rule-set', 'decompile', '--output', str(target), str(path)]) is None:
+                    return None
+                data = read_json(target)
+        if data.get('version') not in (1, 2, 3) or not isinstance(data.get('rules'), list):
+            return None
+        cache[tag] = combine([match(rule) for rule in data['rules']], 'or')
+        return cache[tag]
+    uncertain = False
+    selected = False
+    for rule in route['rules']:
+        if rule.get('action') != 'route' or 'rule_set' not in rule:
+            continue
+        tags = rule['rule_set'] if isinstance(rule['rule_set'], list) else [rule['rule_set']]
+        try:
+            value = combine([set_match(tag) for tag in tags], 'or')
+        except (OSError, ValueError, KeyError, TypeError):
+            value = None
+        if set(rule)-{'rule_set', 'action', 'outbound'} and value is not False:
+            value = None
+        target = rule.get('outbound', '')
+        candidate = 'AI' if target.startswith('ai-') else ('CN' if target.startswith('cn-') else 'unknown')
+        if value is True:
+            if candidate not in matches:
+                matches.append(candidate)
+            if not selected and not uncertain:
+                profile, source, outbound = candidate, 'rule-set:'+','.join(tags), target
+                selected = True
+        elif value is None and not selected:
+            uncertain = True
+    if not selected and not uncertain and route.get('final') == 'default':
+        profile, source, outbound = 'default', 'domain-rules:no-match', 'default'
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    warnings.append('rule-evidence-unavailable')
+
+print('domain='+domain)
+print('profile='+profile)
+print('profile_source='+source)
+print('expected_outbound='+outbound)
+print('actual_outbound=unknown')
+print('evidence_scope=domain-policy-and-local-nft-observation; not a client packet or remote egress test')
+if len(matches) > 1:
+    print('rule_overlap='+','.join(matches))
+    warnings.append('overlapping-domain-rules; configured route order retained')
+
+answers = {}
+dns_ok = True
+for kind, family in [('A', 4), ('AAAA', 6)]:
+    text = run(['dig', '+time=2', '+tries=1', '+short', kind, domain, '@127.0.0.1', '-p', '53'], 3)
+    ips = []
+    for line in (text or '').splitlines():
+        try:
+            address = ipaddress.ip_address(line.strip())
+            if address.version == family and str(address) not in ips:
+                ips.append(str(address))
+        except ValueError:
+            pass
+    if len(ips) > 16:
+        warnings.append('dns-answers-truncated')
+    answers[kind] = ips[:16]
+    dns_ok = dns_ok and text is not None
+    print(kind+'='+(','.join(answers[kind]) or 'none'))
+dns_ok = dns_ok and bool(answers['A'] or (profile == 'default' and answers['AAAA']))
+print('dns_status='+('answered' if dns_ok else 'unavailable'))
+
+def nft_set(name):
+    text = run(['nft', '-j', 'list', 'set', 'inet', 'dnscomplex', name], 1.5)
+    try:
+        sets = [entry['set'] for entry in json.loads(text)['nftables'] if 'set' in entry]
+        found = [item for item in sets if item.get('family') == 'inet' and item.get('table') == 'dnscomplex' and item.get('name') == name]
+        if len(found) != 1 or found[0].get('type') != ('ipv6_addr' if name.endswith('6') else 'ipv4_addr'):
+            return None
+        elements = found[0].get('elem', [])
+        return elements if isinstance(elements, list) else None
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+def contains(elements, address):
+    if elements is None:
+        return None
+    unknown = False
+    for item in elements:
+        try:
+            if isinstance(item, dict) and 'elem' in item:
+                item = item['elem']['val']
+            if isinstance(item, str):
+                hit = address in ipaddress.ip_network(item, strict=False)
+            elif 'prefix' in item:
+                value = item['prefix']
+                hit = address in ipaddress.ip_network(f"{value['addr']}/{value['len']}", strict=False)
+            elif 'range' in item:
+                hit = ipaddress.ip_address(item['range'][0]) <= address <= ipaddress.ip_address(item['range'][1])
+            else:
+                unknown = True; continue
+            if hit:
+                return True
+        except (ValueError, KeyError, TypeError):
+            unknown = True
+    return None if unknown else False
+
+ip_sets = {name: nft_set(name.lower()+'4') for name in ('AI', 'CN')}
+nft_ok = all(value is not None for value in ip_sets.values())
+for text in answers['A']:
+    hits = {name: contains(elements, ipaddress.ip_address(text)) for name, elements in ip_sets.items()}
+    observed = ','.join(name for name, value in hits.items() if value is True) or 'default'
+    if None in hits.values():
+        observed = 'unknown'; nft_ok = False
+    print(f'nftset[{text}]={observed}')
+    if observed not in (profile, 'default', 'unknown'):
+        warnings.append('shared-ip-observation; IP membership does not reassign domain policy')
+
+gate = 'not-applicable'
+if profile in ('AI', 'CN'):
+    families = [4, 6] if outbound.endswith('-xray') else [4]
+    gates = []
+    for family in families:
+        elements = nft_set(profile.lower()+'_ready'+str(family))
+        gates.append(None if elements is None else any(
+            isinstance(item, dict) and item.get('prefix', {}).get('addr') == ('0.0.0.0' if family == 4 else '::')
+            and item['prefix'].get('len') == 0 for item in elements))
+    gate = 'unknown' if None in gates else ('open' if all(gates) else 'closed')
+print('profile_gate='+gate)
+if not dns_ok:
+    warnings.append('DNS query failed or returned no usable address')
+if profile == 'unknown':
+    warnings.append('domain-rule-evidence-incomplete; classification not inferred from IP')
+if profile in ('AI', 'CN') and answers['AAAA']:
+    warnings.append(profile+' domain returned AAAA; expected IPv4-only')
+if gate in ('closed', 'unknown'):
+    warnings.append('profile readiness '+gate+'; run dnscomplex health --json for existing checks and recommended_actions')
+for warning in dict.fromkeys(warnings):
+    print('warning='+warning)
+print('recommended_action=' + ('檢查 dnscomplex health --json 的 detail 與 recommended_action；DNS 問題再檢查 SmartDNS／AdGuard；實際出口須由客戶端流量或出口探測確認。' if warnings or not nft_ok else
+      '域名規則與本機觀測已列出；如應用仍失敗，從原客戶端重現並核對封包及出口，不能以此結果判定遠端可用。'))
+failed = (not dns_ok or not nft_ok or profile == 'unknown' or gate in ('closed', 'unknown')
+          or (profile in ('AI', 'CN') and bool(answers['AAAA'])) or time.monotonic() >= deadline)
+raise SystemExit(1 if failed else 0)
+TRACE_DOMAIN
 }
 
 json_escape() {
