@@ -4110,10 +4110,10 @@ RestartSec=15s
 WantedBy=multi-user.target
 EOF
 
-  write_file /etc/systemd/system/dnscomplex-ipsec-ifaces.service <<EOF
+  write_file /etc/systemd/system/dnscomplex-ipsec-ifaces.service <<'EOF'
 [Unit]
 Description=dnscomplex route-based IPsec XFRM interfaces
-Before=strongswan.service strongswan-swanctl.service
+Before=strongswan.service strongswan-swanctl.service strongswan-starter.service
 After=systemd-networkd.service
 
 [Service]
@@ -4121,7 +4121,9 @@ Type=oneshot
 RemainAfterExit=yes
 Environment=DNSCOMPLEX_SERVICE_MODE=1
 ExecStart=/usr/local/sbin/dnscomplex ipsec-ifaces up
-ExecStop=/usr/local/sbin/dnscomplex ipsec-ifaces down
+# Keep explicit service stops working. During host shutdown the kernel can
+# reclaim the links at reboot without waiting in the XFRM unregister path.
+ExecStop=/bin/sh -ec 'case "$$(/usr/bin/systemctl is-system-running 2>/dev/null || :)" in initializing|starting|running|degraded|maintenance) exec /usr/local/sbin/dnscomplex ipsec-ifaces down;; *) echo "Leaving XFRM links for system shutdown or unavailable manager";; esac'
 
 [Install]
 WantedBy=multi-user.target
@@ -17086,10 +17088,10 @@ EOF
 Description=Sample dnscomplex metrics for management trends
 
 [Timer]
-OnBootSec=1s
+# Arm the first sample from timer activation, without a previous boot stamp.
+OnActiveSec=1s
 OnUnitInactiveSec=15s
 AccuracySec=1s
-Persistent=true
 Unit=dnscomplex-metrics-sample.service
 
 [Install]
