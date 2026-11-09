@@ -19212,6 +19212,20 @@ class Handler(BaseHTTPRequestHandler):
         try: return raw.decode("utf-8")
         except UnicodeDecodeError: raise RequestInputError(400, "invalid UTF-8 body")
     def json_object(self, raw):
+        # Bound decoder work consistently across Python versions. Escaped
+        # characters and brackets within quoted values do not open containers.
+        depth = 0
+        quoted = False
+        for match in re.finditer(r'\\.|["{}\[\]]', raw, re.DOTALL):
+            token = match.group()
+            if token == '"':
+                quoted = not quoted
+            elif not quoted and token in ('{', '['):
+                depth += 1
+                if depth > 128:
+                    raise RequestInputError(400, "JSON nesting limit exceeded")
+            elif not quoted and token in ('}', ']'):
+                depth -= 1
         try: payload = json.loads(raw)
         except (ValueError, RecursionError): raise RequestInputError(400, "invalid JSON body")
         if not isinstance(payload, dict): raise RequestInputError(400, "JSON object required")
