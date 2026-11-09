@@ -89,6 +89,16 @@ class HTTPBounds(unittest.TestCase):
                 except OSError: break
             self.assertIn(b' 408 ',self.receive(sock))
         self.assertEqual(self.calls,[])
+    def test_json_nesting_limit_and_quoted_brackets(self):
+        body = b'{"value":' + b'[' * 128 + b'0' + b']' * 128 + b'}'
+        response = self.request(f'Content-Length: {len(body)}\r\nContent-Type: application/json\r\n', body)
+        self.assertIn(b' 400 ', response)
+        self.assertEqual(self.calls, [])
+
+        body = json.dumps({'action': 'doctor', 'value': '[{"\\]' * 200}).encode()
+        response = self.request(f'Content-Length: {len(body)}\r\nContent-Type: application/json\r\n', body)
+        self.assertIn(b' 200 ', response)
+        self.assertEqual(len(self.calls), 1)
     def test_valid_long_operation_disarms_input_deadline(self):
         def run(*args): time.sleep(.3); self.calls.append(args); return {'ok':True}
         self.m.run=run
