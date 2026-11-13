@@ -977,16 +977,24 @@ disable_conflicting_lan_services() {
 }
 
 install_smartdns_release() {
-  local tmp
+  local tmp restore_running=0
+  if systemctl is-active --quiet smartdns; then
+    restore_running=1
+  fi
   tmp=$(mktemp -d) || return 1
   download_install_asset smartdns "$tmp/smartdns.deb" || return 1
   DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i "$tmp/smartdns.deb" || \
     DEBIAN_FRONTEND=noninteractive apt-get \
       -o Dpkg::Options::=--force-confdef \
       -o Dpkg::Options::=--force-confold \
-      -f install -y
-  fix_smartdns_wrapper
-  ensure_smartdns_enabled
+      -f install -y || return 1
+  fix_smartdns_wrapper || return 1
+  ensure_smartdns_enabled || return 1
+  # The package's maintainer scripts can stop an existing resolver. Resume
+  # serving its existing configuration before downloading other components.
+  if ((restore_running)); then
+    systemctl start smartdns || return 1
+  fi
   command -v smartdns >/dev/null || die "SmartDNS install did not provide smartdns binary"
   rm -rf "$tmp"
 }
@@ -20464,6 +20472,9 @@ enable_services() {
   fi
   systemctl restart nftables
   systemctl enable --now dnscomplex-network-ready
+  # DNS must be available even while the external IPsec readiness job waits.
+  systemctl enable --now smartdns AdGuardHome sing-box xray-dnscomplex
+  systemctl restart smartdns AdGuardHome sing-box xray-dnscomplex
   systemctl enable --now dnscomplex-ipsec-ifaces
   for ipsec_unit in strongswan-swanctl strongswan-starter strongswan ipsec; do
     if systemctl list-unit-files "${ipsec_unit}.service" >/dev/null 2>&1; then
@@ -20495,10 +20506,8 @@ enable_services() {
     dnscomplex-cn-overrides \
     dnscomplex-nftset-refresh \
     dnscomplex-metrics-sample
-  systemctl enable --now smartdns AdGuardHome sing-box xray-dnscomplex
   systemctl enable --now dnscomplex-web
   systemctl enable --now dnscomplex-metrics
-  systemctl restart smartdns AdGuardHome sing-box xray-dnscomplex
   systemctl restart dnscomplex-web dnscomplex-metrics
 }
 
