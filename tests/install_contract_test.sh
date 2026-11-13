@@ -41,6 +41,42 @@ bash -n "$repo_root/install.sh"
 
 bash "$repo_root/install.sh" --help >/dev/null
 
+(
+  adguard_dir="$tmpdir/adguard"
+  live="$adguard_dir/AdGuardHome"
+  mkdir "$adguard_dir"
+  printf '#!/bin/sh\nprintf "old\\n"\n' >"$live"
+  chmod +x "$live"
+  eval "$(awk '
+    /^install_adguardhome_release\(\)/ { inside=1 }
+    inside { print }
+    inside && /^[})][[:space:]]*$/ { exit }
+  ' "$repo_root/install.sh" | sed "s|/opt/AdGuardHome|$adguard_dir|g")"
+  systemctl() { touch "$tmpdir/adguard-systemctl-called"; }
+  die() { exit 1; }
+  download_install_asset() {
+    mkdir -p "$tmpdir/archive/AdGuardHome"
+    cp "$tmpdir/adguard-candidate" "$tmpdir/archive/AdGuardHome/AdGuardHome"
+    tar -czf "$2" -C "$tmpdir/archive" AdGuardHome
+  }
+  printf '#!/bin/sh\nexit 1\n' >"$tmpdir/adguard-candidate"
+  if (install_adguardhome_release); then
+    fail "installer accepted a broken AdGuard Home executable"
+  fi
+  [[ "$("$live")" == old ]] || fail "broken candidate replaced working AdGuard Home"
+  cat >"$tmpdir/adguard-candidate" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = --version ]; then
+  [ "$("$ADGUARD_LIVE")" = old ] || exit 1
+fi
+printf 'new\n'
+EOF
+  export ADGUARD_LIVE="$live"
+  install_adguardhome_release
+  [[ "$("$live")" == new ]] || fail "validated AdGuard Home was not installed"
+  [[ ! -e "$tmpdir/adguard-systemctl-called" ]] || fail "binary staging interrupted AdGuard Home"
+)
+
 cat >"$tmpdir/config.env" <<'EOF'
 DNSCOMPLEX_NONINTERACTIVE=1
 WAN_IFACE=eth0
