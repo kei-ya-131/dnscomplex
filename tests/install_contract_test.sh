@@ -77,6 +77,7 @@ artifacts={
  'usr/local/lib/dnscomplex-web/app.py': 'PY',
  'usr/local/lib/dnscomplex-soak/runner.py': 'PY',
  'usr/local/lib/dnscomplex-config/candidate.py': 'CONFIG_PARSER',
+ 'usr/local/lib/dnscomplex-config/adguard-auth.py': 'ADGUARD_AUTH',
  'usr/local/libexec/dnscomplex-operation': 'OPERATION_HELPER',
  'usr/local/libexec/dnscomplex-restore-recover': 'RECOVERY',
 }
@@ -161,6 +162,10 @@ parser_mode=$(stat -c '%a' "$tmpdir/root/usr/local/lib/dnscomplex-config/candida
 [[ "$parser_mode" == "755" ]] || fail "candidate parser mode is not 0755"
 DNSCOMPLEX_FS_ROOT="$tmpdir/root" bash "$tmpdir/root/usr/local/sbin/dnscomplex" validate-config "$tmpdir/root/etc/dnscomplex/config.env"
 python3 "$repo_root/tests/config_candidate_safety_test.py"
+python3 "$repo_root/tests/adguard_auth_safety_test.py" --portable
+python3 "$repo_root/tests/secret_file_creation_test.py"
+python3 "$repo_root/tests/metrics_resource_boundary_test.py"
+python3 "$repo_root/tests/boot_lifecycle_test.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-soak/runner.py"
 assert_file "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml"
@@ -322,6 +327,36 @@ assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'eap-mschapv2'
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'dpd_delay'
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'local_addrs ='
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'id = vpn.example.net'
+cp "$tmpdir/root/etc/swanctl/swanctl.conf" "$tmpdir/installer-swanctl.conf"
+DNSCOMPLEX_FS_ROOT="$tmpdir/root" bash -c '
+  set -e
+  source "$1"
+  need_root() { :; }
+  load_config
+  write_swanctl_cmd
+' swanctl-rewrite "$tmpdir/root/usr/local/sbin/dnscomplex"
+python3 - "$tmpdir/installer-swanctl.conf" "$tmpdir/root/etc/swanctl/swanctl.conf" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+for path in sys.argv[1:]:
+    config = Path(path).read_text()
+    for profile in ("ai", "cn"):
+        primary, = re.findall(rf"(?ms)^  {profile} \{{\n.*?^  \}}$", config)
+        standby, = re.findall(rf"(?ms)^  {profile}-next \{{\n.*?^  \}}$", config)
+        assert f"      {profile} {{" in primary
+        assert "start_action = start" in primary
+        assert f"      {profile}-next {{" in standby
+        for setting in ("unique = never", "dpd_action = clear", "start_action = none", "close_action = none"):
+            assert setting in standby, (path, profile, setting)
+        for key in ("local_addrs", "remote_addrs", "eap_id", "if_id_in", "if_id_out"):
+            pattern = rf"(?m)^\s*{key} = (.+)$"
+            original, = re.findall(pattern, primary)
+            candidate, = re.findall(pattern, standby)
+            assert original == candidate, (path, profile, key)
+PY
+mv "$tmpdir/installer-swanctl.conf" "$tmpdir/root/etc/swanctl/swanctl.conf"
 assert_contains "$tmpdir/root/etc/strongswan.d/charon/resolve.conf" 'load = no'
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "IPSEC_REMOTE_ID='vpn.example.net'"
 assert_file "$tmpdir/root/etc/swanctl/x509ca/README.dnscomplex"
@@ -433,6 +468,59 @@ assert_not_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'elements = { 1
 assert_contains "$tmpdir/root/usr/local/libexec/dnscomplex-lan-alias" 'dnscomplex-lan-alias-owned-source-guard'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'lan_alias_reconcile_cmd || return 1'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'lan_alias_close_cmd'
+python3 - "$tmpdir/root" <<'PY'
+import json
+import pathlib
+import re
+import runpy
+import sys
+from types import SimpleNamespace
+
+root = pathlib.Path(sys.argv[1])
+helper = runpy.run_path(str(root / "usr/local/libexec/dnscomplex-lan-alias"))
+verify = helper["_verify_live_nft_policy"]
+rules = (root / "etc/nftables.d/dnscomplex.nft").read_text()
+chains = dict(re.findall(r"^  chain (\w+) \{\n(.*?)^  \}", rules, re.M | re.S))
+# A running alias has an owned guard and nft prints packet counters.
+source_guard = ('ip saddr 198.18.255.254 ip daddr != @lan_alias_ready4 counter drop '
+                'comment "dnscomplex-lan-alias-owned-source-guard"\n')
+anchor = "ip saddr @lan_alias_source4 ip daddr != @lan_alias_ready4"
+chains["output"] = chains["output"].replace(anchor, source_guard + anchor, 1)
+set_info = dict(family="inet", table="dnscomplex", name="lan_alias_config_ready4",
+                type="ipv4_addr")
+default, = (line for line in chains["postrouting"].splitlines()
+            if '"dnscomplex-lan-alias-snat-default"' in line)
+ai = 'oifname "ipsec-ai" ip saddr @lan_alias_source4 snat ip to 10.1.4.11 comment "dnscomplex-lan-alias-snat-ai"'
+cn = 'oifname "ipsec-cn" ip saddr @lan_alias_source4 snat ip to 10.35.4.12 comment "dnscomplex-lan-alias-snat-cn"'
+
+def nft(argv):
+    if argv == ["nft", "-j", "list", "set", "inet", "dnscomplex", set_info["name"]]:
+        return SimpleNamespace(stdout=json.dumps({"nftables": [{"set": set_info}]}))
+    assert argv[:6] == ["nft", "-a", "list", "chain", "inet", "dnscomplex"], argv
+    return SimpleNamespace(stdout=re.sub(r"\bcounter\b", "counter packets 0 bytes 0",
+                                          chains[argv[6]]))
+
+verify.__globals__["_run"] = nft
+policy = dict(lan_interface="eth0.20", auto_mark="0x2024",
+              ai_mode="ipsec", cn_mode="ipsec", ai_mark="0x301", cn_mark="0x351",
+              ai_quic="allow", cn_quic="reject", ai_vip="10.1.4.11", cn_vip="10.35.4.12",
+              default_snat_interface="eth0", default_snat_kind="masquerade")
+original = chains["postrouting"]
+for ordered in ((default, ai, cn), (default, cn, ai)):
+    chains["postrouting"] = original.replace(default, "\n".join(ordered))
+    verify("198.18.255.254", policy)
+for ordered, error in (
+    ((cn, default, ai), "policy order"),
+    ((default, cn, ai.replace("10.1.4.11", "10.1.4.12")), "VIP is stale"),
+):
+    chains["postrouting"] = original.replace(default, "\n".join(ordered))
+    try:
+        verify("198.18.255.254", policy)
+    except helper["AliasSelectionError"] as exc:
+        assert error in str(exc), exc
+    else:
+        raise AssertionError(f"accepted invalid LAN alias SNAT: {ordered}")
+PY
 python3 - "$tmpdir/root/etc/nftables.d/dnscomplex.nft" <<'PY'
 import pathlib
 import sys
@@ -666,7 +754,8 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '--include-logs minimal
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'adguard_cache_diagnostics'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'trace_domain_cmd'
 # shellcheck disable=SC2016
-assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'source="nftset:${hit,,}4"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'actual_outbound=unknown'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'IP membership does not reassign domain policy'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'status_cmd "$@" ;;'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'status [--verbose]'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set_socks_cmd'
@@ -1199,7 +1288,7 @@ assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
   '[DNSCOMPLEX, "apply-config", path]'
 assert_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
-  '[DNSCOMPLEX, "metrics-sample"]'
+  '[sys.executable, "/usr/local/lib/dnscomplex-metrics/exporter.py", "--current"]'
 assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
   'os.replace(tmp, CONFIG)'
 assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-web/app.py" \
@@ -1372,7 +1461,7 @@ assert_not_contains "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py" 
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-web.service" 'ExecStart=/usr/bin/python3 /usr/local/lib/dnscomplex-web/app.py'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics.service" 'ExecStart=/usr/bin/python3 /usr/local/lib/dnscomplex-metrics/exporter.py'
 assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.service" 'ExecStart=/usr/local/sbin/dnscomplex metrics-sample'
-assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.timer" 'OnUnitActiveSec=60s'
+assert_contains "$tmpdir/root/etc/systemd/system/dnscomplex-metrics-sample.timer" 'OnUnitInactiveSec=15s'
 assert_contains "$tmpdir/root/etc/systemd/system/xray-dnscomplex.service" 'ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json'
 assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexConntrackHigh'
 assert_contains "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml" 'DnscomplexAdGuardCacheEnabled'
@@ -1573,9 +1662,13 @@ CN_IPSEC_USERNAME=cn-user
 CN_IPSEC_PASSWORD=cn-pass
 EOF
 DNSCOMPLEX_ROOT="$single_policy_tmp/root" bash "$repo_root/install.sh" --dry-run --config "$single_policy_tmp/config.env"
-assert_contains "$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc" 'dnscomplex-primary-health dnscomplex-fail-open'
-assert_contains "$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc" '/ip/firewall/mangle/disable [find where comment=dnscomplex-policy-to-vm]'
-assert_contains "$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc" '/ip/firewall/nat/disable [find where comment~\"dnscomplex-force-dns\"]'
+single_routeros="$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc"
+assert_contains "$single_routeros" '/system scheduler add name=dnscomplex-primary-health'
+assert_contains "$single_routeros" '/tool fetch url="http://192.168.50.200:9108/healthz"'
+assert_contains "$single_routeros" '/ip route disable [find where comment="dnscomplex-policy-to-vm-primary"]'
+assert_contains "$single_routeros" '/ip firewall mangle disable [find where comment="dnscomplex-policy-to-vm"]'
+assert_contains "$single_routeros" '/ip firewall nat enable [find where comment="dnscomplex-force-dns-udp" or comment="dnscomplex-force-dns-tcp"]'
+assert_not_contains "$single_routeros" '/tool/netwatch/add'
 rm -rf "$single_policy_tmp"
 
 bash "$repo_root/tests/runtime_reliability_test.sh"
@@ -1616,7 +1709,7 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'monotonic_millis) + 14
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'restart_watchdog_unit_if_inactive "$unit" || return 1'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'could not allocate SmartDNS probe state'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'trap cleanup_restart_epoch_temp EXIT HUP INT TERM'
-assert_contains "$repo_root/install.sh" 'cron dnsutils python3 coreutils util-linux'
+assert_contains "$repo_root/install.sh" 'cron dnsutils python3 python3-bcrypt python3-yaml coreutils util-linux'
 health_body=$(awk '
   /^health_cmd\(\) \{/ { inside=1 }
   inside { print }

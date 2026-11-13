@@ -21,13 +21,13 @@
   - `vlan-gateway`: transit/LAN VLAN mode
 - Included example config: `examples/routeros-policy.config.env`
 
-Latest release: **v0.3.0**. See [fixes, validation and upgrade notes](docs/releases/v0.3.0.md).
+Latest published release: [**v0.3.1**](https://github.com/kei-ya-131/dnscomplex/releases/tag/v0.3.1). See the [v0.3.0 upgrade notes](docs/releases/v0.3.0.md) for the earlier release.
 
 ## Repository Layout
 
 - `install.sh`: main installer and runtime renderer
 - `tests/`: installer, runtime, configuration, routing and recovery regression tests
-- `tools/`: bounded profile data-plane probe
+- `tools/`: bounded profile data-plane probe and public regression / VM acceptance collectors
 - `docs/releases/`: public, deployment-independent release notes
 - `examples/routeros-policy.config.env`: non-interactive example config
 
@@ -73,17 +73,23 @@ dnscomplex metrics-sample
 dnscomplex soak --duration 60 --clients 50 --dns-qps 20 --profiles ai,cn,default
 dnscomplex validate-config /etc/dnscomplex/config.env
 dnscomplex render-config --redacted
-dnscomplex update-software --channel stable
-dnscomplex update-software --channel pinned --version v1.2.3
+sudo dnscomplex update-software --allow-unverified-release-assets --channel stable
 dnscomplex support-bundle --include-logs standard
 ```
 
 Default service endpoints:
 
 - Web UI: `http://<vm-ip>:8088`
+- AdGuard Home: open the **AdGuard** tab in the Web UI and sign in with an AdGuard account. The embedded interface shares the management page's browser origin and uses a separate login session. Direct access to `127.0.0.1:3000` is also available through the existing SOCKS/VPN management path. On a new installation or a legacy installation with no users, username `admin` starts with the current `DNSCOMPLEX_WEB_PASSWORD` (8–72 UTF-8 bytes, as required for initialization). Existing AdGuard accounts and password hashes are preserved on reinstall and runtime updates; their independent passwords do not constrain the web password. Later dnscomplex password changes do not reset AdGuard.
 - Metrics and RouterOS health probe: `http://<vm-ip>:9108/metrics`
 - Health probe JSON: `http://<vm-ip>:9108/healthz`
 - SOCKS in `routeros-policy` mode: `<vm-ip>:10800` (the configured LAN address only)
+
+HTTP management remains available on the trusted LAN and through SOCKS. HTTP credentials and cookies are unencrypted on the LAN hop after the VPN exits; this is an accepted deployment risk, not a transport-security fix. Keep these listeners off the public Internet.
+
+Metrics HTTP endpoints and the dashboard read a cached sample instead of launching host probes per request. The existing sampler runs 15 seconds after its preceding run finishes; missing, invalid or over-60-second-old snapshots return unavailable. Incomplete collection is marked with `collection_complete` / `dnscomplex_collection_complete`; `/healthz` fails closed for incomplete data. A fresh `degraded` health result retains the existing successful health-probe status.
+
+AdGuard passwords are stored as BCrypt hashes in `/etc/AdGuardHome/AdGuardHome.yaml` (mode `0600`). For an independent password reset, follow [AdGuard's password-reset procedure](https://github.com/AdguardTeam/AdGuardHome/wiki/Configuration#password-reset): stop AdGuard first, replace only the intended user's hash using a local BCrypt tool, and restart. Do not use an online hash generator or paste passwords into command arguments.
 
 AI/CN Xray mode carries TCP/UDP through local Xray SOCKS inbounds. ICMP for AI/CN nftset destinations is blocked in Xray mode instead of falling back to default routing, so `ping` may fail by design.
 
@@ -105,17 +111,57 @@ python3 tests/soak_resource_limits_test.py
 
 The installer contract includes runtime reliability tests. Native namespace/wire tests require Linux, privileges and the binaries/versions described in their source; they are not represented as passing on other hosts. Historical one-off deployment helpers, their version-pinned acceptance tests, private baselines and captures are not distributed; they are not part of the installer or public regression suite.
 
+For a single regression entry point with per-command logs, exit codes, source identity and explicit PASS/FAIL/SKIP reporting:
+
+```bash
+python3 tools/validate.py --suite core --output output/core-run-001
+```
+
+The Debian 13 GitHub Actions workflow uses this same entry point. Its optional native job is manual and runs only on a disposable hosted runner. VM reboot/recovery acceptance is collected separately and requires a designated disposable VM; the collector never initiates a reboot or fault injection. See [validation scope, prerequisites and VM procedures](docs/validation.md).
+
+`trace-domain` separates expected domain policy from observed nftset membership, including shared CDN IPs. It preserves the existing profile/outbound fields and reports DNS, readiness-gate and missing-evidence diagnostics. Actual client egress remains `unknown` until independently probed; this read-only diagnostic does not repair services.
+
 ## Updates and Support Bundles
 
-The daily update timer refreshes domain/geosite/SRS data; it does not promise unattended Debian or proxy-core upgrades. Explicit `update-software` commands are separate.
+The daily update timer refreshes domain/geosite/SRS data. It does not update Debian packages, proxy cores, or the dnscomplex installer/runtime itself.
+
+### GitHub-managed components
+
+Clean installs use checksum-verified Debian amd64/arm64 assets for sing-box 1.14.0, SmartDNS Release48.4, AdGuard Home v0.107.79 and Xray v26.3.27. The installer rejects an unsupported architecture or a checksum mismatch before installing the affected asset. These versions match the amd64 runtime observed on the test VM. Clean-install acceptance for this exact combination is pending.
+
+`update-software` updates `sing-box`, `SmartDNS`, `AdGuard Home`, and `Xray-core`. Run it as root only after reviewing the selected upstream releases:
+
+```bash
+sudo dnscomplex update-software --allow-unverified-release-assets --channel stable
+```
+
+`--allow-unverified-release-assets` is required on every invocation because these assets are not covered by a uniform trusted signature chain. It acknowledges that limitation; it does not enable signature verification. Omitting it stops the update before component changes.
 
 `DNSCOMPLEX_UPDATE_CHANNEL` controls explicit runtime updates:
 
 - `stable`: use latest non-prerelease GitHub releases.
 - `beta`: allow the newest non-draft GitHub release, including prereleases.
-- `pinned`: update GitHub-managed binaries only to `DNSCOMPLEX_PINNED_VERSION`.
+- `pinned`: request the exact `DNSCOMPLEX_PINNED_VERSION` tag from each of the four upstream repositories. `--version TAG` also selects pinned mode. This is one shared tag, not a per-component version map or the dnscomplex release version; upstream tag formats differ, so do not use a placeholder such as `v1.2.3` as a working upgrade recipe. Confirm that the tag and required assets exist in all four repositories before using pinned mode.
 
-`update-software` still performs backup, package/release update, config checks, health checks, and rollback on failure. Logs are written under `/var/log/dnscomplex/update-*.log`.
+`--channel` overrides the configured channel. Without an explicit channel, `GITHUB_RELEASE_POLICY=pinned` also forces pinned selection. `update-software` backs up configuration and component binaries, validates configuration, restarts changed component services, and checks readiness and health. On failure it attempts application rollback; incomplete rollback is reported as failure and requires operator recovery. It does not run `apt` or upgrade dnscomplex itself. Logs are written under `/var/log/dnscomplex/update-*.log` and `update-latest.log`.
+
+### Debian packages
+
+Create and verify an external VM snapshot and console access before updating Debian packages, then run:
+
+```bash
+sudo dnscomplex system-update --acknowledge-no-os-rollback
+```
+
+This separate command runs `apt-get update` and `apt-get upgrade -y --with-new-pkgs`, followed by dnscomplex tests. It does not update the GitHub-managed components or provide OS rollback. A failed package upgrade may be partially applied; inspect apt/dpkg state or restore the external snapshot. It does not reboot the VM automatically.
+
+### dnscomplex installer/runtime
+
+To upgrade dnscomplex itself, review the target release notes and installer checksum, retain the existing configuration and a usable backup, and follow the installer dry-run and installation steps above with that release's `install.sh`. Reinstallation may restart services and briefly interrupt traffic. Neither `update-software` nor `system-update` downloads a new dnscomplex installer.
+
+On a release that provides the binding migration, run `sudo dnscomplex update-software --ipsec-bindings` to migrate AI and CN from fixed IPv4 VIPs to interface binding. This mode saves the current sing-box configuration at `/var/lib/dnscomplex/ipsec-bindings-before-upgrade.json` and uses one guarded sing-box restart. Existing connections can close during that restart. Run `sudo dnscomplex restore --ipsec-bindings` to restore the saved configuration. The saved fixed VIPs must still match the active tunnels, and the remaining sing-box settings must still match the snapshot. The command removes the snapshot after verifying a successful restore.
+
+### Support bundles
 
 `support-bundle` creates a redacted `.tar.gz` for GitHub issues. It removes IPsec passwords, Xray URIs/UUIDs, GitHub tokens, private IPv4/IPv6 addresses, `.local` hostnames, cookies, and session-like secrets before packaging.
 

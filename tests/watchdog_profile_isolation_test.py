@@ -1,4 +1,5 @@
 """Exercise the rendered manager's probe classification and watchdog boundary."""
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,55 @@ printf '{"rc":%s,"global_closed":%s}\n' "$rc" "$closed"
 
     def test_global_budget_failure_still_closes_all(self):
         self.assertEqual(self.watchdog(budget_fail="1"), {"rc": 1, "global_closed": True})
+
+    def test_watchdog_defers_locked_update_but_blocks_unresolved_recovery(self):
+        source = (ROOT / "install.sh").read_text()
+        helper = self.root / "usr/local/libexec/dnscomplex-operation"
+        helper.parent.mkdir(parents=True)
+        helper.write_text(source.split("<<'OPERATION_HELPER'\n", 1)[1]
+                          .split("\nOPERATION_HELPER", 1)[0] + "\n")
+        operations = self.root / "var/lib/dnscomplex-operations"
+        operations.mkdir(mode=0o700, parents=True)
+        operation = operations / ("e" * 32)
+        operation.mkdir(mode=0o700)
+        manifest = operation / "manifest.json"
+        lock_path = self.root / "maintenance.lock"
+        env = dict(os.environ, DNSCOMPLEX_FS_ROOT=str(self.root),
+                   DNSCOMPLEX_MAINTENANCE_LOCK=str(lock_path), MANAGER=str(self.manager))
+        script = r'''
+source "$MANAGER"
+need_root() { :; }
+load_config() { :; }
+flock() {
+  python3 -c 'import fcntl,sys; fcntl.flock(int(sys.argv[1]),fcntl.LOCK_EX|fcntl.LOCK_NB)' "$2"
+}
+watchdog_locked_cmd() { echo WATCHDOG_RAN; }
+main watchdog
+'''
+        def run():
+            return subprocess.run(["bash", "-c", script], env=env, text=True,
+                                  capture_output=True, timeout=5)
+
+        def phase(value):
+            manifest.write_text(json.dumps({"phase": value}))
+            manifest.chmod(0o600)
+
+        phase("applying")
+        with lock_path.open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            busy = run()
+        self.assertEqual(busy.returncode, 0, busy.stderr)
+        self.assertIn("skipping watchdog", busy.stderr)
+        self.assertNotIn("WATCHDOG_RAN", busy.stdout)
+        phase("recovery-required")
+        pending = run()
+        self.assertNotEqual(pending.returncode, 0)
+        self.assertIn("unresolved operation", pending.stderr)
+        self.assertNotIn("WATCHDOG_RAN", pending.stdout)
+        phase("committed")
+        ready = run()
+        self.assertEqual(ready.returncode, 0, ready.stderr)
+        self.assertIn("WATCHDOG_RAN", ready.stdout)
 
     def observe(self, *, payload=None, timeout="0", rule_ok="1", closed_ok="1", full_budget="1"):
         payload = payload or {"status": "fail", "profile": "cn", "phase": "connect",
@@ -348,12 +398,18 @@ printf '{"first":%s,"second":%s}\n' "$first" "$second"
         self.assertFalse(result["first"]["gate_open"])
         self.assertEqual(result["first"]["proof"], "missing")
 
-    def test_ai_identity_change_keeps_existing_global_failure_behavior(self):
+    def test_ai_same_vip_rekey_retries_and_requires_two_new_proofs(self):
+        vip = "10.250.1.22"
         result = self.observe_identity_switch(
-            profile="ai", snapshots=["new|10.250.1.22|yes"])
-        self.assertEqual(result["first"]["rc"], 1)
-        self.assertEqual(result["first"]["probes"], 1)
+            profile="ai", snapshots=[f"new|{vip}|yes"] * 3, second_round=True)
+        self.assertEqual(result["first"]["rc"], 0)
+        self.assertEqual(result["first"]["probes"], 2)
+        self.assertEqual(result["first"]["closes"], 1)
+        self.assertEqual(result["first"]["proof"], f"{vip} new 1")
         self.assertFalse(result["first"]["gate_open"])
+        self.assertEqual(result["second"]["rc"], 0)
+        self.assertEqual(result["second"]["proof"], f"{vip} new 2")
+        self.assertTrue(result["second"]["gate_open"])
 
     def test_gate_close_or_readback_failure_prevents_retry(self):
         vip = "10.251.1.15"

@@ -2460,26 +2460,30 @@ kill "$writer_pid" 2>/dev/null || true
 wait "$writer_pid" 2>/dev/null || true
 writer_pid=""
 
-tar -tzf "$archive" | grep -Fxq './var/lib/dnscomplex/metrics.sqlite3' ||
+# Consume the complete tar listing before grep -q, which can close a pipe
+# early and make tar exit with SIGPIPE under pipefail.
+archive_entries="$tmpdir/live-backup.entries"
+tar -tzf "$archive" >"$archive_entries" || fail "could not read the backup archive"
+grep -Fxq './var/lib/dnscomplex/metrics.sqlite3' "$archive_entries" ||
   fail "backup archive is missing the SQLite snapshot"
-tar -tzf "$archive" | grep -Fxq './.dnscomplex-backup/format' ||
+grep -Fxq './.dnscomplex-backup/format' "$archive_entries" ||
   fail "backup archive is missing its format marker"
-tar -tzf "$archive" | grep -Fxq './.dnscomplex-backup/manifest.tsv' ||
+grep -Fxq './.dnscomplex-backup/manifest.tsv' "$archive_entries" ||
   fail "backup archive is missing its managed-path manifest"
-tar -tzf "$archive" | grep -Fxq './.dnscomplex-backup/service-state.tsv' ||
+grep -Fxq './.dnscomplex-backup/service-state.tsv' "$archive_entries" ||
   fail "backup archive is missing its service-state snapshot"
-tar -tzf "$archive" | grep -Fxq './etc/strongswan.d/charon/dhcp.conf' ||
+grep -Fxq './etc/strongswan.d/charon/dhcp.conf' "$archive_entries" ||
   fail "backup archive is missing a managed strongSwan plugin configuration"
-tar -tzf "$archive" | grep -Fxq './etc/systemd/system/dnscomplex-web.service' ||
+grep -Fxq './etc/systemd/system/dnscomplex-web.service' "$archive_entries" ||
   fail "backup archive is missing a managed systemd unit"
-tar -tzf "$archive" | grep -Fxq './usr/local/sbin/dnscomplex' ||
+grep -Fxq './usr/local/sbin/dnscomplex' "$archive_entries" ||
   fail "backup archive is missing the management executable"
-tar -tzf "$archive" | grep -Fxq './usr/local/lib/dnscomplex-redact/redact.py' ||
+grep -Fxq './usr/local/lib/dnscomplex-redact/redact.py' "$archive_entries" ||
   fail "backup archive is missing the structural redactor"
-if tar -tzf "$archive" | grep -Fxq './'; then
+if grep -Fxq './' "$archive_entries"; then
   fail "backup archive contains the filesystem root entry"
 fi
-if tar -tzf "$archive" | grep -Eq 'metrics[.]sqlite3-(wal|shm|journal)$'; then
+if grep -Eq 'metrics[.]sqlite3-(wal|shm|journal)$' "$archive_entries"; then
   fail "backup contains transient SQLite sidecar files"
 fi
 tar -xzf "$archive" -C "$extract"
