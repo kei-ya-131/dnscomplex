@@ -454,6 +454,35 @@ require_debian13() {
   [[ "${ID:-}" == "debian" && "${VERSION_ID:-}" == "13" ]] || die "this installer supports Debian 13 only; detected ${PRETTY_NAME:-unknown}"
 }
 
+validate_adguard_bootstrap_password() (
+  # BCrypt's limit is bytes, not shell characters. Existing AdGuard accounts
+  # have independent passwords and must not constrain the web password.
+  local LC_ALL=C existing work
+  local length=${#DNSCOMPLEX_WEB_PASSWORD}
+  ((length >= 8 && length <= 72)) && return 0
+  existing=$(target_path /etc/AdGuardHome/AdGuardHome.yaml) || exit 1
+  [[ -f "$existing" && ! -L "$existing" ]] ||
+    die "initial AdGuard password requires 8 to 72 UTF-8 bytes; no managed files were written"
+  if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+    [[ "$DRY_RUN" != "1" ]] ||
+      die "python3-yaml is required to validate existing AdGuard users during dry-run; no managed files were written"
+    require_debian13
+    require_root
+    export DEBIAN_FRONTEND=noninteractive
+    # Only the parser is needed before the write-free auth preflight. Install
+    # other packages and managed binaries through the normal installer later.
+    apt-get update || die "cannot prepare AdGuard validation dependency"
+    apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+      install -y python3-yaml || die "cannot install AdGuard validation dependency"
+  fi
+  work=$(mktemp -d) || exit 1
+  trap "rm -rf -- $(printf '%q' "$work")" EXIT
+  DNSCOMPLEX_ROOT="$work" render_adguard_auth || exit 1
+  printf '%s' "$DNSCOMPLEX_WEB_PASSWORD" | python3 \
+    "$work/usr/local/lib/dnscomplex-config/adguard-auth.py" --existing "$existing" --check ||
+    die "AdGuard bootstrap requires 8 to 72 UTF-8 bytes, or valid existing users; no managed files were written"
+)
+
 require_root() {
   [[ "$DRY_RUN" == "1" ]] && return 0
   [[ "$(id -u)" == "0" ]] || die "run as root"
@@ -538,6 +567,19 @@ write_file() {
   mkdir -p "$(dirname "$target")"
   cat >"$target"
 }
+
+write_private_file() (
+  local target temporary
+  target=$(target_path "$1") || exit 1
+  mkdir -p "$(dirname "$target")" || exit 1
+  umask 077
+  temporary=$(mktemp "${target}.XXXXXX") || exit 1
+  # Capture before Bash unwinds function-local variables on subshell exit.
+  trap "rm -f -- $(printf '%q' "$temporary")" EXIT
+  cat >"$temporary" || exit 1
+  chmod 0600 "$temporary" || exit 1
+  mv -f -- "$temporary" "$target" || exit 1
+)
 
 write_file_atomic() (
   local target temp
@@ -664,32 +706,31 @@ linux_arch() {
   esac
 }
 
-xray_asset_pattern() {
-  case "$(uname -m)" in
-    x86_64|amd64) printf 'Xray-linux-64\\.zip$\n' ;;
-    aarch64|arm64) printf 'Xray-linux-arm64-v8a\\.zip$\n' ;;
-    armv7l) printf 'Xray-linux-arm32-v7a\\.zip$\n' ;;
-    *) die "unsupported Xray architecture: $(uname -m)" ;;
+# Release assets for the single-node Debian candidate. The checksums are
+# pinned independently of GitHub's mutable release metadata.
+download_install_asset() {
+  local component=$1 output=$2 arch asset url digest actual
+  arch=$(linux_arch) || return 1
+  case "$component/$arch" in
+    smartdns/amd64) asset=x86_64; digest=4cc1b8f9db10110e1212d981cfee7eb89a3c80f5766760e3b5f7541c8da8b546 ;;
+    smartdns/arm64) asset=aarch64; digest=2effd18abaa7b8a5e30a66bb087b8429ceb87cf1ee37b06571362cdc17dab229 ;;
+    sing-box/amd64) digest=84035ea7eb85570830af77801e8e949d3769dd23bbcacce08df3bfde1945f299 ;;
+    sing-box/arm64) digest=80378caee6f5fdc0557f9aad0c3ade9341a4a4a66e3755c9f0d228c3d697f6e7 ;;
+    adguardhome/amd64) digest=c48f4a43000665484c5ec28177de11a004759b620dae8f77b2aabefc9ef3687f ;;
+    adguardhome/arm64) digest=3f7893c18e8aaadc456d0452839190561c306ca95175a2254958be80a769c1ae ;;
+    xray/amd64) asset=64; digest=23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae ;;
+    xray/arm64) asset=arm64-v8a; digest=4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c ;;
+    *) die "no locked install asset for $component/$arch" ;;
   esac
-}
-
-github_latest_asset_url() {
-  local repo=$1
-  local pattern=$2
-  local asset
-  asset=$(curl_bounded -fsSL "https://api.github.com/repos/$repo/releases/latest" |
-    jq -r --arg pattern "$pattern" '.assets[].browser_download_url | select(test($pattern))' |
-    head -n1)
-  [[ -n "$asset" ]] || die "could not locate latest GitHub release asset for $repo matching $pattern"
-  printf '%s\n' "$asset"
-}
-
-smartdns_arch() {
-  case "$(uname -m)" in
-    x86_64|amd64) printf 'x86_64\n' ;;
-    aarch64|arm64) printf 'aarch64\n' ;;
-    *) die "unsupported SmartDNS architecture: $(uname -m)" ;;
+  case "$component" in
+    smartdns) url="pymumu/smartdns/releases/download/Release48.4/smartdns.1.2026.08.05-0921.$asset-debian-all.deb" ;;
+    sing-box) url="SagerNet/sing-box/releases/download/v1.14.0/sing-box_1.14.0_linux_${arch}.deb" ;;
+    adguardhome) url="AdguardTeam/AdGuardHome/releases/download/v0.107.79/AdGuardHome_linux_${arch}.tar.gz" ;;
+    xray) url="XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-$asset.zip" ;;
   esac
+  curl_bounded -fsSL -o "$output" "https://github.com/$url" || return 1
+  actual=$(sha256sum <"$output") || return 1
+  [[ "${actual%% *}" == "$digest" ]] || die "locked asset checksum mismatch for $component/$arch"
 }
 
 list_lines() {
@@ -794,7 +835,7 @@ smartdns_static_address_line() {
 }
 
 save_runtime_config() {
-  write_file /etc/dnscomplex/config.env <<EOF
+  write_private_file /etc/dnscomplex/config.env <<EOF || return $?
 DNSCOMPLEX_VERSION='$DNSCOMPLEX_VERSION'
 DEPLOY_MODE='$DEPLOY_MODE'
 WAN_IFACE='$WAN_IFACE'
@@ -908,7 +949,7 @@ install_packages() {
     install -y \
     ca-certificates curl jq tar unzip iproute2 nftables conntrack dnsmasq radvd kmod \
     strongswan-swanctl strongswan-charon libcharon-extra-plugins libstrongswan-extra-plugins \
-    cron dnsutils python3 coreutils util-linux
+    cron dnsutils python3 python3-bcrypt python3-yaml coreutils util-linux
   if [[ "$PROMETHEUS_MODE" == "local" ]]; then
     apt-get \
       -o Dpkg::Options::=--force-confdef \
@@ -936,11 +977,9 @@ disable_conflicting_lan_services() {
 }
 
 install_smartdns_release() {
-  local arch asset tmp
-  arch=$(smartdns_arch)
-  tmp=$(mktemp -d)
-  asset=$(github_latest_asset_url "pymumu/smartdns" "${arch}-debian-all\\.deb$")
-  curl_bounded -fsSL -o "$tmp/smartdns.deb" "$asset"
+  local tmp
+  tmp=$(mktemp -d) || return 1
+  download_install_asset smartdns "$tmp/smartdns.deb" || return 1
   DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i "$tmp/smartdns.deb" || \
     DEBIAN_FRONTEND=noninteractive apt-get \
       -o Dpkg::Options::=--force-confdef \
@@ -965,11 +1004,9 @@ ensure_smartdns_enabled() {
 }
 
 install_singbox_release() {
-  local arch asset tmp
-  arch=$(linux_arch)
-  tmp=$(mktemp -d)
-  asset=$(github_latest_asset_url "SagerNet/sing-box" "sing-box_.*_linux_${arch}\\.deb$")
-  curl_bounded -fsSL -o "$tmp/sing-box.deb" "$asset"
+  local tmp
+  tmp=$(mktemp -d) || return 1
+  download_install_asset sing-box "$tmp/sing-box.deb" || return 1
   DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold -i "$tmp/sing-box.deb" || \
     DEBIAN_FRONTEND=noninteractive apt-get \
       -o Dpkg::Options::=--force-confdef \
@@ -980,11 +1017,9 @@ install_singbox_release() {
 }
 
 install_adguardhome_release() {
-  local arch asset tmp
-  arch=$(linux_arch)
-  tmp=$(mktemp -d)
-  asset=$(github_latest_asset_url "AdguardTeam/AdGuardHome" "AdGuardHome_linux_${arch}\\.tar\\.gz$")
-  curl_bounded -fsSL -o "$tmp/AdGuardHome.tar.gz" "$asset"
+  local tmp
+  tmp=$(mktemp -d) || return 1
+  download_install_asset adguardhome "$tmp/AdGuardHome.tar.gz" || return 1
   tar -xzf "$tmp/AdGuardHome.tar.gz" -C "$tmp"
   systemctl stop AdGuardHome 2>/dev/null || true
   install -d -m 0755 /opt/AdGuardHome
@@ -994,11 +1029,9 @@ install_adguardhome_release() {
 }
 
 install_xray_release() {
-  local asset tmp pattern
-  tmp=$(mktemp -d)
-  pattern=$(xray_asset_pattern)
-  asset=$(github_latest_asset_url "XTLS/Xray-core" "$pattern")
-  curl_bounded -fsSL -o "$tmp/xray.zip" "$asset"
+  local tmp
+  tmp=$(mktemp -d) || return 1
+  download_install_asset xray "$tmp/xray.zip" || return 1
   unzip -q "$tmp/xray.zip" -d "$tmp/xray"
   install -m 0755 "$tmp/xray/xray" /usr/local/bin/xray
   install -d -m 0755 /usr/local/share/xray
@@ -1017,6 +1050,7 @@ import json
 import os
 import shlex
 import sys
+import tempfile
 import urllib.parse
 
 
@@ -1306,11 +1340,17 @@ def main():
         sys.stdout.write(text)
     else:
         os.makedirs(os.path.dirname(args.output), exist_ok=True)
-        tmp = args.output + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, args.output)
+        fd, tmp = tempfile.mkstemp(prefix='.xray.', dir=os.path.dirname(args.output))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                os.fchmod(fh.fileno(), 0o600)
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, args.output)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
 
 if __name__ == "__main__":
@@ -1819,9 +1859,151 @@ EOF
   esac
 }
 
-render_adguard() {
-  local allow_rules
-  allow_rules=$(mktemp)
+render_adguard_auth() {
+  write_file /usr/local/lib/dnscomplex-config/adguard-auth.py <<'ADGUARD_AUTH'
+#!/usr/bin/env python3
+"""Keep AdGuard's native users across all dnscomplex configuration renders."""
+import argparse
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tempfile
+
+import yaml
+
+
+class AuthError(ValueError):
+    pass
+
+
+class UniqueLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        keys = [self.construct_object(key, deep=deep) for key, _ in node.value]
+        if len(keys) != len(set(keys)):
+            raise AuthError('duplicate configuration key')
+        return super().construct_mapping(node, deep=deep)
+
+
+def read_config(path, optional=False):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        if optional:
+            return '', {}, None
+        raise
+    with os.fdopen(fd, 'r', encoding='utf-8') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 16 * 1024 * 1024:
+            raise AuthError('unsafe configuration file')
+        text = stream.read(16 * 1024 * 1024 + 1)
+        if len(text) > 16 * 1024 * 1024:
+            raise AuthError('configuration too large')
+    data = yaml.load(text, Loader=UniqueLoader)
+    if not isinstance(data, dict):
+        raise AuthError('configuration must be an object')
+    node = yaml.compose(text, Loader=yaml.SafeLoader)
+    return text, data, node
+
+
+def users_from(data):
+    users = data.get('users', [])
+    if not isinstance(users, list):
+        raise AuthError('users must be a list')
+    names = set()
+    for user in users:
+        if not isinstance(user, dict) or set(user) != {'name', 'password'}:
+            raise AuthError('invalid user entry')
+        name, password = user['name'], user['password']
+        if not isinstance(name, str) or not name.strip() or name in names:
+            raise AuthError('invalid or duplicate user name')
+        if not isinstance(password, str) or not re.fullmatch(r'\$2[aby]\$(?:0[4-9]|[12][0-9]|3[01])\$[./A-Za-z0-9]{53}', password):
+            raise AuthError('user password must be a BCrypt hash')
+        names.add(name)
+    return users
+
+
+def initial_password():
+    password = sys.stdin.buffer.read(73)
+    if not 8 <= len(password) <= 72 or b'\0' in password:
+        raise AuthError('initial password must contain 8 to 72 UTF-8 bytes without NUL')
+    return password
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--candidate')
+    parser.add_argument('--existing', required=True)
+    parser.add_argument('--output')
+    parser.add_argument('--check', action='store_true')
+    args = parser.parse_args()
+    temporary = None
+    try:
+        _, existing, _ = read_config(args.existing, optional=True)
+        existing_users = users_from(existing)
+        if args.check:
+            if not existing_users:
+                initial_password()
+            return 0
+        if not args.candidate or not args.output:
+            raise AuthError('candidate and output required')
+        text, candidate, node = read_config(args.candidate)
+        # Validate both representations before choosing; never reset invalid auth.
+        candidate_users = users_from(candidate)
+        users = existing_users or candidate_users
+        if not users:
+            import bcrypt
+            password = initial_password()
+            users = [{'name': 'admin', 'password': bcrypt.hashpw(password, bcrypt.gensalt(rounds=10)).decode()}]
+        block = yaml.safe_dump({'users': users}, sort_keys=False, allow_unicode=True)
+        # Only replace the users field, retaining other renderer-owned formatting.
+        field = next(((key, value) for key, value in node.value if key.value == 'users'), None)
+        if field:
+            key, value = field
+            end = value.end_mark.index
+            while end < len(text) and text[end] in ' \t':
+                end += 1
+            if end < len(text) and text[end] == '\n':
+                end += 1
+            text = text[:key.start_mark.index] + block + text[end:]
+        else:
+            text = text.rstrip() + '\n' + block
+        final = yaml.load(text, Loader=UniqueLoader)
+        if users_from(final) != users:
+            raise AuthError('user publication mismatch')
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix='.adguard-auth.', dir=output.parent)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+        temporary = None
+        return 0
+    except (AuthError, OSError, ValueError, TypeError, yaml.YAMLError):
+        print('AdGuard authentication configuration invalid; existing configuration was not replaced', file=sys.stderr)
+        return 1
+    finally:
+        if temporary:
+            os.unlink(temporary)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
+ADGUARD_AUTH
+  chmod_target 0755 /usr/local/lib/dnscomplex-config/adguard-auth.py
+}
+
+render_adguard() (
+  local allow_rules candidate auth target
+  candidate=$(mktemp) || exit 1
+  allow_rules=$(mktemp) || { rm -f "$candidate"; exit 1; }
+  trap 'rm -f -- "$candidate" "$allow_rules"' EXIT
+  auth=$(target_path /usr/local/lib/dnscomplex-config/adguard-auth.py)
+  target=$(target_path /etc/AdGuardHome/AdGuardHome.yaml)
   write_adguard_allow_rules >"$allow_rules"
   {
     cat <<EOF
@@ -1903,9 +2085,10 @@ log:
   compress: false
 schema_version: 34
 EOF
-  } | write_file /etc/AdGuardHome/AdGuardHome.yaml
-  rm -f "$allow_rules"
-}
+  } >"$candidate" || exit 1
+  printf '%s' "$DNSCOMPLEX_WEB_PASSWORD" | python3 "$auth" \
+    --candidate "$candidate" --existing "$target" --output "$target"
+)
 
 render_adguard_service() {
   write_file /etc/systemd/system/AdGuardHome.service <<'EOF'
@@ -1934,68 +2117,56 @@ render_swanctl() {
   if [[ "$DEPLOY_MODE" == "routeros-policy" ]]; then
     local_ip="$LINUX_LAN_IPV4"
   fi
-  write_file /etc/swanctl/swanctl.conf <<EOF
+  local connections
+  connections=$(for profile in ai cn; do
+  if [[ "$profile" == ai ]]; then
+    server=$AI_IPSEC_SERVER xfrm_id=$AI_XFRM_ID eap_user=$AI_IPSEC_USERNAME
+  else
+    server=$CN_IPSEC_SERVER xfrm_id=$CN_XFRM_ID eap_user=$CN_IPSEC_USERNAME
+  fi
+  for slot in "$profile" "$profile-next"; do
+    start_action=start dpd_action=restart close_action=restart uniqueness=""
+    if [[ "$slot" == "$profile-next" ]]; then
+      start_action=none dpd_action=clear close_action=none uniqueness="    unique = never"
+    fi
+    cat <<CONNECTION
+  $slot {
+    version = 2
+    local_addrs = $local_ip
+    remote_addrs = $server
+    vips = 0.0.0.0
+    proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
+    dpd_delay = 20s
+    dpd_timeout = 90s
+    rekey_time = 0s
+$uniqueness
+    local {
+      auth = eap-mschapv2
+      eap_id = $eap_user
+    }
+    remote {
+      auth = pubkey
+      id = $IPSEC_REMOTE_ID
+    }
+    children {
+      $slot {
+        local_ts = 0.0.0.0/0
+        remote_ts = 0.0.0.0/0
+        if_id_in = $xfrm_id
+        if_id_out = $xfrm_id
+        esp_proposals = aes256-sha256,aes128-sha256
+        dpd_action = $dpd_action
+        start_action = $start_action
+        close_action = $close_action
+      }
+    }
+  }
+CONNECTION
+  done
+done) || return $?
+  write_private_file /etc/swanctl/swanctl.conf <<EOF || return $?
 connections {
-  ai {
-    version = 2
-    local_addrs = $local_ip
-    remote_addrs = $AI_IPSEC_SERVER
-    vips = 0.0.0.0
-    proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
-    dpd_delay = 20s
-    dpd_timeout = 90s
-    rekey_time = 0s
-    local {
-      auth = eap-mschapv2
-      eap_id = $AI_IPSEC_USERNAME
-    }
-    remote {
-      auth = pubkey
-      id = $IPSEC_REMOTE_ID
-    }
-    children {
-      ai {
-        local_ts = 0.0.0.0/0
-        remote_ts = 0.0.0.0/0
-        if_id_in = $AI_XFRM_ID
-        if_id_out = $AI_XFRM_ID
-        esp_proposals = aes256-sha256,aes128-sha256
-        dpd_action = restart
-        start_action = start
-        close_action = restart
-      }
-    }
-  }
-  cn {
-    version = 2
-    local_addrs = $local_ip
-    remote_addrs = $CN_IPSEC_SERVER
-    vips = 0.0.0.0
-    proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
-    dpd_delay = 20s
-    dpd_timeout = 90s
-    rekey_time = 0s
-    local {
-      auth = eap-mschapv2
-      eap_id = $CN_IPSEC_USERNAME
-    }
-    remote {
-      auth = pubkey
-      id = $IPSEC_REMOTE_ID
-    }
-    children {
-      cn {
-        local_ts = 0.0.0.0/0
-        remote_ts = 0.0.0.0/0
-        if_id_in = $CN_XFRM_ID
-        if_id_out = $CN_XFRM_ID
-        esp_proposals = aes256-sha256,aes128-sha256
-        dpd_action = restart
-        start_action = start
-        close_action = restart
-      }
-    }
-  }
+$connections
 }
 
 secrets {
@@ -2508,10 +2679,31 @@ render_nft_classified_output_rules() {
   fi
   cat <<EOF
     $selector meta nfproto ipv6 counter drop comment "dnscomplex-${profile}-classified-ipv6-drop"
+    $selector oifname @ipsec_dynamic_oif ip saddr != @${profile}_tunnel_vip4 counter drop comment "dnscomplex-${profile}-tunnel-source"
     $selector ip daddr != @${profile}_ready4 counter drop comment "dnscomplex-${profile}-classified-not-ready"
 $quic_rule
     $selector counter meta mark set $mark accept comment "dnscomplex-${profile}-classified-output"
 EOF
+}
+
+render_ipsec_dynamic_nft_sets() {
+  cat <<'EOF'
+  set ipsec_dynamic_oif { type ifname; }
+  set ai_tunnel_vip4 { type ipv4_addr; }
+  set cn_tunnel_vip4 { type ipv4_addr; }
+EOF
+}
+
+render_ipsec_dynamic_snat_exemptions() {
+  local profile mark
+  for profile in ai cn; do
+    case "$profile" in
+      ai) mark=$AI_MARK ;;
+      cn) mark=$CN_MARK ;;
+    esac
+    printf '    oifname "ipsec-%s" oifname @ipsec_dynamic_oif ip saddr @%s_tunnel_vip4 return\n' "$profile" "$profile"
+    printf '    oifname "ipsec-%s" oifname @ipsec_dynamic_oif meta mark %s ip saddr @%s_probe_vip4 return\n' "$profile" "$mark" "$profile"
+  done
 }
 
 render_nft_profile_output_rules() {
@@ -2625,6 +2817,8 @@ table inet dnscomplex {
     flags interval
   }
 
+$(render_ipsec_dynamic_nft_sets)
+
   set lan_alias_source4 {
     type ipv4_addr
     flags interval
@@ -2709,6 +2903,7 @@ $(render_nft_profile_output_rules cn cn4 "$CN_MARK" "$CN_EGRESS_MODE" "$CN_QUIC_
 
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
+$(render_ipsec_dynamic_snat_exemptions)
 $(render_nft_lan_alias_default_snat_rule "$lan_if")
 $(render_routeros_default_snat_rule "$lan_if")
   }
@@ -3918,10 +4113,10 @@ RestartSec=15s
 WantedBy=multi-user.target
 EOF
 
-  write_file /etc/systemd/system/dnscomplex-ipsec-ifaces.service <<EOF
+  write_file /etc/systemd/system/dnscomplex-ipsec-ifaces.service <<'EOF'
 [Unit]
 Description=dnscomplex route-based IPsec XFRM interfaces
-Before=strongswan.service strongswan-swanctl.service
+Before=strongswan.service strongswan-swanctl.service strongswan-starter.service
 After=systemd-networkd.service
 
 [Service]
@@ -3929,7 +4124,9 @@ Type=oneshot
 RemainAfterExit=yes
 Environment=DNSCOMPLEX_SERVICE_MODE=1
 ExecStart=/usr/local/sbin/dnscomplex ipsec-ifaces up
-ExecStop=/usr/local/sbin/dnscomplex ipsec-ifaces down
+# Keep explicit service stops working. During host shutdown the kernel can
+# reclaim the links at reboot without waiting in the XFRM unregister path.
+ExecStop=/bin/sh -ec 'case "$$(/usr/bin/systemctl is-system-running 2>/dev/null || :)" in initializing|starting|running|degraded|maintenance) exec /usr/local/sbin/dnscomplex ipsec-ifaces down;; *) echo "Leaving XFRM links for system shutdown or unavailable manager";; esac'
 
 [Install]
 WantedBy=multi-user.target
@@ -4135,9 +4332,6 @@ EOF
 /ip/firewall/nat/add chain=dstnat in-interface=<LAN_BRIDGE_OR_INTERFACE> protocol=udp dst-port=53 src-address-list=dnscomplex-clients action=dst-nat to-addresses=$primary_ip to-ports=53 comment=dnscomplex-force-dns-udp
 /ip/firewall/nat/add chain=dstnat in-interface=<LAN_BRIDGE_OR_INTERFACE> protocol=tcp dst-port=53 src-address-list=dnscomplex-clients action=dst-nat to-addresses=$primary_ip to-ports=53 comment=dnscomplex-force-dns-tcp
 
-# RouterOS 7.4+ health checks use HTTP GET against dnscomplex exporter /healthz.
-# Compatible simple ping probes are included disabled; enable them only if your
-# RouterOS build does not support type=http-get.
 EOF
     if [[ -n "$secondary_ip" ]]; then
       cat <<EOF | append_file /var/lib/dnscomplex/routeros.rsc
@@ -4148,10 +4342,24 @@ EOF
 EOF
     else
       cat <<EOF | append_file /var/lib/dnscomplex/routeros.rsc
-/tool/netwatch/add host=$primary_ip interval=10s timeout=2s type=http-get url="$primary_url" comment=dnscomplex-primary-health \\
-  down-script="/ip/route/disable [find where comment=dnscomplex-policy-to-vm-primary]; /ip/firewall/mangle/disable [find where comment=dnscomplex-policy-to-vm]; /ip/firewall/nat/disable [find where comment~\\"dnscomplex-force-dns\\"]; :log warning \\"dnscomplex-primary-health dnscomplex-fail-open\\"" \\
-  up-script="/ip/route/enable [find where comment=dnscomplex-policy-to-vm-primary]; /ip/firewall/mangle/enable [find where comment=dnscomplex-policy-to-vm]; /ip/firewall/nat/enable [find where comment~\\"dnscomplex-force-dns\\"]; :log info \\"dnscomplex primary up\\""
-/tool/netwatch/add host=$primary_ip interval=10s timeout=2s type=simple disabled=yes comment=dnscomplex-primary-health-simple
+# dnscomplex-primary-health dnscomplex-fail-open
+/system script add name=dnscomplex-primary-health policy=read,write,test source={
+  :local healthy false
+  :do {
+    /tool fetch url="$primary_url" keep-result=no idle-timeout=2s http-max-redirect-count=0
+    :set healthy true
+  } on-error={}
+  :if (\$healthy) do={
+    /ip route enable [find where comment="dnscomplex-policy-to-vm-primary"]
+    /ip firewall mangle enable [find where comment="dnscomplex-policy-to-vm"]
+    /ip firewall nat enable [find where comment="dnscomplex-force-dns-udp" or comment="dnscomplex-force-dns-tcp"]
+  } else={
+    /ip firewall mangle disable [find where comment="dnscomplex-policy-to-vm"]
+    /ip firewall nat disable [find where comment="dnscomplex-force-dns-udp" or comment="dnscomplex-force-dns-tcp"]
+    /ip route disable [find where comment="dnscomplex-policy-to-vm-primary"]
+  }
+}
+/system scheduler add name=dnscomplex-primary-health interval=10s start-time=startup on-event=dnscomplex-primary-health policy=read,write,test
 EOF
     fi
     if [[ -n "$secondary_ip" ]]; then
@@ -4769,10 +4977,12 @@ def _restart_singbox():
     return _singbox_main_pid()
 
 
-def _atomic_config(config_path, config, *, restart=True):
+def _atomic_config(config_path, config, *, restart=True, replacement_bytes=None):
     config_path = pathlib.Path(config_path)
     original = config_path.read_bytes()
-    candidate = (json.dumps(config, indent=2, ensure_ascii=False) + "\n").encode()
+    candidate = replacement_bytes
+    if candidate is None:
+        candidate = (json.dumps(config, indent=2, ensure_ascii=False) + "\n").encode()
     if original == candidate:
         return False
     fd, temp_name = tempfile.mkstemp(prefix=".sing-box-lan-alias.", dir=config_path.parent)
@@ -5239,7 +5449,6 @@ def _verify_live_nft_policy(candidate, policy):
         default_rule = ["oifname", f'"{policy["default_snat_interface"]}"', "ip", "saddr",
                         source, "masquerade", "comment", f'"{default_comment}"']
     expected_nat = {default_comment: default_rule}
-    nat_order = [default_comment]
     for profile in ("ai", "cn"):
         comment = f"dnscomplex-lan-alias-snat-{profile}"
         matches = [line for line in postrouting.splitlines() if f'"{comment}"' in line]
@@ -5262,9 +5471,14 @@ def _verify_live_nft_policy(candidate, policy):
             if not expected_vip or tokens[8] != expected_vip:
                 raise AliasSelectionError(f"LAN alias {profile} SNAT VIP is stale or unverifiable")
             expected_nat[comment] = tokens
-            nat_order.append(comment)
-    _verify_tagged_rule_set(postrouting, expected_nat, nat_order,
-                            "dnscomplex-lan-alias-snat-")
+    nat_prefix = "dnscomplex-lan-alias-snat-"
+    _verify_tagged_rule_set(postrouting, expected_nat, (), nat_prefix)
+    # Each profile matches a distinct output interface. Rekey or repair can
+    # append either profile last; only the default rule must precede both.
+    first_nat = next(line for line in postrouting.splitlines()
+                     if f'comment "{nat_prefix}' in line)
+    if f'"{default_comment}"' not in first_nat:
+        raise AliasSelectionError("LAN alias nft rules are out of fail-closed policy order")
 
 
 def _bootstrap_missing_ipsec_alias_snat(candidate, policy):
@@ -5435,8 +5649,22 @@ def verify_owner(config_path=CONFIG_DEFAULT, state_path=STATE_DEFAULT):
     return True
 
 
+def _binding_forward_guard(interface):
+    if not re.fullmatch(r"[a-zA-Z0-9_.:-]+", interface):
+        raise AliasSelectionError("invalid LAN interface")
+    # Redirected traffic terminates locally. Drop direct LAN forwarding
+    # while sing-box releases and reinstalls its redirect rules.
+    _run(["nft", "-f", "-"], input_text=f"""
+add table inet dnscomplex_binding_switch
+add chain inet dnscomplex_binding_switch forward {{ type filter hook forward priority -10; policy accept; }}
+flush chain inet dnscomplex_binding_switch forward
+add rule inet dnscomplex_binding_switch forward iifname "{interface}" meta l4proto {{ tcp, udp }} ip daddr != {{ 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 }} counter drop
+add rule inet dnscomplex_binding_switch forward iifname "{interface}" meta l4proto {{ tcp, udp }} ip6 daddr != {{ ::/128, ::1/128, fc00::/7, fe80::/10, ff00::/8 }} counter drop
+""")
+
+
 def reconcile(config_path=CONFIG_DEFAULT, state_path=STATE_DEFAULT, policy=None,
-              keep_closed=False):
+              keep_closed=False, replacement=None):
     global CONFIG_PROOF_INVALID
     if policy is None:
         policy = {
@@ -5461,13 +5689,37 @@ def reconcile(config_path=CONFIG_DEFAULT, state_path=STATE_DEFAULT, policy=None,
         CONFIG_PROOF_INVALID = True
         _close_readiness_gates(state["address"] if state is not None else DEFAULT_CANDIDATE)
     loaded_config = state is not None and _loaded_config_matches(config_path, state)
+    if replacement is not None:
+        if state is None or not loaded_config:
+            raise AliasSelectionError("binding switch requires a verified current alias configuration")
+        replacement_bytes = pathlib.Path(replacement).read_bytes()
+        wanted = _load_json(replacement_bytes.decode("utf-8"), "candidate")
+        current = _load_json(config_path.read_text(encoding="utf-8"), "sing-box config")
+        current_base, wanted_base = copy.deepcopy(current), copy.deepcopy(wanted)
+        for profile in ("ai", "cn"):
+            tag = profile + "-ipsec"
+            for item in (current_base, wanted_base):
+                matches = [o for o in item["outbounds"] if o.get("tag") == tag]
+                if (len(matches) != 1 or matches[0].get("type") != "direct"
+                        or matches[0].get("bind_interface") != "ipsec-" + profile
+                        or "routing_mark" in matches[0]):
+                    raise AliasSelectionError("candidate requires the existing direct IPsec outbounds")
+                fixed = matches[0].pop("inet4_bind_address", None)
+                if fixed is not None and (not policy[profile + "_vip"] or
+                                          fixed != policy[profile + "_vip"]):
+                    raise AliasSelectionError("fixed source must match the active IPsec VIP")
+        if current_base != wanted_base:
+            raise AliasSelectionError("candidate changes settings outside the IPv4 IPsec bindings")
+        replacement_config = wanted
+        _run(["sing-box", "check", "-c", str(replacement)])
+        _binding_forward_guard(policy["lan_interface"])
     CONFIG_PROOF_INVALID = keep_closed or not loaded_config
     initial_alias_claim = state is None
     if not loaded_config and not keep_closed:
         _set_config_gate(open_gate=False)
         _verify_config_gate(open_gate=False)
 
-    if state is not None:
+    if state is not None and replacement is None:
         fastpath_candidate = None
         try:
             stable_config = _load_json(config_path.read_text(encoding="utf-8"), "sing-box config")
@@ -5492,6 +5744,8 @@ def reconcile(config_path=CONFIG_DEFAULT, state_path=STATE_DEFAULT, policy=None,
     state_written = False
     try:
         config = _load_json(config_path.read_text(encoding="utf-8"), "sing-box config")
+        if replacement is not None:
+            config = replacement_config
         addresses = json.loads(_run(["ip", "-j", "address", "show"]).stdout)
         routes = json.loads(_run(["ip", "-j", "route", "show", "table", "all"]).stdout)
         if state is None:
@@ -5542,7 +5796,12 @@ def reconcile(config_path=CONFIG_DEFAULT, state_path=STATE_DEFAULT, policy=None,
             _set_config_gate(open_gate=False)
             _verify_config_gate(open_gate=False)
         try:
-            config_changed = _atomic_config(config_path, wanted)
+            if replacement is None:
+                config_changed = _atomic_config(config_path, wanted)
+            else:
+                if wanted != replacement_config:
+                    raise AliasSelectionError("binding candidate must preserve the complete LAN alias configuration")
+                config_changed = _atomic_config(config_path, wanted, replacement_bytes=replacement_bytes)
             if not config_changed and not loaded_config:
                 _run(["sing-box", "check", "-c", str(config_path)])
                 _restart_singbox()
@@ -5624,6 +5883,7 @@ def main():
     parser.add_argument("--ai-vip", default="")
     parser.add_argument("--cn-vip", default="")
     parser.add_argument("--keep-closed", action="store_true")
+    parser.add_argument("--replacement-config")
     args = parser.parse_args()
     global COMMAND_DEADLINE_MS, CLEANUP_ATTEMPTED, CONFIG_PROOF_INVALID
     CLEANUP_ATTEMPTED = False
@@ -5658,7 +5918,7 @@ def main():
                 "lan_interface": args.lan_interface,
                 "ai_vip": args.ai_vip,
                 "cn_vip": args.cn_vip,
-            }, keep_closed=args.keep_closed)
+            }, keep_closed=args.keep_closed, replacement=args.replacement_config)
     except Exception as exc:
         if args.command == "reconcile" and COMMAND_DEADLINE_MS is not None:
             try:
@@ -6230,13 +6490,14 @@ EOF
 }
 
 render_adguard_runtime() {
-  local tmp rules allow_rules merged normalized adguard_config
+  local tmp rules allow_rules merged normalized cache_normalized adguard_config
   adguard_config=$(fs_path /etc/AdGuardHome/AdGuardHome.yaml)
   tmp=$(mktemp)
   rules=$(mktemp)
   allow_rules=$(mktemp)
   merged=$(mktemp)
   normalized=$(mktemp)
+  cache_normalized=$(mktemp)
   write_adguard_upstream_rules >"$rules"
   write_adguard_allow_rules >"$allow_rules"
 
@@ -6347,11 +6608,15 @@ EOF
 
   normalize_adguard_http_config "$tmp" "$normalized"
   mv "$normalized" "$tmp"
-  normalize_adguard_cache_config "$tmp" "$tmp.cache"
-  mv "$tmp.cache" "$tmp"
+  normalize_adguard_cache_config "$tmp" "$cache_normalized"
+  mv "$cache_normalized" "$tmp"
   merge_adguard_user_rules "$tmp" "$merged" "$allow_rules"
-  install -m 0644 "$merged" "$adguard_config"
-  rm -f "$tmp" "$rules" "$allow_rules" "$merged" "$normalized"
+  local auth auth_rc=0
+  auth=$(fs_path /usr/local/lib/dnscomplex-config/adguard-auth.py)
+  printf '%s' "$DNSCOMPLEX_WEB_PASSWORD" | python3 "$auth" \
+    --candidate "$merged" --existing "$adguard_config" --output "$adguard_config" || auth_rc=$?
+  rm -f "$tmp" "$rules" "$allow_rules" "$merged" "$normalized" "$cache_normalized"
+  return "$auth_rc"
 }
 
 apply_runtime_network_settings() {
@@ -6659,6 +6924,8 @@ Commands:
   test
   health [--json]
   watchdog
+  ipsec-return ai|cn RETURN_VIP
+  switch-ipsec-bindings CANDIDATE.json
   fix
   doctor
   update-geosite
@@ -6688,6 +6955,7 @@ Commands:
   mss-calibrate
   routeros-print
   update-software --allow-unverified-release-assets [--channel stable|beta|pinned] [--version VERSION]
+  update-software --ipsec-bindings
   system-update --acknowledge-no-os-rollback
   metrics-sample
   soak [--duration 30m] [--clients 50] [--dns-qps 50] [--profiles ai,cn,default] [--idle-resume] [--output-json PATH]
@@ -6699,6 +6967,7 @@ Commands:
   support-bundle [--output PATH] [--include-logs minimal|standard|full]
   backup [OUTPUT_TAR_GZ]
   restore INPUT_TAR_GZ
+  restore --ipsec-bindings
   network-ready
   ipsec-ready
   ipsec-ifaces up|down
@@ -7191,16 +7460,10 @@ geosite_publish_artifact() {
 }
 
 geosite_restore_snapshot() {
-  local snapshot=$1 live_root=$2 manifest=$3 rel target source
+  local snapshot=$1 live_root=$2 manifest=$3 rel
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
-    target="$live_root/$rel"
-    source="$snapshot/$rel"
-    rm -rf -- "$target" || return 1
-    if [[ -e "$source" || -L "$source" ]]; then
-      mkdir -p "$(dirname "$target")" || return 1
-      cp -a -- "$source" "$target" || return 1
-    fi
+    geosite_publish_artifact "$snapshot" "$live_root" "$rel" || return 1
   done < <(awk '{ row[NR] = $0 } END { for (i = NR; i > 0; i--) print row[i] }' "$manifest")
 }
 
@@ -7225,7 +7488,8 @@ geosite_update_transaction() (
   local prepare_only=0 live_fs_root=${FS_ROOT:-} live_config=${CONFIG:-}
   local live_base=${BASE:-} live_geo=${GEO_DIR:-} live_dlc=${DLC_DIR:-}
   local live_root stage_dir stage_root candidate_config manifest_file snapshot
-  local rel changed=0 rc=0 copy_rel
+  local rel rc=0 copy_rel changed_manifest candidate_hash live_hash
+  local adguard_changed=0 adguard_restart_attempted=0
   [[ "${1:-}" == "--prepare-only" ]] && prepare_only=1
   live_root=${live_fs_root:-/}
   live_root=${live_root%/}
@@ -7236,7 +7500,7 @@ geosite_update_transaction() (
   mkdir -p "$stage_root"
   trap 'rm -rf -- "$stage_dir"' EXIT
 
-  for copy_rel in etc/dnscomplex etc/AdGuardHome etc/sing-box etc/smartdns var/lib/dnscomplex/geosite; do
+  for copy_rel in etc/dnscomplex etc/AdGuardHome etc/sing-box etc/smartdns var/lib/dnscomplex/geosite usr/local/lib/dnscomplex-config; do
     if [[ -e "$live_root/$copy_rel" || -L "$live_root/$copy_rel" ]]; then
       mkdir -p "$(dirname "$stage_root/$copy_rel")"
       cp -a -- "$live_root/$copy_rel" "$stage_root/$copy_rel"
@@ -7270,22 +7534,28 @@ geosite_update_transaction() (
   validate_smartdns_config_cmd
 
   manifest_file="$stage_dir/artifacts.txt"
+  changed_manifest="$stage_dir/changed.txt"
+  : >"$changed_manifest"
   geosite_artifact_manifest "$GEO_DIR" "$live_geo" | awk 'NF && !seen[$0]++' | sort >"$manifest_file"
   snapshot="$stage_dir/snapshot"
   mkdir -p "$snapshot"
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
+    candidate_hash=$(geosite_artifact_fingerprint "$stage_root/$rel")
+    live_hash=$(geosite_artifact_fingerprint "$live_root/$rel")
+    [[ "$candidate_hash" != "$live_hash" ]] || continue
     if [[ -e "$live_root/$rel" || -L "$live_root/$rel" ]]; then
       mkdir -p "$(dirname "$snapshot/$rel")"
       cp -a -- "$live_root/$rel" "$snapshot/$rel"
     fi
-    if [[ "$(geosite_artifact_fingerprint "$stage_root/$rel")" != \
-          "$(geosite_artifact_fingerprint "$live_root/$rel")" ]]; then
-      changed=1
+    printf '%s\n' "$rel" >>"$changed_manifest"
+    if [[ "$rel" == etc/AdGuardHome/AdGuardHome.yaml ]] &&
+       ! cmp -s "$stage_root/$rel" "$live_root/$rel"; then
+      adguard_changed=1
     fi
   done <"$manifest_file"
 
-  if (( changed == 0 )); then
+  if [[ ! -s "$changed_manifest" ]]; then
     if (( prepare_only == 0 )); then
       FS_ROOT=$live_fs_root
       CONFIG=$live_config
@@ -7308,20 +7578,26 @@ geosite_update_transaction() (
       rc=1
       break
     fi
-  done <"$manifest_file"
+  done <"$changed_manifest"
   if (( rc == 0 && prepare_only == 0 )); then
-    restart_dns_stack || rc=$?
+    # sing-box watches atomically published local SRS files. SmartDNS and
+    # sing-box configuration do not change in this transaction.
+    if (( adguard_changed )); then
+      adguard_restart_attempted=1
+      systemctl restart AdGuardHome || rc=$?
+    fi
+    if (( rc == 0 )); then wait_dns_ready || rc=$?; fi
   fi
   if (( rc != 0 )); then
-    geosite_restore_snapshot "$snapshot" "$live_root" "$manifest_file" || {
+    geosite_restore_snapshot "$snapshot" "$live_root" "$changed_manifest" || {
       warn "geosite rollback failed; previous artifacts may need manual recovery"
       return 1
     }
-    if (( prepare_only == 0 )); then
-      restart_dns_stack || {
-        warn "geosite rollback restored files but previous DNS stack did not recover"
+    if (( adguard_restart_attempted )); then
+      if ! systemctl restart AdGuardHome || ! wait_dns_ready; then
+        warn "geosite rollback restored files but AdGuard DNS did not recover"
         return 1
-      }
+      fi
     fi
     return "$rc"
   fi
@@ -8569,6 +8845,97 @@ ipsec_policy_route_matches() {
   ' <<<"$routes"
 }
 
+ipsec_dynamic_bind() {
+  local profile=$1
+  jq -e --arg tag "$profile-ipsec" --arg device "ipsec-$profile" '
+    [.outbounds[]? | select(.tag == $tag)] |
+    length == 1 and (.[0] | .type == "direct" and .bind_interface == $device
+      and (has("inet4_bind_address") | not) and (has("routing_mark") | not))
+  ' "${FS_ROOT:-}/etc/sing-box/config.json" >/dev/null 2>&1
+}
+
+ipsec_profile_route_table() {
+  case "$1" in
+    ai) printf '%s\n' "$AI_TABLE" ;;
+    cn) printf '%s\n' "$CN_TABLE" ;;
+    *) return 1 ;;
+  esac
+}
+
+ipsec_overlap_sas() {
+  local profile=$1
+  case "$profile" in ai|cn) ;; *) return 1 ;; esac
+  # The replacement uses a separate VICI IKE and child name. Keep the
+  # numeric SA IDs and VIPs intact when interpreting it as the same profile.
+  sed -E "s/^([[:space:]]*)${profile}-next: /\1${profile}: /"
+}
+
+# Keep the full swanctl section, including its CHILD identity, for a single
+# installed IPv4. Refuse ambiguous addresses before committing a rotation.
+ipsec_sas_for_vip() {
+  local profile=$1 vip=$2 selection=${3:-unique}
+  awk -v profile="$profile:" -v token="[$vip]" -v selection="$selection" '
+    function finish() {
+      if (ours && installed && matching) { if (++count == 1) result=block }
+    }
+    /^[^[:space:]]/ {
+      finish()
+      ours=($1 == profile && $0 ~ /, ESTABLISHED([,[:space:]]|$)/)
+      block=$0 ORS
+      installed=matching=0
+      next
+    }
+    ours {
+      block=block $0 ORS
+      if ($1 == "local" && index($0, token)) matching=1
+      if ($1 == profile && $0 ~ /, INSTALLED([,[:space:]]|$)/) installed=1
+    }
+    END { finish(); if (count == 1 || (count > 0 && selection == "first")) printf "%s", result; else exit 1 }
+  '
+}
+
+ipsec_prefer_routed_sas() {
+  local profile=$1 sas=$2 table vip selected
+  if ipsec_dynamic_bind "$profile"; then
+    sas=$(ipsec_overlap_sas "$profile" <<<"$sas") || return 1
+    table=$(ipsec_profile_route_table "$profile") || return 1
+    vip=$(ip -j -4 route show table "$table" default dev "ipsec-$profile" 2>/dev/null |
+      jq -r 'if length == 1 then .[0].prefsrc // "" else "" end') || vip=""
+    if [[ -n "$vip" ]] && selected=$(ipsec_sas_for_vip "$profile" "$vip" first <<<"$sas"); then
+      printf '%s\n' "$selected"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$sas"
+}
+
+ipsec_oif_rule() {
+  local profile=$1 action=$2 operation=${3:-ensure} table priority rule expected IFS=' '
+  table=$(ipsec_profile_route_table "$profile") || return 1
+  case "$profile:$action" in
+    ai:lookup) priority=12301 ;;
+    ai:unreachable) priority=12302 ;;
+    cn:lookup) priority=12351 ;;
+    cn:unreachable) priority=12352 ;;
+    *) return 1 ;;
+  esac
+  local -a tail=("$action")
+  [[ "$action" != lookup ]] || tail+=("$table")
+  expected="$priority: from all oif ipsec-$profile ${tail[*]}"
+  rule=$(ip -4 rule show | awk -v pref="$priority:" '$1==pref {$1=$1; print}') || return 1
+  if [[ "$operation" == remove ]]; then
+    [[ -n "$rule" ]] || return 0
+    [[ "$rule" == "$expected" ]] || return 1
+    ip -4 rule del priority "$priority" oif "ipsec-$profile" "${tail[@]}"
+    return $?
+  fi
+  [[ "$rule" == "$expected" ]] && return 0
+  [[ -z "$rule" ]] || return 1
+  ip -4 rule add priority "$priority" oif "ipsec-$profile" "${tail[@]}" || return 1
+  rule=$(ip -4 rule show | awk -v pref="$priority:" '$1==pref {$1=$1; print}') || return 1
+  [[ "$rule" == "$expected" ]]
+}
+
 ipsec_profile_runtime_ready() {
   local profile=$1 sas=$2 mark table priority device failed=0
   case "$profile" in
@@ -8590,6 +8957,7 @@ ipsec_profile_runtime_ready() {
       ;;
   esac
 
+  sas=$(ipsec_prefer_routed_sas "$profile" "$sas") || return 1
   read_ipsec_sa_state "$profile" "$sas" || return 1
   if [[ "$IPSEC_STATE_IKE_ESTABLISHED" != "1" ]]; then
     warn "$profile IPsec IKE_SA is not established"
@@ -8627,6 +8995,7 @@ ipsec_profile_sa_ready() {
     cn) device=ipsec-cn ;;
     *) return 1 ;;
   esac
+  sas=$(ipsec_prefer_routed_sas "$profile" "$sas") || return 1
   read_ipsec_sa_state "$profile" "$sas" || return 1
   [[ "$IPSEC_STATE_IKE_ESTABLISHED" == "1" &&
      "$IPSEC_STATE_CHILD_INSTALLED" == "1" &&
@@ -8637,6 +9006,10 @@ ipsec_profile_sa_ready() {
 
 ipsec_profile_dataplane_identity() {
   local profile=$1 vip=$2 sas=$3
+  if ipsec_dynamic_bind "$profile"; then
+    sas=$(ipsec_overlap_sas "$profile" <<<"$sas") || return 1
+    sas=$(ipsec_sas_for_vip "$profile" "$vip" first <<<"$sas") || return 1
+  fi
   {
     printf '%s\n' "$vip"
     awk -v profile="$profile" '
@@ -8694,8 +9067,22 @@ ipsec_probe_output_rule_matches() {
   ' >/dev/null
 }
 
+profile_dataplane_run_probe() {
+  local profile=$1 vip=$2 probe_path=$3 probe_timeout=$4 probe_mark=$5
+  local other_probe_mark=$6 resolver=$7 tls_name=$8 query_domain=$9
+  watchdog_capture 6 "$probe_path" \
+    --profile "$profile" --mode ipsec --vip "$vip" --device "ipsec-$profile" \
+    --probe-mark "$probe_mark" \
+    --reserved-mark "$AI_MARK" --reserved-mark "$CN_MARK" \
+    --reserved-mark "$SINGBOX_AUTO_REDIRECT_INPUT_MARK" \
+    --reserved-mark "$SINGBOX_AUTO_REDIRECT_OUTPUT_MARK" \
+    --reserved-mark "$other_probe_mark" \
+    --resolver-ip "$resolver" --tls-name "$tls_name" \
+    --query-domain "$query_domain" --timeout "$probe_timeout" 2>/dev/null
+}
+
 profile_dataplane_probe_observe() {
-  local profile=$1 vip=$2 sas=$3 identity state_path old_vip old_identity old_count
+  local profile=$1 vip=$2 sas=$3 staged=${4:-} identity state_path old_vip old_identity old_count
   local was_open=0 probe_path probe_mark resolver tls_name query_domain
   local output status count temp fresh_sas probe_rc probe_timeout capture_timeout fresh_identity retry_budget
   [[ "$(profile_egress_mode "$profile")" == ipsec ]] || return 0
@@ -8717,6 +9104,21 @@ profile_dataplane_probe_observe() {
     *) return 1 ;;
   esac
   identity=$(ipsec_profile_dataplane_identity "$profile" "$vip" "$sas") || return 1
+  if [[ "$staged" == staged ]]; then
+    probe_path=$(fs_path /usr/local/lib/dnscomplex/profile-dataplane-probe.py) || return 1
+    [[ -x "$probe_path" ]] && ipsec_probe_output_rule_matches "$profile" || return 1
+    nft get element inet dnscomplex "${profile}_probe_vip4" "{ $vip }" >/dev/null || return 1
+    probe_timeout=$(watchdog_timeout_value 5) || return 1
+    output=$(profile_dataplane_run_probe "$profile" "$vip" "$probe_path" "$probe_timeout" \
+      "$probe_mark" "$other_probe_mark" "$resolver" "$tls_name" "$query_domain") || return 1
+    jq -e --arg profile "$profile" '.status == "pass" and .profile == $profile' <<<"$output" >/dev/null || return 1
+    fresh_sas=$(watchdog_capture 5 swanctl --list-sas 2>/dev/null) || return 1
+    fresh_sas=$(ipsec_overlap_sas "$profile" <<<"$fresh_sas") || return 1
+    fresh_sas=$(ipsec_sas_for_vip "$profile" "$vip" <<<"$fresh_sas") || return 1
+    fresh_identity=$(ipsec_profile_dataplane_identity "$profile" "$vip" "$fresh_sas") || return 1
+    [[ "$fresh_identity" == "$identity" ]] || return 1
+    return 0
+  fi
   state_path=$(profile_dataplane_success_path "$profile")
   old_vip=""
   old_identity=""
@@ -8763,15 +9165,8 @@ profile_dataplane_probe_observe() {
   fi
   probe_timeout=$(watchdog_timeout_value 5) || return 1
   capture_timeout=$(watchdog_timeout_value 6) || return 1
-  if output=$(watchdog_capture 6 "$probe_path" \
-      --profile "$profile" --mode ipsec --vip "$vip" --device "ipsec-$profile" \
-      --probe-mark "$probe_mark" \
-      --reserved-mark "$AI_MARK" --reserved-mark "$CN_MARK" \
-      --reserved-mark "$SINGBOX_AUTO_REDIRECT_INPUT_MARK" \
-      --reserved-mark "$SINGBOX_AUTO_REDIRECT_OUTPUT_MARK" \
-      --reserved-mark "$other_probe_mark" \
-      --resolver-ip "$resolver" --tls-name "$tls_name" \
-      --query-domain "$query_domain" --timeout "$probe_timeout" 2>/dev/null); then
+  if output=$(profile_dataplane_run_probe "$profile" "$vip" "$probe_path" "$probe_timeout" \
+      "$probe_mark" "$other_probe_mark" "$resolver" "$tls_name" "$query_domain"); then
     :
   else
     probe_rc=$?
@@ -8826,8 +9221,6 @@ profile_dataplane_probe_observe() {
       return 1
     fi
     warn "$profile IPsec dataplane identity changed during its probe"
-    # AI identity changes retain the existing global fail-closed behavior.
-    [[ "$profile" == cn ]] || return 1
     # A retry is safe only with the same ready VIP and the full bounded probe,
     # SA readback, and closure reserve still available in the shared budget.
     retry_budget=$(watchdog_timeout_value 17) || return 1
@@ -8839,15 +9232,8 @@ profile_dataplane_probe_observe() {
     was_open=0
     probe_timeout=$(watchdog_timeout_value 5) || return 1
     capture_timeout=$(watchdog_timeout_value 6) || return 1
-    if output=$(watchdog_capture 6 "$probe_path" \
-        --profile "$profile" --mode ipsec --vip "$vip" --device "ipsec-$profile" \
-        --probe-mark "$probe_mark" \
-        --reserved-mark "$AI_MARK" --reserved-mark "$CN_MARK" \
-        --reserved-mark "$SINGBOX_AUTO_REDIRECT_INPUT_MARK" \
-        --reserved-mark "$SINGBOX_AUTO_REDIRECT_OUTPUT_MARK" \
-        --reserved-mark "$other_probe_mark" \
-        --resolver-ip "$resolver" --tls-name "$tls_name" \
-        --query-domain "$query_domain" --timeout "$probe_timeout" 2>/dev/null); then
+    if output=$(profile_dataplane_run_probe "$profile" "$vip" "$probe_path" "$probe_timeout" \
+        "$probe_mark" "$other_probe_mark" "$resolver" "$tls_name" "$query_domain"); then
       status=$(python3 -c 'import json,sys; p=json.load(sys.stdin); print(p.get("status", "fail"),p.get("profile", ""))' \
         <<<"$output" 2>/dev/null || printf 'fail unknown')
       if [[ "$status" != "pass $profile" ]]; then
@@ -8924,6 +9310,7 @@ profile_dataplane_probe_observe() {
 ipsec_child_ready() {
   local child=$1 sas vip
   sas=$(timeout --signal=TERM --kill-after=1s 5s swanctl --list-sas 2>/dev/null || true)
+  sas=$(ipsec_prefer_routed_sas "$child" "$sas") || return 1
   grep -Eq "^${child}: #[0-9]+, ESTABLISHED" <<<"$sas" || return 1
   vip=$(ipsec_vip_from_sas "$child" <<<"$sas")
   [[ -n "$vip" ]]
@@ -9040,6 +9427,7 @@ ipsec_vip() {
       return 1
     fi
   fi
+  sas=$(ipsec_prefer_routed_sas "$child" "$sas") || return 1
   ipsec_vip_from_sas "$child" <<<"$sas"
 }
 
@@ -9289,6 +9677,7 @@ sync_ipsec_alias_nat_profile() {
 ipsec_bind_profile_matches() {
   local profile=$1 vip=$2 config_path count current tag
   tag="${profile}-ipsec"
+  ipsec_dynamic_bind "$profile" && return 0
   config_path="${FS_ROOT:-}/etc/sing-box/config.json"
   command -v jq >/dev/null 2>&1 || return 1
   [[ -f "$config_path" ]] || return 1
@@ -9344,6 +9733,329 @@ EOF
     warn "$profile dataplane probe VIP set did not verify"
     return 1
   }
+}
+
+ipsec_dynamic_source_set() {
+  local profile=$1 active=$2 draining=${3:-} device="ipsec-$1" set_name="${1}_tunnel_vip4"
+  local entries json
+  json=$(nft -j list set inet dnscomplex "$set_name") || return 1
+  if nft get element inet dnscomplex ipsec_dynamic_oif "{ \"$device\" }" >/dev/null 2>&1 &&
+     jq -e --arg a "$active" --arg b "$draining" '
+       [.nftables[]?.set?.elem[]?] | sort == ([$a,$b] | map(select(length > 0)) | sort)
+     ' <<<"$json" >/dev/null; then
+    return 0
+  fi
+  entries=$active
+  [[ -z "$draining" ]] || entries="$active, $draining"
+  nft -f - <<EOF
+add element inet dnscomplex ipsec_dynamic_oif { "$device" }
+flush set inet dnscomplex $set_name
+$(if [[ -n "$entries" ]]; then printf 'add element inet dnscomplex %s { %s }\n' "$set_name" "$entries"; fi)
+EOF
+}
+
+ipsec_dynamic_drain_read() {
+  local profile=$1 path="$RUN_DIR/ipsec-$1-drain" extra
+  IPSEC_DRAIN_VIP="" IPSEC_DRAIN_IKE="" IPSEC_DRAIN_NEXT="" IPSEC_DRAIN_NAME=""
+  [[ -e "$path" ]] || return 0
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  IFS=' ' read -r IPSEC_DRAIN_VIP IPSEC_DRAIN_IKE IPSEC_DRAIN_NEXT IPSEC_DRAIN_NAME extra <"$path" || return 1
+  local ipv4='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+  [[ "$IPSEC_DRAIN_VIP" =~ $ipv4 && "$IPSEC_DRAIN_NEXT" =~ $ipv4 &&
+     "$IPSEC_DRAIN_VIP" != "$IPSEC_DRAIN_NEXT" && "$IPSEC_DRAIN_IKE" =~ ^[0-9]+$ && -z "$extra" &&
+     ( -z "$IPSEC_DRAIN_NAME" || "$IPSEC_DRAIN_NAME" == "$profile" || "$IPSEC_DRAIN_NAME" == "$profile-next" ) ]]
+}
+
+ipsec_dynamic_write_record() {
+  local path=$1 data=$2 temp
+  temp=$(mktemp "$RUN_DIR/.ipsec-vip.XXXXXX") || return 1
+  if ! printf '%s\n' "$data" >"$temp" || ! mv -f -- "$temp" "$path"; then
+    rm -f -- "$temp"
+    return 1
+  fi
+}
+
+ipsec_dynamic_guard_reconcile() {
+  local profile=$1 active=$2 sas=$3 draining=""
+  ipsec_dynamic_drain_read "$profile" || return 1
+  sas=$(ipsec_overlap_sas "$profile" <<<"$sas") || return 1
+  if [[ -n "$active" && "$active" == "$IPSEC_DRAIN_NEXT" ]] &&
+     ipsec_sas_for_vip "$profile" "$IPSEC_DRAIN_VIP" first <<<"$sas" >/dev/null; then
+    draining=$IPSEC_DRAIN_VIP
+  fi
+  ipsec_dynamic_source_set "$profile" "$active" "$draining"
+}
+
+ipsec_dynamic_snat_update() {
+  local profile=$1 vip=$2 alias_rc rules handles handle batch="" device="ipsec-$1"
+  if lan_alias_nat_state_status; then alias_rc=0; else alias_rc=$?; fi
+  [[ "$alias_rc" != 2 ]] || return 1
+  rules=$(nft -j -a list chain inet dnscomplex postrouting) || return 1
+  handles=$(jq -r --arg p "$profile" '
+    .nftables[]?.rule? |
+    select(.comment == ("dnscomplex-" + $p + "-snat") or .comment == ("dnscomplex-lan-alias-snat-" + $p)) |
+    .handle
+  ' <<<"$rules") || return 1
+  while read -r handle; do
+    [[ -z "$handle" ]] && continue
+    [[ "$handle" =~ ^[0-9]+$ ]] || return 1
+    batch+="delete rule inet dnscomplex postrouting handle $handle"$'\n'
+  done <<<"$handles"
+  batch+="add rule inet dnscomplex postrouting oifname \"$device\" ip daddr @${profile}4 snat ip to $vip comment \"dnscomplex-$profile-snat\""$'\n'
+  if [[ "$alias_rc" == 0 ]]; then
+    batch+="add rule inet dnscomplex postrouting oifname \"$device\" ip saddr @lan_alias_source4 snat ip to $vip comment \"dnscomplex-lan-alias-snat-$profile\""$'\n'
+  fi
+  nft -f - <<<"$batch" && ipsec_nat_profile_matches "$profile" "$vip" || return 1
+  [[ "$alias_rc" != 0 ]] || ipsec_alias_nat_profile_matches "$profile" "$vip"
+}
+
+ipsec_dynamic_drain_complete() {
+  local vip=$1 sockets flows
+  sockets=$(watchdog_backend_call 2 ss -Htan src "$vip") || return 1
+  if awk 'NF && $1 != "LISTEN" && $1 != "TIME-WAIT" {busy=1} END {exit !busy}' <<<"$sockets"; then
+    return 1
+  fi
+  sockets=$(watchdog_backend_call 2 ss -Huan src "$vip") || return 1
+  [[ -z "$sockets" ]] || return 1
+  # Include forwarded and alias-SNAT flows, which have no socket bound to the VIP.
+  flows=$(watchdog_backend_call 3 conntrack -L -f ipv4 --reply-dst "$vip" 2>/dev/null) || return 1
+  ! awk 'NF && ($1 != "tcp" || $4 !~ /^(TIME_WAIT|CLOSE)$/) {busy=1} END {exit !busy}' <<<"$flows"
+}
+
+ipsec_dynamic_reconcile_overlap() {
+  local profile=$1 active=$2 sas=$3 table device="ipsec-$1"
+  local return_vip=${4:-} previous_drain=""
+  local candidate="" vip choices old_section identity fresh section proof
+  local drain_path="$RUN_DIR/ipsec-$profile-drain" old_id old_vip raw="$3" name id
+  sas=$(ipsec_overlap_sas "$profile" <<<"$sas") || return 1
+  ipsec_dynamic_drain_read "$profile" || return 1
+  if [[ -n "$return_vip" ]]; then
+    [[ "$active" == "$IPSEC_DRAIN_NEXT" && "$return_vip" == "$IPSEC_DRAIN_VIP" ]] || return 1
+    section=$(ipsec_sas_for_vip "$profile" "$return_vip" <<<"$sas") || return 1
+    if ! grep -Eq "^$profile: #$IPSEC_DRAIN_IKE, ESTABLISHED" <<<"$section"; then
+      [[ "$IPSEC_DRAIN_NAME" == "$profile" ]] || return 1
+      id=$(awk 'NR==1 {gsub(/[^0-9]/, "", $2); print $2}' <<<"$section")
+      [[ "$id" =~ ^[0-9]+$ ]] || return 1
+      if grep -Eq "^[^[:space:]]+ #$IPSEC_DRAIN_IKE," <<<"$raw"; then return 1; fi
+      grep -Eq "^$profile: #$id, ESTABLISHED" <<<"$raw" || return 1
+    fi
+    previous_drain=$(<"$drain_path")
+  elif [[ "$active" == "$IPSEC_DRAIN_NEXT" ]]; then
+    old_vip=$IPSEC_DRAIN_VIP old_id=$IPSEC_DRAIN_IKE
+    # A rekey may replace the numeric ID while retaining the name and VIP.
+    # Wait for a unique installed SA and keep both sources while traffic drains.
+    if section=$(ipsec_sas_for_vip "$profile" "$old_vip" <<<"$sas"); then
+      ipsec_dynamic_drain_complete "$old_vip" || return 0
+      raw=$(watchdog_capture 5 swanctl --list-sas 2>/dev/null) || return 1
+      fresh=$(ipsec_overlap_sas "$profile" <<<"$raw") || return 1
+      section=$(ipsec_sas_for_vip "$profile" "$old_vip" <<<"$fresh") || return 0
+      id=$(awk 'NR==1 {gsub(/[^0-9]/, "", $2); print $2}' <<<"$section")
+      [[ "$id" =~ ^[0-9]+$ ]] || return 1
+      if [[ "$id" != "$old_id" ]]; then
+        [[ -n "$IPSEC_DRAIN_NAME" ]] || return 0
+        if grep -Eq "^[^[:space:]]+ #$old_id," <<<"$raw"; then return 0; fi
+      fi
+      if [[ -n "$IPSEC_DRAIN_NAME" ]]; then
+        grep -Eq "^$IPSEC_DRAIN_NAME: #$id, ESTABLISHED" <<<"$raw" || return 0
+      fi
+      ipsec_sas_for_vip "$profile" "$active" <<<"$fresh" >/dev/null || return 0
+      ipsec_dynamic_drain_complete "$old_vip" || return 0
+      watchdog_run 4 swanctl --terminate --ike-id "$id" --timeout 3 >/dev/null || return 0
+      sas=$(watchdog_capture 5 swanctl --list-sas 2>/dev/null) || return 1
+      sas=$(ipsec_overlap_sas "$profile" <<<"$sas") || return 1
+    fi
+    if ! grep -Eq "^$profile: #$old_id," <<<"$sas" &&
+       ! awk -v profile="$profile:" -v vip="[$old_vip]" '
+         /^[^[:space:]]/ { ours=($1==profile) }
+         ours && $1=="local" && index($0,vip) { found=1 }
+         END {exit !found}
+       ' <<<"$sas"; then
+      ipsec_dynamic_source_set "$profile" "$active" || return 1
+      rm -f -- "$drain_path" || return 1
+    fi
+    return 0
+  fi
+
+  profile_egress_gate_is_open "$profile" || return 0
+  old_section=$(ipsec_sas_for_vip "$profile" "$active" <<<"$sas") || return 0
+  old_id=$(awk 'NR==1 {gsub(/[^0-9]/, "", $2); print $2}' <<<"$old_section")
+  [[ "$old_id" =~ ^[0-9]+$ ]] || return 1
+  choices=$(awk -v profile="$profile:" '
+    /^[^[:space:]]/ {ours=($1 == profile)}
+    ours && $1=="local" {
+      for (i=2;i<=NF;i++)
+        if ($i ~ /^\[([0-9]{1,3}\.){3}[0-9]{1,3}\]$/) print substr($i,2,length($i)-2)
+    }
+  ' <<<"$sas" | sort -u) || return 1
+  while read -r vip; do
+    [[ -n "$vip" && "$vip" != "$active" ]] || continue
+    [[ -z "$return_vip" || "$vip" == "$return_vip" ]] || continue
+    section=$(ipsec_sas_for_vip "$profile" "$vip" <<<"$sas") || continue
+    proof=$(ipsec_vip_from_sas "$profile" <<<"$section") || continue
+    [[ "$vip" == "$proof" ]] || continue
+    [[ -z "$candidate" ]] || return 0
+    candidate=$vip
+  done <<<"$choices"
+  [[ -n "$candidate" ]] || return 0
+  # Leave room for two bounded probes, final SA readback, publication and
+  # the other profile. Retry a deferred transition on the next watchdog round.
+  [[ "$(watchdog_timeout_value 30)" == 30.000 ]] || return 0
+  identity=$(ipsec_profile_dataplane_identity "$profile" "$candidate" "$sas") || return 1
+  table=$(ipsec_profile_route_table "$profile") || return 1
+
+  # The probe exception permits only the marked, source-bound DoH probe.
+  # New application connections still get the old preferred source.
+  nft add element inet dnscomplex "${profile}_probe_vip4" "{ $candidate }" || return 1
+  if ! { profile_dataplane_probe_observe "$profile" "$candidate" "$sas" staged &&
+         profile_dataplane_probe_observe "$profile" "$candidate" "$sas" staged &&
+         raw=$(watchdog_capture 5 swanctl --list-sas 2>/dev/null) &&
+         fresh=$(ipsec_overlap_sas "$profile" <<<"$raw") &&
+         section=$(ipsec_sas_for_vip "$profile" "$candidate" <<<"$fresh") &&
+         [[ "$(ipsec_profile_dataplane_identity "$profile" "$candidate" "$section")" == "$identity" ]]; }; then
+    nft delete element inet dnscomplex "${profile}_probe_vip4" "{ $candidate }" || return 1
+    warn "$profile replacement IPsec VIP did not pass dataplane verification; keeping current route"
+    return 0
+  fi
+  section=$(ipsec_sas_for_vip "$profile" "$active" <<<"$fresh") || return 1
+  grep -Eq "^$profile: #$old_id, ESTABLISHED" <<<"$section" || return 1
+  name=$(awk -v id="#$old_id," '$2==id && $3=="ESTABLISHED," {sub(/:$/, "", $1); print $1}' <<<"$raw")
+  [[ "$name" == "$profile" || "$name" == "$profile-next" ]] || return 1
+  if ipsec_dynamic_write_record "$drain_path" "$active $old_id $candidate $name" &&
+     ipsec_dynamic_source_set "$profile" "$candidate" "$active" &&
+     ipsec_dynamic_snat_update "$profile" "$candidate" &&
+     ip route replace default dev "$device" src "$candidate" table "$table" &&
+     ipsec_policy_route_matches "$table" "$device" "$candidate" &&
+     nft delete element inet dnscomplex "${profile}_probe_vip4" "{ $active }" &&
+     ipsec_dynamic_write_record "$(profile_dataplane_success_path "$profile")" "$candidate $identity 2"; then
+    printf '%s\n' "$profile IPsec VIP switched after dataplane verification; retaining old IKE for existing flows" >&2
+    return 0
+  fi
+  # The old IKE has not been touched. Restore its preference before returning.
+  ip route replace default dev "$device" src "$active" table "$table" &&
+    ipsec_dynamic_snat_update "$profile" "$active" &&
+    nft -f - <<<"flush set inet dnscomplex ${profile}_probe_vip4
+add element inet dnscomplex ${profile}_probe_vip4 { $active }" &&
+    ipsec_dynamic_source_set "$profile" "$active" "$return_vip" &&
+    { if [[ -n "$previous_drain" ]]; then
+        ipsec_dynamic_write_record "$drain_path" "$previous_drain"
+      else
+        rm -f -- "$drain_path"
+      fi; } || warn "$profile IPsec VIP switch rollback could not be verified"
+  return 1
+}
+
+ipsec_load_return_connection() (
+  local profile=$1 requested=$2 config stage loaded
+  config=$(fs_path /etc/swanctl/swanctl.conf) || return 1
+  stage=$(mktemp "$(dirname "$config")/.return.XXXXXX") || return 1
+  trap 'rm -f -- "$stage"' EXIT
+  python3 - "$config" "$stage" "$profile" "$requested" <<'PY' || return 1
+import ipaddress
+from pathlib import Path
+import re
+import sys
+
+config, stage = map(Path, sys.argv[1:3])
+profile, address = sys.argv[3:]
+vip = ipaddress.IPv4Address(address)
+if vip.is_unspecified:
+    raise ValueError("a specific return VIP is required")
+text = config.read_text()
+pattern = rf"(?ms)^([ \t]*){profile}[ \t]*\{{\n.*?^\1\}}[ \t]*$"
+matches = list(re.finditer(pattern, text))
+if len(matches) != 1:
+    raise ValueError("expected exactly one primary connection")
+match = matches[0]
+block = match[0]
+block, count = re.subn(r"(?m)^([ \t]*vips[ \t]*=[ \t]*).+$",
+                       lambda m: m[1] + str(vip), block)
+if count != 1:
+    raise ValueError("expected one primary VIP setting")
+block, count = re.subn(r"(?m)^([ \t]*start_action[ \t]*=[ \t]*).+$",
+                       lambda m: m[1] + "none", block)
+if count != 1:
+    raise ValueError("expected one primary start action")
+block, count = re.subn(r"(?m)^([ \t]*unique[ \t]*=[ \t]*).+$",
+                       lambda m: m[1] + "never", block)
+if not count:
+    block = re.sub(r"(?m)^([ \t]*)vips[ \t]*=", r"\1unique = never\n\1vips =", block)
+elif count != 1:
+    raise ValueError("expected at most one primary uniqueness setting")
+stage.write_text(text[:match.start()] + block + text[match.end():])
+PY
+  atomic_publish_file_cmd "$stage" "$config" 0600 || return 1
+  watchdog_run 10 swanctl --load-conns --file /etc/swanctl/swanctl.conf >/dev/null || return 1
+  loaded=$(watchdog_capture 5 swanctl --list-conns) || return 1
+  grep -q "^$profile:" <<<"$loaded" && grep -q "^$profile-next:" <<<"$loaded"
+)
+
+# Return traffic to the primary connection before the deployment rollback
+# removes interface binding support. Status 75 leaves the live path in place.
+ipsec_return_profile_cmd() {
+  local profile=${1:-} requested=${2:-} alias table active sas primary standby section id
+  local ipv4='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+  [[ $# == 2 && ( "$profile" == ai || "$profile" == cn ) && "$requested" =~ $ipv4 ]] || return 2
+  need_root
+  acquire_maintenance_lock || return 1
+  require_resolved_operations
+  ipsec_dynamic_bind "$profile" || return 1
+  watchdog_budget_start || return 1
+  alias="$profile-next"
+  table=$(ipsec_profile_route_table "$profile") || return 1
+  active=$(ip -j -4 route show table "$table" default dev "ipsec-$profile" |
+    jq -er 'select(length == 1) | .[0].prefsrc') || return 1
+  sas=$(watchdog_capture 5 swanctl --list-sas) || return 1
+  [[ $(grep -c "^$profile:" <<<"$sas") -le 1 && $(grep -c "^$alias:" <<<"$sas") -le 1 ]] || return 75
+  primary=$(ipsec_vip_from_sas "$profile" <<<"$sas") || primary=""
+  standby=$(ipsec_vip_from_sas "$alias" <<<"$sas") || standby=""
+  [[ -z "$standby" || "$primary" != "$standby" ]] || {
+    warn "$profile return tunnel has the same VIP as the live tunnel"
+    return 1
+  }
+  if ! profile_egress_gate_is_open "$profile"; then
+    warn "$profile egress gate is closed; waiting for fresh watchdog evidence"
+    return 75
+  fi
+  ipsec_dynamic_drain_read "$profile" || return 1
+  if [[ -n "$IPSEC_DRAIN_NEXT" ]]; then
+    [[ "$active" == "$IPSEC_DRAIN_NEXT" ]] || return 1
+    if [[ -n "$primary" && "$active" == "$standby" && "$primary" == "$IPSEC_DRAIN_VIP" ]]; then
+      ipsec_dynamic_reconcile_overlap "$profile" "$active" "$sas" "$primary" || return 1
+    else
+      ipsec_dynamic_reconcile_overlap "$profile" "$active" "$sas" || return 1
+    fi
+    return 75
+  fi
+  if [[ "$active" == "$standby" ]]; then
+    if [[ -z "$primary" ]]; then
+      ! grep -q "^$profile:" <<<"$sas" || return 75
+      [[ "$requested" != "$active" ]] || return 1
+      section=$(ipsec_sas_for_vip "$alias" "$active" <<<"$sas") || return 1
+      id=$(awk 'NR == 1 {gsub(/[^0-9]/, "", $2); print $2}' <<<"$section")
+      [[ "$id" =~ ^[0-9]+$ ]] || return 1
+      ipsec_load_return_connection "$profile" "$requested" || return 1
+      sas=$(watchdog_capture 5 swanctl --list-sas) || return 1
+      grep -Eq "^$alias: #$id, ESTABLISHED" <<<"$sas" || return 1
+      ! grep -q "^$profile:" <<<"$sas" || return 1
+      watchdog_run 18 swanctl --initiate --ike "$profile" --child "$profile" --timeout 15 >/dev/null || return 1
+      return 75
+    fi
+    ipsec_dynamic_reconcile_overlap "$profile" "$active" "$sas" || return 1
+    return 75
+  fi
+  [[ "$active" == "$primary" ]] || return 1
+  if ! grep -q "^$alias:" <<<"$sas"; then
+    return 0
+  fi
+  # An unselected standby may still have probes or flows from an earlier
+  # attempt. Only retire the exact IKE after verifying its source is idle.
+  [[ -n "$standby" ]] || return 75
+  ipsec_dynamic_drain_complete "$standby" || return 75
+  section=$(ipsec_sas_for_vip "$alias" "$standby" <<<"$sas") || return 1
+  id=$(awk 'NR == 1 {gsub(/[^0-9]/, "", $2); print $2}' <<<"$section")
+  [[ "$id" =~ ^[0-9]+$ ]] || return 1
+  watchdog_run 5 swanctl --terminate --ike-id "$id" --timeout 3 >/dev/null || return 1
+  return 75
 }
 
 sync_ipsec_nat_profile() {
@@ -9429,12 +10141,12 @@ sync_singbox_ipsec_bind_addresses() {
     *) warn "unknown IPsec bind-address profile: $only_profile"; return 1 ;;
   esac
   if [[ -z "$only_profile" || "$only_profile" == ai ]]; then
-    if [[ "${AI_EGRESS_MODE:-ipsec}" == ipsec ]]; then
+    if [[ "${AI_EGRESS_MODE:-ipsec}" == ipsec ]] && ! ipsec_dynamic_bind ai; then
       ai_vip=$(ipsec_vip ai) || return 1
     fi
   fi
   if [[ -z "$only_profile" || "$only_profile" == cn ]]; then
-    if [[ "${CN_EGRESS_MODE:-ipsec}" == ipsec ]]; then
+    if [[ "${CN_EGRESS_MODE:-ipsec}" == ipsec ]] && ! ipsec_dynamic_bind cn; then
       cn_vip=$(ipsec_vip cn) || return 1
     fi
   fi
@@ -9638,6 +10350,9 @@ ensure_policy_route_profile() {
     warn "could not install the $profile policy route"
     return 1
   fi
+  if ipsec_dynamic_bind "$profile"; then
+    ipsec_oif_rule "$profile" unreachable && ipsec_oif_rule "$profile" lookup || return 1
+  fi
   sync_ipsec_probe_policy_rule "$profile" "$vip"
 }
 
@@ -9774,42 +10489,251 @@ probe_egress_cmd() {
 
 trace_domain_cmd() {
   [[ $# -eq 1 ]] || die "usage: dnscomplex trace-domain DOMAIN"
-  local domain=$1 profile=default source=default ips_v4 ips_v6 ip hit outbound=default
-  if grep -Rhs -F "$domain" "$GEO_DIR"/ai.sources "$GEO_DIR"/ai.custom "$GEO_DIR"/ai-support.sources /etc/dnscomplex/ai.domains 2>/dev/null | grep -Fxq "$domain"; then
-    profile=AI
-    source=ai-domain-list
-  elif grep -Rhs -F "$domain" "$GEO_DIR"/cn-video.sources "$GEO_DIR"/cn-video.custom /etc/dnscomplex/cn-video.domains 2>/dev/null | grep -Fxq "$domain"; then
-    profile=CN
-    source=cn-domain-list
-  fi
-  command -v dig >/dev/null 2>&1 || die "install dnsutils for dig"
-  ips_v4=$(dig +time=3 +tries=1 +short A "$domain" @127.0.0.1 -p 53 2>/dev/null | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || true)
-  ips_v6=$(dig +time=3 +tries=1 +short AAAA "$domain" @127.0.0.1 -p 53 2>/dev/null | grep ':' || true)
-  printf 'domain=%s\n' "$domain"
-  printf 'A=%s\n' "${ips_v4:-none}"
-  printf 'AAAA=%s\n' "${ips_v6:-none}"
-  while IFS= read -r ip; do
-    [[ -n "$ip" ]] || continue
-    hit=default
-    nft get element inet dnscomplex ai4 "{ $ip }" >/dev/null 2>&1 && hit=AI
-    nft get element inet dnscomplex cn4 "{ $ip }" >/dev/null 2>&1 && hit=CN
-    if [[ "$hit" == "AI" || "$hit" == "CN" ]]; then
-      profile=$hit
-      source="nftset:${hit,,}4"
-    fi
-    printf 'nftset[%s]=%s\n' "$ip" "$hit"
-  done <<<"$ips_v4"
-  printf 'profile=%s\nprofile_source=%s\n' "$profile" "$source"
-  case "$profile" in
-    AI) outbound=$(profile_outbound_tag ai) ;;
-    CN) outbound=$(profile_outbound_tag cn) ;;
-    *) outbound=default ;;
-  esac
-  printf 'expected_outbound=%s\n' "$outbound"
-  if [[ "$profile" =~ ^(AI|CN)$ && -n "$ips_v6" ]]; then
-    printf 'warning=%s\n' "$profile domain returned AAAA; AI/CN should remain IPv4-only"
-    return 1
-  fi
+  python3 - "$1" "$(fs_path /etc/sing-box/config.json)" "$FS_ROOT" <<'TRACE_DOMAIN'
+import ipaddress
+import json
+from pathlib import Path
+import re
+import resource
+import subprocess
+import sys
+import tempfile
+import time
+
+domain, config_path, root = sys.argv[1:]
+domain = (domain[:-1] if domain.endswith('.') else domain).lower()
+if (not domain or len(domain) > 253 or not all(
+        re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label)
+        for label in domain.split('.'))):
+    raise SystemExit('invalid domain name')
+try:
+    ipaddress.ip_address(domain)
+except ValueError:
+    pass
+else:
+    raise SystemExit('trace-domain requires a domain, not an IP address')
+
+deadline = time.monotonic() + 20
+limit = 8 * 1024 * 1024
+warnings = []
+
+def read_json(path):
+    with Path(path).open('rb') as stream:
+        data = stream.read(limit+1)
+    if len(data) > limit:
+        raise ValueError('diagnostic input exceeds bound')
+    return json.loads(data)
+
+def run(argv, cap=2):
+    remaining = deadline-time.monotonic()
+    if remaining <= 0:
+        return None
+    with tempfile.TemporaryFile() as output:
+        try:
+            def bound_files():
+                resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+            result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=output,
+                                    stderr=subprocess.DEVNULL, timeout=min(cap, remaining),
+                                    preexec_fn=bound_files)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode or output.tell() > limit:
+            return None
+        output.seek(0)
+        return output.read(limit).decode(errors='replace')
+
+def combine(values, mode):
+    if mode == 'and':
+        return False if False in values else (None if None in values else True)
+    return True if True in values else (None if None in values else False)
+
+def match(rule):
+    if not isinstance(rule, dict):
+        return None
+    if rule.get('type') == 'logical':
+        if rule.get('mode') not in ('and', 'or') or not isinstance(rule.get('rules'), list):
+            return None
+        value = combine([match(item) for item in rule['rules']], rule['mode'])
+    else:
+        values = []
+        for key in ('domain', 'domain_suffix', 'domain_keyword'):
+            entries = rule.get(key, [])
+            if isinstance(entries, str):
+                entries = [entries]
+            if not isinstance(entries, list) or not all(isinstance(item, str) for item in entries):
+                return None
+            for entry in entries:
+                entry = entry.lower()
+                if key == 'domain':
+                    values.append(domain == entry)
+                elif key == 'domain_suffix':
+                    values.append(domain == entry.lstrip('.') or domain.endswith('.'+entry.lstrip('.')))
+                else:
+                    values.append(entry in domain)
+        # Do not emulate RE2/AdGuard/IP rules with different Python semantics.
+        unsupported = set(rule)-{'type', 'invert', 'domain', 'domain_suffix', 'domain_keyword'}
+        has_regex = bool(rule.get('domain_regex'))
+        value = combine(values + ([None] if has_regex else []), 'or') if values or has_regex else None
+        if unsupported-{'domain_regex'}:
+            value = None
+    return (not value) if rule.get('invert') and value is not None else value
+
+profile, source, outbound = 'unknown', 'insufficient-rule-evidence', 'unknown'
+matches = []
+try:
+    config = read_json(config_path)
+    route = config['route']
+    sets = {item['tag']: item for item in route['rule_set']}
+    cache = {}
+    def set_match(tag):
+        if tag in cache:
+            return cache[tag]
+        spec = sets[tag]
+        if spec.get('type') != 'local':
+            return None
+        path = Path(root + spec['path']) if root else Path(spec['path'])
+        if spec.get('format') == 'source' or path.suffix == '.json':
+            data = read_json(path)
+        else:
+            with tempfile.TemporaryDirectory(prefix='dnscomplex-trace-') as td:
+                target = Path(td)/'rule.json'
+                if run(['sing-box', 'rule-set', 'decompile', '--output', str(target), str(path)]) is None:
+                    return None
+                data = read_json(target)
+        if data.get('version') not in (1, 2, 3) or not isinstance(data.get('rules'), list):
+            return None
+        cache[tag] = combine([match(rule) for rule in data['rules']], 'or')
+        return cache[tag]
+    uncertain = False
+    selected = False
+    for rule in route['rules']:
+        if rule.get('action') != 'route' or 'rule_set' not in rule:
+            continue
+        tags = rule['rule_set'] if isinstance(rule['rule_set'], list) else [rule['rule_set']]
+        try:
+            value = combine([set_match(tag) for tag in tags], 'or')
+        except (OSError, ValueError, KeyError, TypeError):
+            value = None
+        if set(rule)-{'rule_set', 'action', 'outbound'} and value is not False:
+            value = None
+        target = rule.get('outbound', '')
+        candidate = 'AI' if target.startswith('ai-') else ('CN' if target.startswith('cn-') else 'unknown')
+        if value is True:
+            if candidate not in matches:
+                matches.append(candidate)
+            if not selected and not uncertain:
+                profile, source, outbound = candidate, 'rule-set:'+','.join(tags), target
+                selected = True
+        elif value is None and not selected:
+            uncertain = True
+    if not selected and not uncertain and route.get('final') == 'default':
+        profile, source, outbound = 'default', 'domain-rules:no-match', 'default'
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    warnings.append('rule-evidence-unavailable')
+
+print('domain='+domain)
+print('profile='+profile)
+print('profile_source='+source)
+print('expected_outbound='+outbound)
+print('actual_outbound=unknown')
+print('evidence_scope=domain-policy-and-local-nft-observation; not a client packet or remote egress test')
+if len(matches) > 1:
+    print('rule_overlap='+','.join(matches))
+    warnings.append('overlapping-domain-rules; configured route order retained')
+
+answers = {}
+dns_ok = True
+for kind, family in [('A', 4), ('AAAA', 6)]:
+    text = run(['dig', '+time=2', '+tries=1', '+short', kind, domain, '@127.0.0.1', '-p', '53'], 3)
+    ips = []
+    for line in (text or '').splitlines():
+        try:
+            address = ipaddress.ip_address(line.strip())
+            if address.version == family and str(address) not in ips:
+                ips.append(str(address))
+        except ValueError:
+            pass
+    if len(ips) > 16:
+        warnings.append('dns-answers-truncated')
+    answers[kind] = ips[:16]
+    dns_ok = dns_ok and text is not None
+    print(kind+'='+(','.join(answers[kind]) or 'none'))
+dns_ok = dns_ok and bool(answers['A'] or (profile == 'default' and answers['AAAA']))
+print('dns_status='+('answered' if dns_ok else 'unavailable'))
+
+def nft_set(name):
+    text = run(['nft', '-j', 'list', 'set', 'inet', 'dnscomplex', name], 1.5)
+    try:
+        sets = [entry['set'] for entry in json.loads(text)['nftables'] if 'set' in entry]
+        found = [item for item in sets if item.get('family') == 'inet' and item.get('table') == 'dnscomplex' and item.get('name') == name]
+        if len(found) != 1 or found[0].get('type') != ('ipv6_addr' if name.endswith('6') else 'ipv4_addr'):
+            return None
+        elements = found[0].get('elem', [])
+        return elements if isinstance(elements, list) else None
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+def contains(elements, address):
+    if elements is None:
+        return None
+    unknown = False
+    for item in elements:
+        try:
+            if isinstance(item, dict) and 'elem' in item:
+                item = item['elem']['val']
+            if isinstance(item, str):
+                hit = address in ipaddress.ip_network(item, strict=False)
+            elif 'prefix' in item:
+                value = item['prefix']
+                hit = address in ipaddress.ip_network(f"{value['addr']}/{value['len']}", strict=False)
+            elif 'range' in item:
+                hit = ipaddress.ip_address(item['range'][0]) <= address <= ipaddress.ip_address(item['range'][1])
+            else:
+                unknown = True; continue
+            if hit:
+                return True
+        except (ValueError, KeyError, TypeError):
+            unknown = True
+    return None if unknown else False
+
+ip_sets = {name: nft_set(name.lower()+'4') for name in ('AI', 'CN')}
+nft_ok = all(value is not None for value in ip_sets.values())
+for text in answers['A']:
+    hits = {name: contains(elements, ipaddress.ip_address(text)) for name, elements in ip_sets.items()}
+    observed = ','.join(name for name, value in hits.items() if value is True) or 'default'
+    if None in hits.values():
+        observed = 'unknown'; nft_ok = False
+    print(f'nftset[{text}]={observed}')
+    if observed not in (profile, 'default', 'unknown'):
+        warnings.append('shared-ip-observation; IP membership does not reassign domain policy')
+
+gate = 'not-applicable'
+if profile in ('AI', 'CN'):
+    families = [4, 6] if outbound.endswith('-xray') else [4]
+    gates = []
+    for family in families:
+        elements = nft_set(profile.lower()+'_ready'+str(family))
+        gates.append(None if elements is None else any(
+            isinstance(item, dict) and item.get('prefix', {}).get('addr') == ('0.0.0.0' if family == 4 else '::')
+            and item['prefix'].get('len') == 0 for item in elements))
+    gate = 'unknown' if None in gates else ('open' if all(gates) else 'closed')
+print('profile_gate='+gate)
+if not dns_ok:
+    warnings.append('DNS query failed or returned no usable address')
+if profile == 'unknown':
+    warnings.append('domain-rule-evidence-incomplete; classification not inferred from IP')
+if profile in ('AI', 'CN') and answers['AAAA']:
+    warnings.append(profile+' domain returned AAAA; expected IPv4-only')
+if gate in ('closed', 'unknown'):
+    warnings.append('profile readiness '+gate+'; run dnscomplex health --json for existing checks and recommended_actions')
+for warning in dict.fromkeys(warnings):
+    print('warning='+warning)
+print('recommended_action=' + ('檢查 dnscomplex health --json 的 detail 與 recommended_action；DNS 問題再檢查 SmartDNS／AdGuard；實際出口須由客戶端流量或出口探測確認。' if warnings or not nft_ok else
+      '域名規則與本機觀測已列出；如應用仍失敗，從原客戶端重現並核對封包及出口，不能以此結果判定遠端可用。'))
+failed = (not dns_ok or not nft_ok or profile == 'unknown' or gate in ('closed', 'unknown')
+          or (profile in ('AI', 'CN') and bool(answers['AAAA'])) or time.monotonic() >= deadline)
+raise SystemExit(1 if failed else 0)
+TRACE_DOMAIN
 }
 
 json_escape() {
@@ -10192,8 +11116,25 @@ def ipsec_policy_route_matches(table, device, vip):
     return False
 
 def ipsec_runtime_state(sas, rules, profile, mark, table, priority):
-    state = ipsec_sa_state(sas, profile)
     device = "ipsec-" + profile
+    oif_priority = 12301 if profile == "ai" else 12351
+    if re.search(rf"(?m)^{oif_priority}:\s+from all oif {device} lookup {table}\s*$", rules):
+        sas = re.sub(rf"(?m)^([ \t]*){profile}-next: ", rf"\g<1>{profile}: ", sas)
+        # During overlap the first listed IKE need not be the one carrying
+        # new flows. Use the installed source route to choose its SA section.
+        route = run(["ip", "route", "show", "table", str(table)], 4)
+        for line in route.stdout.splitlines() if route.returncode == 0 else []:
+            match = re.search(rf"^default\s+dev {device}\b.*\bsrc (\S+)", line)
+            if not match or not valid_ipsec_vip(match[1]):
+                continue
+            for section in re.split(r"(?m)(?=^\S)", sas):
+                state = ipsec_sa_state(section, profile)
+                if state["ready_vip"] == match[1]:
+                    sas = section
+                    break
+            break
+    state = ipsec_sa_state(sas, profile)
+    state["dataplane_identity"] = profile_dataplane_identity(profile, state["ready_vip"], sas)
     state["interface_up"] = ipsec_interface_up(device)
     state["policy_rule"] = ipsec_policy_rule_present(
         rules, mark, table, priority
@@ -10487,7 +11428,7 @@ for profile in ["ai", "cn"]:
             gate_open = False
         proof_fresh = (
             bool(probe_vip) and probe_vip == state["ready_vip"] and
-            probe_identity == profile_dataplane_identity(profile, state["ready_vip"], sas) and
+            probe_identity == state["dataplane_identity"] and
             probe_count >= 2 and probe_age is not None and probe_age <= 180
         )
         if not probe_vip:
@@ -10887,6 +11828,7 @@ ipsec_child_established() {
   if ! sas=$(watchdog_capture 5 swanctl --list-sas 2>/dev/null); then
     return 2
   fi
+  sas=$(ipsec_prefer_routed_sas "$child" "$sas") || return 2
   ipsec_vip_from_sas "$child" <<<"$sas" >/dev/null
 }
 
@@ -11089,6 +12031,9 @@ repair_policy_routes_if_needed() {
       }
       profile_dataplane_clear_evidence "$profile"
       sync_ipsec_probe_vip_profile "$profile" "" || failed=1
+      if ipsec_dynamic_bind "$profile"; then
+        ipsec_dynamic_source_set "$profile" "" || failed=1
+      fi
       continue
     fi
     vip=$IPSEC_STATE_READY_VIP
@@ -11280,8 +12225,19 @@ repair_policy_routes_if_needed() {
       failed=1
       continue
     fi
+    if ipsec_dynamic_bind "$profile" &&
+       ! { ipsec_oif_rule "$profile" unreachable && ipsec_oif_rule "$profile" lookup &&
+           ipsec_dynamic_guard_reconcile "$profile" "$vip" "$fresh_sas"; }; then
+      warn "$profile IPsec source routing or guard did not verify"
+      failed=1
+      continue
+    fi
     if profile_dataplane_probe_observe "$profile" "$vip" "$fresh_sas"; then
-      :
+      if ipsec_dynamic_bind "$profile" &&
+         ! ipsec_dynamic_reconcile_overlap "$profile" "$vip" "$fresh_sas"; then
+        warn "$profile IPsec VIP rotation state could not be verified"
+        failed=1
+      fi
     else
       probe_rc=$?
       if [[ "$probe_rc" == 2 ]]; then
@@ -11429,6 +12385,7 @@ watchdog_cmd() {
     exec 9>&-
     return 0
   fi
+  require_resolved_operations
   if watchdog_locked_cmd; then
     rc=0
   else
@@ -11705,6 +12662,81 @@ lan_alias_verify_owner_cmd() {
   lan_alias_helper_cmd verify-owner
 }
 
+switch_ipsec_bindings_cmd() {
+  need_root
+  [[ $# == 1 && -f "$1" ]] || die "usage: dnscomplex switch-ipsec-bindings CANDIDATE.json"
+  acquire_maintenance_lock || return $?
+  require_resolved_operations
+  local profile
+  for profile in ai cn; do
+    profile_uses_ipsec "$profile" || die "binding switch requires both IPsec profiles"
+  done
+  if ! lan_alias_helper_cmd reconcile --replacement-config "$1"; then
+    if nft list table inet dnscomplex_binding_switch >/dev/null 2>&1; then
+      warn "binding switch failed; LAN forwarding guard remains active"
+    fi
+    return 1
+  fi
+  for profile in ai cn; do
+    if ! ipsec_dynamic_bind "$profile"; then
+      ipsec_oif_rule "$profile" lookup remove && ipsec_oif_rule "$profile" unreachable remove || return 1
+      if nft get element inet dnscomplex ipsec_dynamic_oif "{ \"ipsec-$profile\" }" >/dev/null 2>&1; then
+        nft -f - <<EOF || return 1
+delete element inet dnscomplex ipsec_dynamic_oif { "ipsec-$profile" }
+flush set inet dnscomplex ${profile}_tunnel_vip4
+EOF
+      fi
+    fi
+  done
+  if ! watchdog_locked_cmd || ! lan_alias_verify_owner_cmd ||
+     ! ipsec_interface_is_up dnscomplex0 ||
+     ! nft -j list table inet sing-box |
+        jq -e 'any(.nftables[]?.rule?.expr[]?; has("redirect"))' >/dev/null; then
+    warn "binding switch readiness failed; LAN forwarding guard remains active"
+    return 1
+  fi
+  nft list chain inet dnscomplex_binding_switch forward || return 1
+  nft delete table inet dnscomplex_binding_switch
+}
+
+upgrade_ipsec_bindings_cmd() (
+  need_root
+  acquire_maintenance_lock || return $?
+  require_resolved_operations
+  local config backup staged snapshot
+  config=$(fs_path /etc/sing-box/config.json) || return 1
+  backup="$BASE/ipsec-bindings-before-upgrade.json"
+  [[ ! -e "$backup" && ! -L "$backup" ]] ||
+    die "a binding rollback snapshot already exists at $backup"
+  umask 077
+  mkdir -p "$BASE" || return 1
+  staged=$(mktemp "$BASE/.ipsec-bindings-candidate.XXXXXX") || return 1
+  trap 'rm -f -- "$staged" "${snapshot:-}"' EXIT
+  jq -e '
+    [.outbounds[] | select(.tag == "ai-ipsec" or .tag == "cn-ipsec")] as $selected |
+    if ($selected | length == 2 and all(.[]; has("inet4_bind_address"))) then
+      (.outbounds[] | select(.tag == "ai-ipsec" or .tag == "cn-ipsec")) |= del(.inet4_bind_address)
+    else error("both profiles must currently have a fixed IPv4 VIP") end
+  ' "$config" >"$staged" || return 1
+  snapshot=$(mktemp "$BASE/.ipsec-bindings-backup.XXXXXX") || return 1
+  cat "$config" >"$snapshot" || return 1
+  ln -- "$snapshot" "$backup" || return 1
+  log "binding rollback snapshot saved at $backup"
+  switch_ipsec_bindings_cmd "$staged"
+)
+
+restore_ipsec_bindings_cmd() {
+  need_root
+  acquire_maintenance_lock || return $?
+  require_resolved_operations
+  local backup="$BASE/ipsec-bindings-before-upgrade.json" config
+  [[ -f "$backup" && ! -L "$backup" ]] || die "binding rollback snapshot is missing"
+  config=$(fs_path /etc/sing-box/config.json) || return 1
+  switch_ipsec_bindings_cmd "$backup" || return $?
+  cmp -s -- "$backup" "$config" || die "restored binding configuration differs from its snapshot"
+  rm -f -- "$backup"
+}
+
 write_singbox_egress_cmd() {
   need_root || return $?
   lan_alias_close_cmd || return $?
@@ -11820,6 +12852,7 @@ runtime_nft_classified_output_rules() {
   fi
   cat <<EOF
     $selector meta nfproto ipv6 counter drop comment "dnscomplex-${profile}-classified-ipv6-drop"
+    $selector oifname @ipsec_dynamic_oif ip saddr != @${profile}_tunnel_vip4 counter drop comment "dnscomplex-${profile}-tunnel-source"
     $selector ip daddr != @${profile}_ready4 counter drop comment "dnscomplex-${profile}-classified-not-ready"
 $quic_rule
     $selector counter meta mark set $mark accept comment "dnscomplex-${profile}-classified-output"
@@ -11958,6 +12991,10 @@ table inet dnscomplex {
 ${nft_rules[0]}
   }
 
+  set ipsec_dynamic_oif { type ifname; }
+  set ai_tunnel_vip4 { type ipv4_addr; }
+  set cn_tunnel_vip4 { type ipv4_addr; }
+
   set lan_alias_ready4 {
     type ipv4_addr
     flags interval
@@ -12036,6 +13073,10 @@ ${nft_rules[15]}
 
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
+    oifname "ipsec-ai" oifname @ipsec_dynamic_oif ip saddr @ai_tunnel_vip4 return
+    oifname "ipsec-cn" oifname @ipsec_dynamic_oif ip saddr @cn_tunnel_vip4 return
+    oifname "ipsec-ai" oifname @ipsec_dynamic_oif meta mark $AI_MARK ip saddr @ai_probe_vip4 return
+    oifname "ipsec-cn" oifname @ipsec_dynamic_oif meta mark $CN_MARK ip saddr @cn_probe_vip4 return
 ${nft_rules[16]}
 ${nft_rules[17]}
   }
@@ -12292,68 +13333,56 @@ write_swanctl_cmd() {
   cn_pass=${CN_IPSEC_PASSWORD//\\/\\\\}; cn_pass=${cn_pass//\"/\\\"}
   tmp=$(mktemp) || return $?
   chmod 0600 "$tmp" || return $?
+  local connections
+  connections=$(for profile in ai cn; do
+  if [[ "$profile" == ai ]]; then
+    server=$AI_IPSEC_SERVER xfrm_id=$AI_XFRM_ID eap_user="\"$ai_user\""
+  else
+    server=$CN_IPSEC_SERVER xfrm_id=$CN_XFRM_ID eap_user="\"$cn_user\""
+  fi
+  for slot in "$profile" "$profile-next"; do
+    start_action=start dpd_action=restart close_action=restart uniqueness=""
+    if [[ "$slot" == "$profile-next" ]]; then
+      start_action=none dpd_action=clear close_action=none uniqueness="    unique = never"
+    fi
+    cat <<CONNECTION
+  $slot {
+    version = 2
+    local_addrs = $local_ip
+    remote_addrs = $server
+    vips = 0.0.0.0
+    proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
+    dpd_delay = 20s
+    dpd_timeout = 90s
+    rekey_time = 0s
+$uniqueness
+    local {
+      auth = eap-mschapv2
+      eap_id = $eap_user
+    }
+    remote {
+      auth = pubkey
+      id = $IPSEC_REMOTE_ID
+    }
+    children {
+      $slot {
+        local_ts = 0.0.0.0/0
+        remote_ts = 0.0.0.0/0
+        if_id_in = $xfrm_id
+        if_id_out = $xfrm_id
+        esp_proposals = aes256-sha256,aes128-sha256
+        dpd_action = $dpd_action
+        start_action = $start_action
+        close_action = $close_action
+      }
+    }
+  }
+CONNECTION
+  done
+done) || return $?
   cat >"$tmp" <<EOF || return $?
 connections {
-  ai {
-    version = 2
-    local_addrs = $local_ip
-    remote_addrs = $AI_IPSEC_SERVER
-    vips = 0.0.0.0
-    proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
-    dpd_delay = 20s
-    dpd_timeout = 90s
-    rekey_time = 0s
-    local {
-      auth = eap-mschapv2
-      eap_id = "$ai_user"
-    }
-    remote {
-      auth = pubkey
-      id = $IPSEC_REMOTE_ID
-    }
-    children {
-      ai {
-        local_ts = 0.0.0.0/0
-        remote_ts = 0.0.0.0/0
-        if_id_in = $AI_XFRM_ID
-        if_id_out = $AI_XFRM_ID
-        esp_proposals = aes256-sha256,aes128-sha256
-        dpd_action = restart
-        start_action = start
-        close_action = restart
-      }
-    }
-  }
-  cn {
-    version = 2
-    local_addrs = $local_ip
-    remote_addrs = $CN_IPSEC_SERVER
-    vips = 0.0.0.0
-    proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
-    dpd_delay = 20s
-    dpd_timeout = 90s
-    rekey_time = 0s
-    local {
-      auth = eap-mschapv2
-      eap_id = "$cn_user"
-    }
-    remote {
-      auth = pubkey
-      id = $IPSEC_REMOTE_ID
-    }
-    children {
-      cn {
-        local_ts = 0.0.0.0/0
-        remote_ts = 0.0.0.0/0
-        if_id_in = $CN_XFRM_ID
-        if_id_out = $CN_XFRM_ID
-        esp_proposals = aes256-sha256,aes128-sha256
-        dpd_action = restart
-        start_action = start
-        close_action = restart
-      }
-    }
-  }
+$connections
 }
 
 secrets {
@@ -12373,11 +13402,13 @@ EOF
 
 ipsec_selected_ike_ids_cmd() {
   local profile=$1
-  awk -v p="$profile" '$0 ~ ("^" p ":") && $1 == p ":" && $2 ~ /^#[0-9]+,$/ { gsub(/[^0-9]/,"",$2); print $2 }'
+  awk -v p="$profile" '/^[^[:space:]]/ && ($1 == p ":" || $1 == p "-next:") && $2 ~ /^#[0-9]+,$/ {
+    gsub(/[^0-9]/,"",$2); print $2
+  }'
 }
 
 set_ipsec_candidate_cmd() {
-  local profile=$1 user=$2 pass=$3 sas before after
+  local profile=$1 user=$2 pass=$3 sas before after replacement_ids id
   sas=$(timeout --signal=TERM --kill-after=1s 5s swanctl --list-sas 2>/dev/null) || return $?
   before=$(ipsec_selected_ike_ids_cmd "$profile" <<<"$sas") || return $?
   case "$profile" in
@@ -12390,7 +13421,18 @@ set_ipsec_candidate_cmd() {
   # Never restart the daemon or terminate the other profile's IKE_SA.
   swanctl --load-all --noprompt >/dev/null 2>&1 || return $?
   if [[ -n "$before" ]]; then
-    swanctl --terminate --ike "$profile" --timeout 15 >/dev/null 2>&1 || return $?
+    if grep -Eq "^$profile: #[0-9]+," <<<"$sas"; then
+      swanctl --terminate --ike "$profile" --timeout 15 >/dev/null 2>&1 || return $?
+    fi
+    replacement_ids=$(ipsec_selected_ike_ids_cmd "$profile-next" <<<"$sas") || return $?
+    if [[ -n "$replacement_ids" ]]; then
+      sas=$(timeout --signal=TERM --kill-after=1s 5s swanctl --list-sas 2>/dev/null) || return $?
+      while IFS= read -r id; do
+        if grep -Eq "^$profile-next: #$id," <<<"$sas"; then
+          swanctl --terminate --ike-id "$id" --timeout 15 >/dev/null 2>&1 || return $?
+        fi
+      done <<<"$replacement_ids"
+    fi
   fi
   sas=$(timeout --signal=TERM --kill-after=1s 5s swanctl --list-sas 2>/dev/null) || return $?
   after=$(ipsec_selected_ike_ids_cmd "$profile" <<<"$sas") || return $?
@@ -12399,7 +13441,6 @@ set_ipsec_candidate_cmd() {
   sas=$(timeout --signal=TERM --kill-after=1s 5s swanctl --list-sas 2>/dev/null) || return $?
   after=$(ipsec_selected_ike_ids_cmd "$profile" <<<"$sas") || return $?
   [[ -n "$after" ]] || return 1
-  local id
   while IFS= read -r id; do
     [[ -z "$id" ]] || ! grep -Fxq -- "$id" <<<"$before" || return 1
   done <<<"$after"
@@ -13754,6 +14795,11 @@ update_software_impl() {
 
 update_software_cmd() {
   need_root
+  if [[ "${1:-}" == --ipsec-bindings ]]; then
+    [[ $# == 1 ]] || die "usage: dnscomplex update-software --ipsec-bindings"
+    upgrade_ipsec_bindings_cmd
+    return $?
+  fi
   acquire_maintenance_lock
   local requested_channel="" requested_version="" allow_unverified=0
   while [[ $# -gt 0 ]]; do
@@ -14017,6 +15063,11 @@ PY
 
 restore_cmd() {
   need_root
+  if [[ "${1:-}" == --ipsec-bindings ]]; then
+    [[ $# == 1 ]] || die "usage: dnscomplex restore --ipsec-bindings"
+    restore_ipsec_bindings_cmd
+    return $?
+  fi
   [[ $# -eq 1 ]] || die "usage: dnscomplex restore INPUT_TAR_GZ"
   [[ -f "$1" && ! -L "$1" ]] || die "backup archive must be a regular file"
   acquire_maintenance_lock
@@ -14490,6 +15541,14 @@ operation_cli_bridge_cmd() {
   printf '%s\0' "${args[@]}" | python3 "$helper" cli "$command"
 }
 
+require_resolved_operations() {
+  local operation_helper
+  operation_helper=$(fs_path /usr/local/libexec/dnscomplex-operation)
+  if [[ -f "$operation_helper" ]]; then
+    python3 "$operation_helper" gate || die "unresolved operation blocks this mutation"
+  fi
+}
+
 main() {
   local cmd=${1:-help}
   if [[ "$cmd" == operation-internal && "${DNSCOMPLEX_OPERATION_INTERNAL:-0}" == 1 ]]; then
@@ -14517,12 +15576,8 @@ main() {
        [[ "$cmd" != "watchdog" && "$cmd" != "health" ]]; then
     acquire_maintenance_lock
   fi
-  if persistent_mutator_command "$@" && ! internal_service_command "$@"; then
-    local operation_helper
-    operation_helper=$(fs_path /usr/local/libexec/dnscomplex-operation)
-    if [[ -f "$operation_helper" ]]; then
-      python3 "$operation_helper" gate || die "unresolved operation blocks this mutation"
-    fi
+  if [[ "$cmd" != watchdog ]] && persistent_mutator_command "$@" && ! internal_service_command "$@"; then
+    require_resolved_operations
   fi
   load_config
   shift || true
@@ -14531,6 +15586,8 @@ main() {
     test) test_cmd "$@" ;;
     health) health_cmd "$@" ;;
     watchdog) watchdog_cmd "$@" ;;
+    ipsec-return) ipsec_return_profile_cmd "$@" ;;
+    switch-ipsec-bindings) switch_ipsec_bindings_cmd "$@" ;;
     fix) fix_cmd "$@" ;;
     doctor) doctor_cmd "$@" ;;
     update-geosite) update_geosite_cmd "$@" ;;
@@ -16151,18 +17208,28 @@ PY
 render_metrics_exporter() {
   write_file /usr/local/lib/dnscomplex-metrics/exporter.py <<'PY'
 #!/usr/bin/env python3
+import fcntl
 import json
 import os
 import re
+import selectors
+import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONFIG = "/etc/dnscomplex/config.env"
 DB = "/var/lib/dnscomplex/metrics.sqlite3"
 DNSCOMPLEX = os.environ.get("DNSCOMPLEX_MANAGER", "/usr/local/sbin/dnscomplex")
+SNAPSHOT = os.environ.get("DNSCOMPLEX_METRICS_SNAPSHOT", "/run/dnscomplex/metrics-snapshot.json")
+SAMPLE_LOCK = os.environ.get("DNSCOMPLEX_METRICS_SAMPLE_LOCK", "/run/dnscomplex/metrics-sample.lock")
+MAINTENANCE_LOCK = "/run/lock/dnscomplex-maintenance.lock"
+COLLECTION_DEADLINE = 0.0
+COLLECTION_COMPLETE = True
 
 SERVICES = ["sing-box.service", "smartdns.service", "AdGuardHome.service", "nftables.service", "dnscomplex-web.service"]
 
@@ -16180,10 +17247,46 @@ def parse_config():
     return data
 
 def run(args, timeout=5):
+    global COLLECTION_COMPLETE
+    deadline = time.monotonic() + timeout
+    if COLLECTION_DEADLINE:
+        deadline = min(deadline, COLLECTION_DEADLINE)
+    output = bytearray()
+    process = None
     try:
-        return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
+        if time.monotonic() >= deadline:
+            raise TimeoutError('collection deadline')
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        with selectors.DefaultSelector() as selector:
+            os.set_blocking(process.stdout.fileno(), False)
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('command deadline')
+                if not selector.select(remaining):
+                    raise TimeoutError('command deadline')
+                block = os.read(process.stdout.fileno(), min(65536, 8 * 1024 * 1024 + 1 - len(output)))
+                if not block:
+                    break
+                output.extend(block)
+                if len(output) > 8 * 1024 * 1024:
+                    raise ValueError('command output limit')
+            result = process.wait(timeout=max(.001, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(args, result, output.decode('utf-8', errors='replace'))
     except Exception:
+        COLLECTION_COMPLETE = False
+        # Discard partial output instead of presenting a truncated count as exact.
         return subprocess.CompletedProcess(args, 1, "")
+    finally:
+        if process is not None:
+            # Descendants may still own stdout after the direct child exits.
+            import signal
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+            if process.poll() is None:
+                process.wait(timeout=2)
+            process.stdout.close()
 
 def service_up(name):
     return 1 if run(["systemctl", "is-active", "--quiet", name], 3).returncode == 0 else 0
@@ -16274,6 +17377,9 @@ def health_status_value(snapshot=None):
 
 def active_connection_metrics():
     proc = run(["conntrack", "-L"], 10)
+    if proc.returncode != 0:
+        global COLLECTION_COMPLETE
+        COLLECTION_COMPLETE = False
     profile_counts = {"ai": 0, "cn": 0, "default": 0}
     ipv4 = ipv6 = 0
     for line in proc.stdout.splitlines():
@@ -16303,6 +17409,15 @@ def service_restart_count(name):
         return 0
 
 def collect():
+    global COLLECTION_DEADLINE, COLLECTION_COMPLETE
+    COLLECTION_DEADLINE = time.monotonic() + 30
+    COLLECTION_COMPLETE = True
+    try:
+        return collect_values()
+    finally:
+        COLLECTION_DEADLINE = 0.0
+
+def collect_values():
     cfg = parse_config()
     health = health_snapshot()
     count = read_int("/proc/sys/net/netfilter/nf_conntrack_count")
@@ -16332,6 +17447,8 @@ def collect():
     for service in SERVICES:
         data["service_" + service.replace(".", "_").replace("-", "_")] = service_up(service)
         data["service_restarts_" + service.replace(".", "_").replace("-", "_")] = service_restart_count(service)
+    data['collection_complete'] = COLLECTION_COMPLETE
+    data['_health'] = health
     return data
 
 def ensure_db():
@@ -16364,7 +17481,7 @@ def ensure_db():
             if name not in existing and name != "ts":
                 con.execute(f"alter table samples add column {name} {kind}")
 
-def sample():
+def sample_values():
     ensure_db()
     data = collect()
     data["schema_version"] = 2
@@ -16381,10 +17498,60 @@ def sample():
             tuple(data.get(column, 0) for column in columns),
         )
         con.execute("delete from samples where ts < ?", (data["ts"] - 7 * 86400,))
+    publish_snapshot(data)
+    return {key: value for key, value in data.items() if key != '_health'}
+
+def sample():
+    os.makedirs(os.path.dirname(SAMPLE_LOCK), exist_ok=True)
+    fd = os.open(SAMPLE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {key: value for key, value in read_snapshot().items() if key != '_health'}
+        return sample_values()
+    finally:
+        os.close(fd)
+
+def publish_snapshot(data):
+    raw = json.dumps(data, ensure_ascii=False, allow_nan=False).encode('utf-8')
+    if len(raw) > 1024 * 1024:
+        raise ValueError('metrics snapshot too large')
+    parent = os.path.dirname(SNAPSHOT)
+    os.makedirs(parent, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix='.metrics.', dir=parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(path, SNAPSHOT)
+    finally:
+        if os.path.exists(path): os.unlink(path)
+
+def read_snapshot():
+    fd = os.open(SNAPSHOT, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        import stat
+        info = os.fstat(stream.fileno())
+        age = time.time() - info.st_mtime
+        if not stat.S_ISREG(info.st_mode) or not 0 <= age <= 60:
+            raise ValueError('missing or stale metrics snapshot')
+        raw = stream.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ValueError('metrics snapshot too large')
+    data = json.loads(raw)
+    if (not isinstance(data, dict) or not isinstance(data.get('_health'), dict) or
+            data['_health'].get('status') not in ('healthy', 'degraded', 'unhealthy') or
+            not isinstance(data.get('ts'), (int, float)) or not 0 <= time.time() - data['ts'] <= 60 or
+            not isinstance(data.get('collection_complete'), bool)):
+        raise ValueError('invalid metrics snapshot')
     return data
 
 def prometheus_text():
-    data = collect()
+    data = read_snapshot()
     lines = [
         "# HELP dnscomplex_conntrack_usage_ratio Conntrack usage ratio.",
         "# TYPE dnscomplex_conntrack_usage_ratio gauge",
@@ -16415,13 +17582,90 @@ def prometheus_text():
     for service in SERVICES:
         key = "service_" + service.replace(".", "_").replace("-", "_")
         lines.append(f"dnscomplex_service_up{{service=\"{service}\"}} {data[key]}")
+    lines.append(f"dnscomplex_collection_complete {int(data['collection_complete'])}")
     return "\n".join(lines) + "\n"
 
+def maintenance_state():
+    try:
+        with open(MAINTENANCE_LOCK, "rb") as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return "busy"
+    except FileNotFoundError:
+        return "idle"
+    except OSError:
+        return "unknown"
+    return "idle"
+
 def health_ok():
-    proc = run([DNSCOMPLEX, "health", "--json"], 12)
-    return proc.returncode == 0, proc.stdout or "{}"
+    data = read_snapshot()
+    health = dict(data['_health'])
+    checks = {item['name']: item['status'] for item in health.get('checks', [])
+              if isinstance(item, dict) and 'name' in item and 'status' in item}
+    health['profiles'] = {
+        profile: {name.removeprefix(profile + '-'): state for name, state in checks.items()
+                  if name in (f'{profile}-ipsec-selected-egress', f'{profile}-ipsec-dataplane-probe',
+                              f'{profile}-xray-selected-egress')}
+        for profile in ('ai', 'cn')
+    }
+    health['maintenance'] = maintenance_state()
+    return data['collection_complete'] and health['status'] != 'unhealthy', json.dumps(health)
+
+class RequestReader:
+    def __init__(self, connection, timeout):
+        self.connection = connection
+        self.deadline = time.monotonic() + timeout
+        self.buffer = bytearray()
+    def readline(self, size=65537):
+        size = min(size if size >= 0 else 65537, 65537)
+        while True:
+            end = self.buffer.find(b'\n') + 1
+            if end or len(self.buffer) >= size:
+                end = min(end or size, size)
+                result = bytes(self.buffer[:end]); del self.buffer[:end]
+                return result
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0: raise socket.timeout('request input deadline')
+            self.connection.settimeout(remaining)
+            block = self.connection.recv(min(8192, size - len(self.buffer)))
+            if not block:
+                result = bytes(self.buffer); self.buffer.clear(); return result
+            self.buffer.extend(block)
+    def close(self):
+        self.buffer.clear()
+
+class BoundedHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    max_requests = 16
+    request_queue_size = 32
+    def __init__(self, *args, **kwargs):
+        self.slots = threading.BoundedSemaphore(self.max_requests)
+        super().__init__(*args, **kwargs)
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.settimeout(.1)
+                request.sendall(b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+            except OSError: pass
+            finally: self.shutdown_request(request)
+            return
+        try: super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release(); raise
+    def process_request_thread(self, request, client_address):
+        try: super().process_request_thread(request, client_address)
+        finally: self.slots.release()
 
 class Handler(BaseHTTPRequestHandler):
+    input_timeout = 15
+    def setup(self):
+        super().setup()
+        self.rfile.close()
+        self.rfile = RequestReader(self.connection, self.input_timeout)
+    def parse_request(self):
+        result = super().parse_request()
+        self.connection.settimeout(5)
+        return result
     def log_message(self, fmt, *args):
         return
 
@@ -16434,6 +17678,19 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
+        if self.path not in ('/metrics', '/healthz', '/current'):
+            self.send(404, 'not found\n', 'text/plain; charset=utf-8')
+            return
+        try:
+            self.serve_snapshot()
+        except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            return
+        except (OSError, ValueError, KeyError, TypeError):
+            try:
+                self.send(503, '{"status":"unhealthy","error":"metrics snapshot unavailable"}', 'application/json; charset=utf-8')
+            except OSError: pass
+
+    def serve_snapshot(self):
         if self.path == "/metrics":
             self.send(200, prometheus_text(), "text/plain; version=0.0.4; charset=utf-8")
             return
@@ -16442,7 +17699,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200 if ok else 503, body, "application/json; charset=utf-8")
             return
         if self.path == "/current":
-            self.send(200, json.dumps(collect()), "application/json; charset=utf-8")
+            data = read_snapshot()
+            self.send(200, json.dumps({key: value for key, value in data.items() if key != '_health'}), "application/json; charset=utf-8")
             return
         self.send(404, "not found\n", "text/plain; charset=utf-8")
 
@@ -16450,10 +17708,17 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--sample":
         print(json.dumps(sample(), ensure_ascii=False))
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "--current":
+        try:
+            print(json.dumps({key: value for key, value in read_snapshot().items() if key != '_health'}))
+        except (OSError, ValueError, TypeError):
+            print('{"error":"metrics snapshot unavailable"}')
+            raise SystemExit(1)
+        return
     cfg = parse_config()
     listen = cfg.get("DNSCOMPLEX_METRICS_LISTEN", "0.0.0.0")
     port = int(cfg.get("DNSCOMPLEX_METRICS_PORT", "9108"))
-    ThreadingHTTPServer((listen, port), Handler).serve_forever()
+    BoundedHTTPServer((listen, port), Handler).serve_forever()
 
 if __name__ == "__main__":
     main()
@@ -16485,6 +17750,7 @@ After=network-online.target dnscomplex-metrics.service
 [Service]
 Type=oneshot
 Environment=DNSCOMPLEX_TIMER_MODE=1
+TimeoutStartSec=45s
 ExecStart=/usr/local/sbin/dnscomplex metrics-sample
 EOF
 
@@ -16493,10 +17759,10 @@ EOF
 Description=Sample dnscomplex metrics for management trends
 
 [Timer]
-OnBootSec=60s
-OnUnitActiveSec=60s
-AccuracySec=10s
-Persistent=true
+# Arm the first sample from timer activation, without a previous boot stamp.
+OnActiveSec=1s
+OnUnitInactiveSec=15s
+AccuracySec=1s
 Unit=dnscomplex-metrics-sample.service
 
 [Install]
@@ -17063,6 +18329,7 @@ import base64
 import binascii
 import hashlib
 import html
+import http.client
 import ipaddress
 import json
 import os
@@ -17076,9 +18343,13 @@ import tempfile
 import time
 import threading
 import urllib.parse
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONFIG = "/etc/dnscomplex/config.env"
+ADGUARD_UPSTREAM = ("127.0.0.1", 3000)
+ADGUARD_PREFIX = "/adguard/"
+ADGUARD_WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 DNSCOMPLEX = "/usr/local/sbin/dnscomplex"
 REDACTOR = "/usr/local/lib/dnscomplex-redact/redact.py"
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dnscomplex-config"))
@@ -17251,7 +18522,7 @@ HTML = r"""<!doctype html>
     <h1>dnscomplex</h1>
     <nav class="tabs">
       <div class="nav-group"><span class="nav-label">日常</span><button data-tab="overview" aria-selected="true">總覽</button><button data-tab="daily-test">上網測試</button><button data-tab="connections">活躍連線</button><button data-tab="traffic">流量趨勢</button></div>
-      <div class="nav-group"><span class="nav-label">設定</span><button data-tab="dns">DNS 去廣告</button><button data-tab="split">AI/CN 分流</button><button data-tab="config">常用設定</button><button data-tab="wizard">精靈</button></div>
+      <div class="nav-group"><span class="nav-label">設定</span><button data-tab="dns">DNS 去廣告</button><button data-tab="adguard">AdGuard</button><button data-tab="split">AI/CN 分流</button><button data-tab="config">常用設定</button><button data-tab="wizard">精靈</button></div>
       <div class="nav-group"><span class="nav-label">進階</span><button data-tab="services">服務狀態</button><button data-tab="update">更新</button><button data-tab="diagnostics">診斷</button><button data-tab="maintenance">進階維護</button></div>
     </nav>
   </header>
@@ -17325,6 +18596,13 @@ HTML = r"""<!doctype html>
         <div class="row" style="justify-content:space-between"><h2>活躍連線</h2><button onclick="loadConnections()">刷新</button></div>
         <div id="connectionsTable"></div>
         <p class="muted">Domain 由 AdGuard DNS 查詢紀錄對應目的 IP；直接連 IP、外部 DoH、或不經 200VM 的流量會標示為 unknown/bypass。</p>
+      </section>
+    </div>
+    <div id="adguard" class="view">
+      <section>
+        <h2>AdGuard Home</h2>
+        <p class="muted">請使用 AdGuard Home 帳戶登入。</p>
+        <iframe id="adguardFrame" title="AdGuard Home" data-src="/adguard/" style="width:100%;height:78vh;min-height:480px;border:0"></iframe>
       </section>
     </div>
     <div id="dns" class="view">
@@ -17518,6 +18796,10 @@ function openTab(tab) {
   if (btn) btn.setAttribute('aria-selected','true');
   const view = document.getElementById(tab);
   if (view) view.classList.add('active');
+  if (tab === 'adguard') {
+    const frame = document.getElementById('adguardFrame');
+    if (!frame.hasAttribute('src')) frame.src = frame.dataset.src;
+  }
 }
 document.querySelectorAll('.tabs button').forEach(btn => btn.addEventListener('click', () => {
   openTab(btn.dataset.tab);
@@ -18417,7 +19699,7 @@ def active_connections():
     return rows[:300]
 
 def metrics_current():
-    out = shell_output([DNSCOMPLEX, "metrics-sample"], 30)
+    out = shell_output([sys.executable, "/usr/local/lib/dnscomplex-metrics/exporter.py", "--current"], 3)
     try:
         return json.loads(out)
     except json.JSONDecodeError:
@@ -18599,13 +19881,17 @@ class Handler(BaseHTTPRequestHandler):
         finally: self.close_connection = True
     def parse_request(self):
         result = super().parse_request()
-        if result and self.command != "POST": self.rfile.finish_input()
+        if result and self.command != "POST" and not (
+                self.is_adguard_route() and self.command in ADGUARD_WRITE_METHODS):
+            self.rfile.finish_input()
         return result
+    def is_adguard_route(self):
+        return self.path == "/adguard" or self.path.startswith(ADGUARD_PREFIX)
     def input_error(self, exc):
         self.close_connection = True
         self.rfile.finish_input()
         self.send_json({"ok":False,"error":exc.message}, exc.code)
-    def read_body(self, maximum):
+    def read_body_bytes(self, maximum):
         lengths = self.headers.get_all("Content-Length", [])
         if self.headers.get_all("Transfer-Encoding") or len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,10}", lengths[0]):
             raise RequestInputError(400, "one decimal Content-Length required; transfer encoding unsupported")
@@ -18614,7 +19900,9 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         if len(raw) != length: raise RequestInputError(400, "incomplete request body")
         self.rfile.finish_input()
-        try: return raw.decode("utf-8")
+        return raw
+    def read_body(self, maximum):
+        try: return self.read_body_bytes(maximum).decode("utf-8")
         except UnicodeDecodeError: raise RequestInputError(400, "invalid UTF-8 body")
     def json_object(self, raw):
         try: payload = json.loads(raw)
@@ -18677,6 +19965,117 @@ class Handler(BaseHTTPRequestHandler):
             return False
         self.send_login_page()
         return False
+
+    def proxy_adguard(self):
+        if not self.authed():
+            self.send_json({"error": "unauthorized"}, 401)
+            return
+        if self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
+            self.send_json({"error": "cross-origin AdGuard request"}, 403)
+            return
+        origin = "http://" + self.headers.get("Host", "")
+        if self.command in ADGUARD_WRITE_METHODS and self.headers.get_all("Origin") != [origin]:
+            self.send_json({"error": "invalid AdGuard origin"}, 403)
+            return
+        if self.path == "/adguard":
+            self.send_response(302)
+            self.send_header("Location", ADGUARD_PREFIX)
+            self.send_header("Cache-Control", "no-store")
+            self.maybe_set_session_cookie()
+            self.end_headers()
+            return
+        target = "/" + self.path[len(ADGUARD_PREFIX):]
+        path = target.partition("?")[0]
+        if (not re.fullmatch(r"/[A-Za-z0-9_./-]*", path)
+                or "//" in path or any(part in (".", "..") for part in path.split("/"))
+                or not (path == "/" or path.startswith(("/control/", "/assets/"))
+                        or re.fullmatch(r"/[A-Za-z0-9_.-]+\.(?:html|js|css|ico|svg|png|woff2?)", path))
+                or path.startswith(("/install", "/control/install/"))):
+            self.send_json({"error": "unknown AdGuard route"}, 404)
+            return
+        if path == "/control/logout" and not self.headers.get("Referer", "").startswith(origin + ADGUARD_PREFIX):
+            self.send_json({"error": "invalid AdGuard logout origin"}, 403)
+            return
+
+        body = None
+        if self.command in ADGUARD_WRITE_METHODS:
+            if self.command == "DELETE" and "Content-Length" not in self.headers and "Transfer-Encoding" not in self.headers:
+                self.rfile.finish_input()
+            else:
+                body = self.read_body_bytes(1024 * 1024)
+        headers = {}
+        if body is not None:
+            headers["Content-Type"] = self.headers.get("Content-Type", "application/octet-stream")
+        # Never forward the dnscomplex cookie or its Basic credentials.
+        cookies = SimpleCookie()
+        try:
+            cookies.load(self.headers.get("Cookie", ""))
+        except CookieError:
+            cookies.clear()
+        if "agh_session" in cookies:
+            headers["Cookie"] = "agh_session=" + cookies["agh_session"].coded_value
+
+        upstream = http.client.HTTPConnection(*ADGUARD_UPSTREAM, timeout=15)
+        try:
+            deadline = time.monotonic() + 30
+            upstream.connect()
+            upstream_socket = upstream.sock
+            upstream.request(self.command, target, body=body, headers=headers)
+            response = upstream.getresponse()
+            location = response.getheader("Location")
+            if location:
+                resolved = urllib.parse.urlsplit(urllib.parse.urljoin(path, location))
+                if (resolved.scheme or resolved.netloc or not resolved.path.startswith("/")
+                        or resolved.path.startswith("//") or "\\" in resolved.path
+                        or "%" in resolved.path or any(p in (".", "..") for p in resolved.path.split("/"))):
+                    raise ValueError("unexpected AdGuard redirect")
+                location = ADGUARD_PREFIX.rstrip("/") + resolved.geturl()
+            payload = bytearray()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("AdGuard response deadline")
+                upstream_socket.settimeout(remaining)
+                chunk = response.read1(65536)
+                if not chunk:
+                    break
+                payload.extend(chunk)
+                if len(payload) > 8 * 1024 * 1024:
+                    raise ValueError("AdGuard response too large")
+            if response.length not in (None, 0):
+                raise ValueError("incomplete AdGuard response")
+            response_cookies = []
+            for raw in response.headers.get_all("Set-Cookie", []):
+                cookie = SimpleCookie(raw)
+                if "agh_session" in cookie:
+                    session = cookie["agh_session"]
+                    session["domain"] = ""
+                    session["path"] = ADGUARD_PREFIX
+                    session["httponly"] = True
+                    session["samesite"] = "Strict"
+                    response_cookies.append(session.OutputString())
+        except (OSError, ValueError, http.client.HTTPException, CookieError):
+            self.send_json({"error": "AdGuard upstream unavailable"}, 502)
+            return
+        finally:
+            upstream.close()
+
+        self.send_response(response.status)
+        for name in ("Content-Type", "Content-Encoding", "Content-Disposition", "Content-Security-Policy", "X-Frame-Options"):
+            for value in response.headers.get_all(name, []):
+                self.send_header(name, value)
+        if location:
+            self.send_header("Location", location)
+        for cookie in response_cookies:
+            self.send_header("Set-Cookie", cookie)
+        self.send_header("Content-Security-Policy", "frame-ancestors 'self'")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.maybe_set_session_cookie()
+        self.end_headers()
+        self.wfile.write(payload)
 
     def send_auth_challenge(self):
         self.send_response(401)
@@ -18757,7 +20156,18 @@ class Handler(BaseHTTPRequestHandler):
     def read_json(self):
         return self.json_object(self.read_body(1024*1024))
 
+    def do_PUT(self):
+        if self.is_adguard_route():
+            self.proxy_adguard()
+        else:
+            self.send_error(501, "Unsupported method (%r)" % self.command)
+
+    do_PATCH = do_DELETE = do_PUT
+
     def do_GET(self):
+        if self.is_adguard_route():
+            self.proxy_adguard()
+            return
         if self.path == "/login":
             self.send_login_page()
             return
@@ -18839,6 +20249,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if self.is_adguard_route():
+            self.proxy_adguard()
+            return
         if self.path == "/login":
             try: self.handle_login()
             except RequestInputError as exc: self.input_error(exc)
@@ -19084,6 +20497,7 @@ validate_rendered_install() {
   local -a python_files=(
     /usr/local/libexec/dnscomplex-operation
     /usr/local/lib/dnscomplex-config/candidate.py
+    /usr/local/lib/dnscomplex-config/adguard-auth.py
     /usr/local/lib/dnscomplex-metrics/exporter.py
     /usr/local/lib/dnscomplex-redact/redact.py
     /usr/local/lib/dnscomplex-soak/runner.py
@@ -19192,6 +20606,7 @@ render_all() {
   render_geosite_seeds
   render_local_hosts
   render_smartdns
+  render_adguard_auth
   render_adguard
   render_adguard_service
   render_swanctl
@@ -19224,6 +20639,7 @@ main() {
   require_debian13
   require_root
   acquire_installer_maintenance_lock
+  validate_adguard_bootstrap_password
   close_existing_lan_alias_before_render
   install_packages
   render_all
