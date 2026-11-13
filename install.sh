@@ -19844,6 +19844,7 @@ class DeadlineReader:
 
 class BoundedHTTPServer(ThreadingHTTPServer):
     max_requests = 16
+    request_queue_size = 32
     daemon_threads = True
     def __init__(self, *args, **kwargs):
         self.slots = threading.BoundedSemaphore(self.max_requests)
@@ -19905,6 +19906,16 @@ class Handler(BaseHTTPRequestHandler):
         try: return self.read_body_bytes(maximum).decode("utf-8")
         except UnicodeDecodeError: raise RequestInputError(400, "invalid UTF-8 body")
     def json_object(self, raw):
+        # Enforce the same nesting budget across Python decoder versions.
+        depth = 0
+        for token in re.finditer(r'"(?:[^"\\]|\\.)*"|[\[\]{}]', raw, re.DOTALL):
+            char = token[0]
+            if char in ("[", "{"):
+                depth += 1
+                if depth > 128:
+                    raise RequestInputError(400, "JSON nesting limit exceeded")
+            elif char in ("]", "}"):
+                depth -= 1
         try: payload = json.loads(raw)
         except (ValueError, RecursionError): raise RequestInputError(400, "invalid JSON body")
         if not isinstance(payload, dict): raise RequestInputError(400, "JSON object required")
