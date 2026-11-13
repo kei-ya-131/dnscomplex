@@ -1024,17 +1024,19 @@ install_singbox_release() {
   rm -rf "$tmp"
 }
 
-install_adguardhome_release() {
-  local tmp
-  tmp=$(mktemp -d) || return 1
+install_adguardhome_release() (
+  local install_dir=/opt/AdGuardHome tmp staged
+  install -d -m 0755 "$install_dir" || return 1
+  tmp=$(mktemp -d "$install_dir/.upgrade.XXXXXX") || return 1
+  trap 'rm -rf -- "$tmp"' EXIT
   download_install_asset adguardhome "$tmp/AdGuardHome.tar.gz" || return 1
-  tar -xzf "$tmp/AdGuardHome.tar.gz" -C "$tmp"
-  systemctl stop AdGuardHome 2>/dev/null || true
-  install -d -m 0755 /opt/AdGuardHome
-  install -m 0755 "$tmp/AdGuardHome/AdGuardHome" /opt/AdGuardHome/AdGuardHome
-  /opt/AdGuardHome/AdGuardHome --version >/dev/null || die "AdGuard Home install did not provide a working executable"
-  rm -rf "$tmp"
-}
+  tar -xzf "$tmp/AdGuardHome.tar.gz" -C "$tmp" || return 1
+  staged="$tmp/AdGuardHome.new"
+  install -m 0755 "$tmp/AdGuardHome/AdGuardHome" "$staged" || return 1
+  "$staged" --version >/dev/null || die "AdGuard Home install did not provide a working executable"
+  # Keep the running binary available until the DNS stack restarts.
+  python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$staged" "$install_dir/AdGuardHome"
+)
 
 install_xray_release() {
   local tmp
