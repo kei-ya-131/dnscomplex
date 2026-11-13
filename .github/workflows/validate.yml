@@ -32,15 +32,16 @@ jobs:
       - name: Identify installer from this checkout
         run: |
           mkdir -p output/release-candidate
-          git show HEAD:install.sh > output/release-candidate/install.sh
+          git -c safe.directory="$GITHUB_WORKSPACE" show HEAD:install.sh > output/release-candidate/install.sh
           cmp install.sh output/release-candidate/install.sh
-          git rev-parse HEAD > output/release-candidate/COMMIT
+          git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD > output/release-candidate/COMMIT
           cd output/release-candidate
           sha256sum install.sh COMMIT > SHA256SUMS
       - name: Run existing regression suites
+        id: core-regression
         run: python3 tools/validate.py --suite core --output output/ci-core
       - name: Preserve test evidence
-        if: always()
+        if: always() && steps.core-regression.outcome != 'skipped'
         uses: actions/upload-artifact@v7
         with:
           name: debian13-core-${{ github.run_attempt }}
