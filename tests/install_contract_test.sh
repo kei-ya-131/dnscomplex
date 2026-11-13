@@ -1025,12 +1025,16 @@ ipsec_enable_line=$(grep -nF 'for ipsec_unit in' <<<"$enable_services_body")
 ipsec_restart_line=$(grep -nF 'systemctl restart "$ipsec_unit"' <<<"$enable_services_body")
 ready_enable_line=$(grep -nF 'systemctl enable dnscomplex-ipsec-ready dnscomplex-routing' <<<"$enable_services_body")
 network_enable_line=$(grep -nF 'systemctl enable --now dnscomplex-network-ready' <<<"$enable_services_body")
+dns_restart_line=$(grep -nF 'systemctl restart smartdns AdGuardHome sing-box xray-dnscomplex' <<<"$enable_services_body")
 [[ -n "$network_enable_line" && -n "$ipsec_enable_line" && -n "$ipsec_restart_line" && -n "$ready_enable_line" ]] ||
   fail "service enable order markers are missing"
 ipsec_enable_line=${ipsec_enable_line%%:*}
 ipsec_restart_line=${ipsec_restart_line%%:*}
 ready_enable_line=${ready_enable_line%%:*}
 network_enable_line=${network_enable_line%%:*}
+dns_restart_line=${dns_restart_line%%:*}
+((network_enable_line < dns_restart_line && dns_restart_line < ipsec_enable_line)) ||
+  fail "DNS must restart after network readiness and before waiting for IPsec"
 ((network_enable_line < ipsec_enable_line)) ||
   fail "network readiness must start before IPsec services"
 ((ipsec_enable_line < ipsec_restart_line && ipsec_restart_line < ready_enable_line)) ||
