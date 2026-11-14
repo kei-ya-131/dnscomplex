@@ -3556,14 +3556,23 @@ def update(oid, **changes):
 
 
 @contextlib.contextmanager
-def locked(path, wait=True):
+def locked(path, wait=True, *, timeout=0):
     for parent in (path.parent, *path.parent.parents):
         if parent.is_symlink(): raise ValueError('unsafe lock ancestry')
     path.parent.mkdir(parents=True,mode=0o700,exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         private(path)
-        fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(0.5, remaining))
         yield fd
     finally: os.close(fd)
 
@@ -3622,12 +3631,12 @@ def status(oid):
                     'recovery-required':'Recovery is pending.'}.get(phase,'Operation in progress.'))
 
 
-def submit(action, payload, *, announce=None):
+def submit(action, payload, *, announce=None, lock_timeout=0):
     if action in ('refresh-nftsets','refresh-cn-overrides'): raise ValueError('runtime refresh requires scoped execution')
     if action not in ACTIONS or not isinstance(payload, dict): raise ValueError('invalid operation action')
     if len(json.dumps(payload).encode()) > 1024*1024: raise ValueError('payload too large')
     mkdir(OPERATIONS)
-    with locked(LOCK, False):
+    with locked(LOCK, False, timeout=lock_timeout):
         cleanup_staging()
         # An interrupted previous submit can be resumed by an ordinary CLI/API
         # mutation; recovery must not depend on a web restart.
@@ -3967,11 +3976,15 @@ def cli_handoff_signals():
 
 def cli(command, args):
     action,payload=cli_payload(command,args)
+    # A scheduled update may start during the watchdog's maintenance window.
+    # Wait only to acquire the lock, before an operation ID can be published.
+    lock_timeout = 90 if action == 'update-geosite' and os.environ.get('DNSCOMPLEX_TIMER_MODE') == '1' else 0
     # Defer interactive termination only through durable ID + bounded handoff.
     # systemctl children use their own session, so terminal Ctrl-C cannot kill
     # the handoff client before the independent writer/guard has been scheduled.
     with cli_handoff_signals():
-        value=submit(action,payload,announce=lambda oid:print('operation_id='+oid,flush=True))
+        value=submit(action,payload,announce=lambda oid:print('operation_id='+oid,flush=True),
+                     lock_timeout=lock_timeout)
         oid=value['operation_id']
     # The caller owns no maintenance fd while waiting. Interrupting this process
     # never stops the independent writer/guard; the printed ID remains queryable.
