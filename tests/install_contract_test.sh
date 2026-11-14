@@ -1317,6 +1317,8 @@ case "$installer_main_body" in
   *start_upgrade_dns_handoff*install_packages*enable_services*'DNSCOMPLEX_TIMER_MODE=1 dnscomplex update-geosite'*finish_upgrade_dns_handoff*start_installer_timers*) ;;
   *) fail "upgrade DNS handoff must cover package and service changes through geosite publication" ;;
 esac
+assert_contains "$repo_root/install.sh" 'mktemp -d /var/tmp/dnscomplex-dns-upgrade.XXXXXX'
+assert_not_contains "$repo_root/install.sh" 'mktemp -d /run/dnscomplex-dns-upgrade.XXXXXX'
 case "$enable_services_body" in
   *reload_installer_firewall*'systemctl restart smartdns AdGuardHome sing-box xray-dnscomplex'*) ;;
   *) fail "installer must retain DNS handoff during firewall reload" ;;

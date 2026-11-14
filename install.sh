@@ -20514,7 +20514,8 @@ start_upgrade_dns_handoff() {
   local lan_if=$WAN_IFACE port index
   local -a live_ports
   [[ "$DEPLOY_MODE" == routeros-policy ]] || lan_if+=".$LAN_VLAN_ID"
-  dns_handoff=$(mktemp -d /run/dnscomplex-dns-upgrade.XXXXXX)
+  # AdGuard query logs can exceed the memory-backed /run filesystem.
+  dns_handoff=$(mktemp -d /var/tmp/dnscomplex-dns-upgrade.XXXXXX)
   trap cleanup_upgrade_dns_handoff EXIT
   mapfile -t live_ports < <(jq -r '
     .dns.servers[] | select(.type == "udp" and .server == "127.0.0.1") |
