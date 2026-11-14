@@ -1292,7 +1292,8 @@ case "$enable_services_body" in
   *'systemctl restart dnscomplex-ipsec-ready || warn'*'systemctl restart dnscomplex-routing || warn'*) ;;
   *) fail "installer must tolerate an unavailable external IPsec peer after local preflight succeeds" ;;
 esac
-case "$enable_services_body" in
+installer_timers_body=$(sed -n '/^start_installer_timers() {/,/^}/p' "$repo_root/install.sh")
+case "$installer_timers_body" in
   *'systemctl reset-failed'*'dnscomplex-cn-overrides'*'dnscomplex-nftset-refresh'*'dnscomplex-metrics-sample'*) ;;
   *) fail "installer must clear stale failures from repaired timer-triggered services" ;;
 esac
@@ -1312,6 +1313,14 @@ installer_main_body=$(awk '
   }
   END { printf "%s", last }
 ' "$repo_root/install.sh")
+case "$installer_main_body" in
+  *start_upgrade_dns_handoff*install_packages*enable_services*'DNSCOMPLEX_TIMER_MODE=1 dnscomplex update-geosite'*finish_upgrade_dns_handoff*start_installer_timers*) ;;
+  *) fail "upgrade DNS handoff must cover package and service changes through geosite publication" ;;
+esac
+case "$enable_services_body" in
+  *reload_installer_firewall*'systemctl restart smartdns AdGuardHome sing-box xray-dnscomplex'*) ;;
+  *) fail "installer must retain DNS handoff during firewall reload" ;;
+esac
 case "$installer_main_body" in
   *acquire_installer_maintenance_lock*install_packages*render_all*validate_rendered_install*release_installer_maintenance_lock*enable_services*'DNSCOMPLEX_TIMER_MODE=1 dnscomplex update-geosite'*'dnscomplex watchdog'*'DNSCOMPLEX_TIMER_MODE=1 dnscomplex refresh-nftsets'*'dnscomplex test || warn'*) ;;
   *) fail "installer must lock, preflight before service changes, and run final validation automatically" ;;
