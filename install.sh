@@ -7,6 +7,9 @@ DNSCOMPLEX_ROOT="${DNSCOMPLEX_ROOT:-}"
 CONFIG_PATH=""
 DRY_RUN=0
 ASSUME_YES=0
+dns_handoff=""
+dns_handoff_active=0
+dns_handoff_pids=()
 
 AI_IPSEC_SERVER_DEFAULT="vpn-ai.example.net"
 CN_IPSEC_SERVER_DEFAULT="vpn-cn.example.net"
@@ -20456,6 +20459,190 @@ WantedBy=multi-user.target
 EOF
 }
 
+# Keep the previous filtering and DNS classification available while package
+# scripts and the installer restart the primary services.
+start_upgrade_dns_handoff() {
+  [[ "$DRY_RUN" != 1 ]] || return 0
+  if ! systemctl is-active --quiet AdGuardHome; then
+    [[ ! -e /etc/AdGuardHome/AdGuardHome.yaml ]] || die "existing DNS is not active"
+    return 0
+  fi
+
+  local lan_if=$WAN_IFACE port index
+  local -a live_ports
+  [[ "$DEPLOY_MODE" == routeros-policy ]] || lan_if+=".$LAN_VLAN_ID"
+  dns_handoff=$(mktemp -d /run/dnscomplex-dns-upgrade.XXXXXX)
+  trap cleanup_upgrade_dns_handoff EXIT
+  mapfile -t live_ports < <(jq -r '
+    .dns.servers[] | select(.type == "udp" and .server == "127.0.0.1") |
+    .server_port' /etc/sing-box/config.json)
+  [[ ${#live_ports[@]} == 3 ]] || die "expected three local SmartDNS groups"
+  for port in 15353 13000 21053 26053 26054 26055; do
+    [[ -z "$(ss -H -lntu "sport = :$port")" ]] || die "DNS handoff port $port is occupied"
+  done
+  cp -a /opt/AdGuardHome/data "$dns_handoff/data"
+
+  python3 - "$dns_handoff" "$lan_if" "${live_ports[@]}" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+import yaml
+
+directory = pathlib.Path(sys.argv[1])
+interface = json.dumps(sys.argv[2])
+ports = dict(zip(map(int, sys.argv[3:]), (26053, 26054, 26055)))
+config = json.loads(pathlib.Path("/etc/sing-box/config.json").read_text())
+config["inbounds"] = [
+    dict(inbound, listen="127.0.0.1", listen_port=21053)
+    for inbound in config["inbounds"]
+    if inbound["tag"] in ("dns-in-udp", "dns-in-tcp")
+]
+if len(config["inbounds"]) != 2:
+    raise SystemExit("missing existing UDP/TCP DNS classifier")
+config["route"]["rules"] = [
+    {"action": "sniff", "timeout": "1s"},
+    {"protocol": "dns", "action": "hijack-dns"},
+]
+# Copy the watched rulesets so rendering cannot alter the active standby.
+for index, rule in enumerate(config["route"].get("rule_set", [])):
+    source = pathlib.Path(rule["path"])
+    target = directory / f"ruleset-{index}.srs"
+    target.write_bytes(source.read_bytes())
+    rule["path"] = str(target)
+for upstream in config["dns"]["servers"]:
+    if upstream.get("type") == "udp" and upstream.get("server") == "127.0.0.1":
+        upstream["server_port"] = ports[upstream["server_port"]]
+(directory / "sing-box.json").write_text(json.dumps(config))
+
+smartdns = pathlib.Path("/etc/smartdns/smartdns.conf").read_text()
+seen = set()
+def remap(match):
+    port = int(match[2])
+    seen.add(port)
+    return f"{match[1]}{ports[port]}"
+
+smartdns = re.sub(r"^(bind(?:-tcp)? 127[.]0[.]0[.]1:)([0-9]+)", remap, smartdns, flags=re.M)
+if seen != ports.keys():
+    raise SystemExit("SmartDNS listener configuration does not match the DNS classifier")
+smartdns = re.sub(r"^(?:cache-persist|cache-file|cache-checkpoint-time|log-file|audit-file) .*\n",
+                  "", smartdns, flags=re.M)
+(directory / "smartdns.conf").write_text(
+    smartdns + f"\ncache-persist no\nlog-file {directory}/smartdns.log\n"
+)
+adguard = yaml.safe_load(pathlib.Path("/etc/AdGuardHome/AdGuardHome.yaml").read_text())
+adguard["dns"]["port"] = 15353
+adguard["dns"]["upstream_dns"] = ["127.0.0.1:21053"]
+(directory / "AdGuardHome.yaml").write_text(yaml.safe_dump(adguard))
+
+rules = [
+    "table inet dnscomplex_dns_upgrade {",
+    "  chain ingress {",
+    "    type nat hook prerouting priority -101; policy accept;",
+    f"    iifname {interface} meta l4proto {{ tcp, udp }} th dport 53 redirect to :15353",
+    "  }",
+    "  chain output {",
+    "    type nat hook output priority -101; policy accept;",
+    "    meta l4proto { tcp, udp } th dport 53 ip daddr 127.0.0.1 redirect to :15353",
+]
+rules.extend(f"    ip daddr 127.0.0.1 udp dport {port} redirect to :{backup}"
+             for port, backup in ports.items())
+rules.extend([
+    "  }",
+    "  chain input {",
+    "    type filter hook input priority 0; policy accept;",
+    "    meta l4proto { tcp, udp } th dport 15353 ct original proto-dst != 53 drop",
+    "  }",
+    "}",
+])
+(directory / "handoff.nft").write_text("\n".join(rules) + "\n")
+PY
+  /usr/sbin/smartdns -f -c "$dns_handoff/smartdns.conf" -p "$dns_handoff/smartdns.pid" \
+    >"$dns_handoff/smartdns.console" 2>&1 &
+  dns_handoff_pids+=("$!")
+  sing-box run -c "$dns_handoff/sing-box.json" >"$dns_handoff/sing-box.log" 2>&1 &
+  dns_handoff_pids+=("$!")
+  /opt/AdGuardHome/AdGuardHome --web-addr 127.0.0.1:13000 \
+    -c "$dns_handoff/AdGuardHome.yaml" -w "$dns_handoff" >"$dns_handoff/adguard.log" 2>&1 &
+  dns_handoff_pids+=("$!")
+
+  for port in 26053 26054 26055; do
+    wait_upgrade_dns "$port" +notcp || die "backup SmartDNS group on $port is not ready"
+  done
+  wait_upgrade_dns 15353 +notcp && wait_upgrade_dns 15353 +tcp ||
+    die "backup AdGuard Home is not ready"
+  nft -f "$dns_handoff/handoff.nft"
+  dns_handoff_active=1
+  for port in "${live_ports[@]}"; do
+    clear_upgrade_dns_udp ipv4 "$port" "$port" -d 127.0.0.1
+  done
+  for index in ipv4 ipv6; do clear_upgrade_dns_udp "$index" 53 53; done
+  log "upgrade DNS handoff active"
+}
+
+wait_upgrade_dns() {
+  local port=$1 proto=$2 attempt
+  for ((attempt=0; attempt<12; attempt++)); do
+    if dig @127.0.0.1 -p "$port" example.com A "$proto" +short +time=1 +tries=1 |
+       grep -E '^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$' >/dev/null; then return 0; fi
+    sleep .1
+  done
+  return 1
+}
+
+clear_upgrade_dns_udp() {
+  local family=$1 original=$2 reply=$3 rc=0
+  shift 3
+  conntrack -D -f "$family" -p udp --orig-port-dst "$original" --reply-port-src "$reply" "$@"     >/dev/null || rc=$?
+  [[ "$rc" == 0 || "$rc" == 1 ]]
+}
+
+reload_installer_firewall() {
+  if ((dns_handoff_active)); then
+    cat /etc/nftables.conf "$dns_handoff/handoff.nft" | nft -f -
+  else
+    systemctl restart nftables
+  fi
+}
+
+finish_upgrade_dns_handoff() {
+  ((dns_handoff_active)) || return 0
+  # Reach the primary listener without the loopback handoff rule.
+  log "DNS handoff: checking primary listeners at $(date +%s.%N)"
+  nft flush chain inet dnscomplex_dns_upgrade output
+  wait_upgrade_dns 53 +notcp && wait_upgrade_dns 53 +tcp || die "primary DNS did not recover"
+  # Stop assigning new connections to standby. Existing NAT mappings still
+  # reach the running standby while outstanding DNS requests finish.
+  log "DNS handoff: draining standby at $(date +%s.%N)"
+  nft flush chain inet dnscomplex_dns_upgrade ingress
+  local attempt
+  for ((attempt=0; attempt<40; attempt++)); do
+    sleep .1
+    if ! ss -Hnt state established 'sport = :15353' | grep . >/dev/null && ((attempt >= 19)); then
+      break
+    fi
+  done
+  cleanup_upgrade_dns_handoff
+  log "DNS handoff: primary restored at $(date +%s.%N)"
+  trap - EXIT
+}
+
+cleanup_upgrade_dns_handoff() {
+  local pid family port
+  if ((dns_handoff_active)); then
+    nft delete table inet dnscomplex_dns_upgrade || return 1
+    dns_handoff_active=0
+    for family in ipv4 ipv6; do clear_upgrade_dns_udp "$family" 53 15353 || return 1; done
+    for port in 26053 26054 26055; do
+      conntrack -D -f ipv4 -p udp -d 127.0.0.1 --reply-port-src "$port" >/dev/null || [[ $? == 1 ]] || return 1
+    done
+  fi
+  for pid in "${dns_handoff_pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+  for pid in "${dns_handoff_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+  rm -rf -- "$dns_handoff"
+}
+
 enable_services() {
   [[ "$DRY_RUN" == "1" ]] && return 0
   local ipsec_unit ipsec_enabled=0
@@ -20472,7 +20659,7 @@ enable_services() {
   else
     systemctl enable --now systemd-networkd nftables dnsmasq radvd
   fi
-  systemctl restart nftables
+  reload_installer_firewall
   systemctl enable --now dnscomplex-network-ready
   # DNS must be available even while the external IPsec readiness job waits.
   systemctl enable --now smartdns AdGuardHome sing-box xray-dnscomplex
@@ -20488,15 +20675,21 @@ enable_services() {
   done
   [[ "$ipsec_enabled" == "1" ]] || warn "no strongSwan systemd unit found; IPsec may need manual service setup"
   systemctl enable dnscomplex-ipsec-ready dnscomplex-routing
+  systemctl reset-failed dnscomplex-ipsec-ready dnscomplex-routing
+  systemctl restart dnscomplex-ipsec-ready || warn "selected external IPsec egress is currently unavailable; fail-closed recovery will continue from the health timer"
+  systemctl restart dnscomplex-routing || warn "policy routing is waiting for selected IPsec egress readiness"
+  systemctl enable --now dnscomplex-web
+  systemctl enable --now dnscomplex-metrics
+  systemctl restart dnscomplex-web dnscomplex-metrics
+}
+
+start_installer_timers() {
   systemctl enable --now \
     dnscomplex-health.timer \
     dnscomplex-update.timer \
     dnscomplex-cn-overrides.timer \
     dnscomplex-nftset-refresh.timer \
     dnscomplex-metrics-sample.timer
-  systemctl reset-failed dnscomplex-ipsec-ready dnscomplex-routing
-  systemctl restart dnscomplex-ipsec-ready || warn "selected external IPsec egress is currently unavailable; fail-closed recovery will continue from the health timer"
-  systemctl restart dnscomplex-routing || warn "policy routing is waiting for selected IPsec egress readiness"
   systemctl restart dnscomplex-health.timer \
     dnscomplex-update.timer \
     dnscomplex-cn-overrides.timer \
@@ -20508,9 +20701,6 @@ enable_services() {
     dnscomplex-cn-overrides \
     dnscomplex-nftset-refresh \
     dnscomplex-metrics-sample
-  systemctl enable --now dnscomplex-web
-  systemctl enable --now dnscomplex-metrics
-  systemctl restart dnscomplex-web dnscomplex-metrics
 }
 
 validate_rendered_install() {
@@ -20663,6 +20853,7 @@ main() {
   acquire_installer_maintenance_lock
   validate_adguard_bootstrap_password
   close_existing_lan_alias_before_render
+  start_upgrade_dns_handoff
   install_packages
   render_all
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -20673,6 +20864,8 @@ main() {
     release_installer_maintenance_lock
     enable_services
     DNSCOMPLEX_TIMER_MODE=1 dnscomplex update-geosite
+    finish_upgrade_dns_handoff
+    start_installer_timers
     dnscomplex watchdog || warn "runtime remains degraded after installation; health timer will continue bounded recovery"
     DNSCOMPLEX_TIMER_MODE=1 dnscomplex refresh-nftsets
     dnscomplex test || warn "local configuration is valid but one or more external egress checks remain degraded"
