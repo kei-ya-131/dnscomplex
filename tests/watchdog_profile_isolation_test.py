@@ -182,6 +182,7 @@ printf '{"rc":%s,"closed":%s,"proof":%s}\n' "$rc" "$closed" "$proof"
         for cn_rc, expected in (("0", 0), ("1", 1), ("2", 2)):
             with self.subTest(cn_rc=cn_rc):
                 result = self.run_shell(r'''
+FS_ROOT="$TEST_ROOT"
 AI_MARK=769; CN_MARK=849; AI_TABLE=301; CN_TABLE=351
 ip() { :; }
 profile_uses_ipsec() { return 0; }
