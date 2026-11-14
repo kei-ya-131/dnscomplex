@@ -4101,7 +4101,20 @@ After=dnscomplex-network-ready.service
 # sing-box 1.13 tries systemd-resolved integration even when resolved is
 # intentionally disabled.  Keep that no-op private to this service.
 BindReadOnlyPaths=/usr/bin/true:/usr/bin/resolvectl
+ExecStartPre=+/usr/local/libexec/dnscomplex-singbox-start-proof
 EOF
+
+  write_file /usr/local/libexec/dnscomplex-singbox-start-proof <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+proof=$(mktemp /run/dnscomplex-singbox-proof.XXXXXX)
+trap 'rm -f -- "$proof"' EXIT
+digest=$(sha256sum </etc/sing-box/config.json)
+printf '%s %s\n' "${INVOCATION_ID:?}" "${digest%% *}" >"$proof"
+mv -fT -- "$proof" /run/dnscomplex-singbox-start-proof
+EOF
+  chmod_target 0755 /usr/local/libexec/dnscomplex-singbox-start-proof
 
   write_file /etc/systemd/system/dnscomplex-network-ready.service <<'EOF'
 [Unit]
@@ -4979,8 +4992,23 @@ def _loaded_config_matches(config_path, state):
         current_pid = _singbox_main_pid()
     except (OSError, AliasSelectionError):
         return False
-    return (state.get("loaded_config_sha256") == current_hash and
-            state.get("loaded_main_pid") == current_pid)
+    if (state.get("loaded_config_sha256") == current_hash and
+            state.get("loaded_main_pid") == current_pid):
+        return True
+    if pathlib.Path(config_path) != CONFIG_DEFAULT or state.get("loaded_config_sha256") != current_hash:
+        return False
+    proof = pathlib.Path("/run/dnscomplex-singbox-start-proof")
+    try:
+        info = proof.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
+            return False
+        invocation, digest = proof.read_text(encoding="ascii").split()
+        if digest != current_hash or not re.fullmatch(r"[0-9a-f]{32}", invocation):
+            return False
+        service = _run(["systemctl", "show", "-p", "InvocationID", "--value", "sing-box"])
+        return service.stdout.strip() == invocation and _singbox_main_pid() == current_pid
+    except (OSError, ValueError, AliasSelectionError):
+        return False
 
 
 def _restart_singbox():
@@ -14020,6 +14048,7 @@ etc/dhcpcd.conf
 etc/nsswitch.conf
 etc/resolv.conf
 usr/local/libexec/dnscomplex-lan-alias
+usr/local/libexec/dnscomplex-singbox-start-proof
 etc/systemd/network/10-dnscomplex-vlans.netdev
 etc/systemd/network/10-dnscomplex-trunk.network
 etc/systemd/network/20-dnscomplex-transit.network
@@ -14076,6 +14105,7 @@ EOF
 
 optional_backup_paths() {
   cat <<'EOF'
+usr/local/libexec/dnscomplex-singbox-start-proof
 usr/local/libexec/dnscomplex-operation
 usr/local/libexec/dnscomplex-restore-recover
 etc/systemd/system/dnscomplex-operation@.service
