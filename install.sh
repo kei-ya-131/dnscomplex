@@ -4012,7 +4012,7 @@ def main():
     elif action == 'recover': return recover(args[0])
     elif action == 'queue-recovery': queue_recovery(args[0])
     elif action == 'recovery-stopped':
-        if record(args[0])['phase'] not in TERMINAL:
+        if record(args[0])['phase'] not in (*TERMINAL,'manual-intervention'):
             update(args[0],phase='manual-intervention',rollback_state='failed',error_code='RECOVERY_INTERRUPTED')
     elif action == 'guard': return guard(args[0])
     elif action == 'validate-journal': validate_journal(args[0],Path(args[1]))
@@ -7537,6 +7537,23 @@ geosite_prune_obsolete_remote_rulesets() {
   done
 }
 
+geosite_dns_handoff_start() {
+  local helper
+  helper=$(fs_path /usr/local/lib/dnscomplex-config/dns-handoff.sh)
+  source "$helper"
+  # The installer already owns a handoff during its geosite transaction.
+  if nft list chain inet dnscomplex_dns_upgrade ingress >/dev/null 2>&1; then
+    wait_upgrade_dns 53 +notcp && wait_upgrade_dns 53 +tcp ||
+      die "existing DNS handoff is not ready"
+    return 0
+  fi
+  start_upgrade_dns_handoff
+}
+
+geosite_dns_handoff_finish() {
+  finish_upgrade_dns_handoff
+}
+
 geosite_update_transaction() (
   set -e
   local prepare_only=0 live_fs_root=${FS_ROOT:-} live_config=${CONFIG:-}
@@ -7544,6 +7561,8 @@ geosite_update_transaction() (
   local live_root stage_dir stage_root candidate_config manifest_file snapshot
   local rel rc=0 copy_rel changed_manifest candidate_hash live_hash
   local adguard_changed=0 adguard_restart_attempted=0
+  local dns_handoff="" dns_handoff_active=0
+  local -a dns_handoff_pids=()
   [[ "${1:-}" == "--prepare-only" ]] && prepare_only=1
   live_root=${live_fs_root:-/}
   live_root=${live_root%/}
@@ -7552,7 +7571,11 @@ geosite_update_transaction() (
   stage_dir=$(mktemp -d "$live_base/.geosite-transaction.XXXXXX")
   stage_root="$stage_dir/root"
   mkdir -p "$stage_root"
-  trap 'rm -rf -- "$stage_dir"' EXIT
+  geosite_cleanup() {
+    if [[ -n "$dns_handoff" ]]; then cleanup_upgrade_dns_handoff; fi
+    rm -rf -- "$stage_dir"
+  }
+  trap geosite_cleanup EXIT
 
   for copy_rel in etc/dnscomplex etc/AdGuardHome etc/sing-box etc/smartdns var/lib/dnscomplex/geosite usr/local/lib/dnscomplex-config; do
     if [[ -e "$live_root/$copy_rel" || -L "$live_root/$copy_rel" ]]; then
@@ -7626,6 +7649,9 @@ geosite_update_transaction() (
   BASE=$live_base
   GEO_DIR=$live_geo
   DLC_DIR=$live_dlc
+  if (( adguard_changed && prepare_only == 0 )); then
+    geosite_dns_handoff_start
+  fi
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
     if ! geosite_publish_artifact "$stage_root" "$live_root" "$rel"; then
@@ -7653,7 +7679,13 @@ geosite_update_transaction() (
         return 1
       fi
     fi
+    if (( adguard_restart_attempted )); then
+      geosite_dns_handoff_finish
+    fi
     return "$rc"
+  fi
+  if (( adguard_restart_attempted )); then
+    geosite_dns_handoff_finish
   fi
   if (( prepare_only == 0 )); then
     refresh_nftsets_cmd || warn "nftset refresh failed after geosite update"
@@ -20502,10 +20534,22 @@ WantedBy=multi-user.target
 EOF
 }
 
+stage_upgrade_adguard_data() (
+  local source=$1 destination=$2 entry
+  shopt -s dotglob nullglob
+  mkdir -m 0700 -- "$destination" || return
+  for entry in "$source"/*; do
+    case "${entry##*/}" in
+      querylog.json|querylog.json.*|stats.db|sessions.db) continue ;;
+    esac
+    cp -a -- "$entry" "$destination/" || return
+  done
+)
+
 # Keep the previous filtering and DNS classification available while package
 # scripts and the installer restart the primary services.
 start_upgrade_dns_handoff() {
-  [[ "$DRY_RUN" != 1 ]] || return 0
+  [[ "${DRY_RUN:-0}" != 1 ]] || return 0
   if ! systemctl is-active --quiet AdGuardHome; then
     [[ ! -e /etc/AdGuardHome/AdGuardHome.yaml ]] || die "existing DNS is not active"
     return 0
@@ -20516,7 +20560,6 @@ start_upgrade_dns_handoff() {
   [[ "$DEPLOY_MODE" == routeros-policy ]] || lan_if+=".$LAN_VLAN_ID"
   # AdGuard query logs can exceed the memory-backed /run filesystem.
   dns_handoff=$(mktemp -d /var/tmp/dnscomplex-dns-upgrade.XXXXXX)
-  trap cleanup_upgrade_dns_handoff EXIT
   mapfile -t live_ports < <(jq -r '
     .dns.servers[] | select(.type == "udp" and .server == "127.0.0.1") |
     .server_port' /etc/sing-box/config.json)
@@ -20524,7 +20567,7 @@ start_upgrade_dns_handoff() {
   for port in 15353 13000 21053 26053 26054 26055; do
     [[ -z "$(ss -H -lntu "sport = :$port")" ]] || die "DNS handoff port $port is occupied"
   done
-  cp -a /opt/AdGuardHome/data "$dns_handoff/data"
+  stage_upgrade_adguard_data /opt/AdGuardHome/data "$dns_handoff/data"
 
   python3 - "$dns_handoff" "$lan_if" "${live_ports[@]}" <<'PY'
 import json
@@ -20576,6 +20619,9 @@ smartdns = re.sub(r"^(?:cache-persist|cache-file|cache-checkpoint-time|log-file|
     smartdns + f"\ncache-persist no\nlog-file {directory}/smartdns.log\n"
 )
 adguard = yaml.safe_load(pathlib.Path("/etc/AdGuardHome/AdGuardHome.yaml").read_text())
+# Standby only serves during handoff. Keep filtering, disable historical writes.
+for section in ("querylog", "statistics"):
+    adguard.setdefault(section, {})["enabled"] = False
 adguard["dns"]["port"] = 15353
 adguard["dns"]["upstream_dns"] = ["127.0.0.1:21053"]
 (directory / "AdGuardHome.yaml").write_text(yaml.safe_dump(adguard))
@@ -20669,13 +20715,16 @@ finish_upgrade_dns_handoff() {
   done
   cleanup_upgrade_dns_handoff
   log "DNS handoff: primary restored at $(date +%s.%N)"
-  trap - EXIT
 }
 
 cleanup_upgrade_dns_handoff() {
   local pid family port
   if ((dns_handoff_active)); then
-    nft delete table inet dnscomplex_dns_upgrade || return 1
+    if ! nft delete table inet dnscomplex_dns_upgrade; then
+      # Transaction recovery may already have reloaded the main ruleset.
+      nft list tables >/dev/null || return 1
+      if nft list table inet dnscomplex_dns_upgrade >/dev/null 2>&1; then return 1; fi
+    fi
     dns_handoff_active=0
     for family in ipv4 ipv6; do clear_upgrade_dns_udp "$family" 53 15353 || return 1; done
     for port in 26053 26054 26055; do
@@ -20685,6 +20734,7 @@ cleanup_upgrade_dns_handoff() {
   for pid in "${dns_handoff_pids[@]}"; do kill "$pid" 2>/dev/null || true; done
   for pid in "${dns_handoff_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
   rm -rf -- "$dns_handoff"
+  dns_handoff=""
 }
 
 enable_services() {
@@ -20878,6 +20928,9 @@ render_all() {
   render_ipsec_services
   render_routeros
   render_management_script
+  declare -f stage_upgrade_adguard_data start_upgrade_dns_handoff wait_upgrade_dns clear_upgrade_dns_udp \
+    finish_upgrade_dns_handoff cleanup_upgrade_dns_handoff |
+    write_file /usr/local/lib/dnscomplex-config/dns-handoff.sh
   render_xui_sniffing_repair
   render_egress_probe
   render_soak_runner
@@ -20897,6 +20950,7 @@ main() {
   acquire_installer_maintenance_lock
   validate_adguard_bootstrap_password
   close_existing_lan_alias_before_render
+  trap '[[ -z "$dns_handoff" ]] || cleanup_upgrade_dns_handoff' EXIT
   start_upgrade_dns_handoff
   install_packages
   render_all
