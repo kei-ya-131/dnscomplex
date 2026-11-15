@@ -7663,6 +7663,7 @@ geosite_update_transaction() (
     # sing-box watches atomically published local SRS files. SmartDNS and
     # sing-box configuration do not change in this transaction.
     if (( adguard_changed )); then
+      wait_upgrade_dns_drain 53 || return 1
       adguard_restart_attempted=1
       systemctl restart AdGuardHome || rc=$?
     fi
@@ -20696,6 +20697,17 @@ reload_installer_firewall() {
   fi
 }
 
+# Let in-flight UDP finish and give open TCP queries time to complete.
+wait_upgrade_dns_drain() {
+  local port=$1 attempt
+  for ((attempt=0; attempt<40; attempt++)); do
+    sleep .1
+    if ! ss -Hnt state established "sport = :$port" | grep . >/dev/null && ((attempt >= 19)); then
+      break
+    fi
+  done
+}
+
 finish_upgrade_dns_handoff() {
   ((dns_handoff_active)) || return 0
   # Reach the primary listener without the loopback handoff rule.
@@ -20706,13 +20718,7 @@ finish_upgrade_dns_handoff() {
   # reach the running standby while outstanding DNS requests finish.
   log "DNS handoff: draining standby at $(date +%s.%N)"
   nft flush chain inet dnscomplex_dns_upgrade ingress
-  local attempt
-  for ((attempt=0; attempt<40; attempt++)); do
-    sleep .1
-    if ! ss -Hnt state established 'sport = :15353' | grep . >/dev/null && ((attempt >= 19)); then
-      break
-    fi
-  done
+  wait_upgrade_dns_drain 15353
   cleanup_upgrade_dns_handoff
   log "DNS handoff: primary restored at $(date +%s.%N)"
 }
@@ -20929,7 +20935,7 @@ render_all() {
   render_routeros
   render_management_script
   declare -f stage_upgrade_adguard_data start_upgrade_dns_handoff wait_upgrade_dns clear_upgrade_dns_udp \
-    finish_upgrade_dns_handoff cleanup_upgrade_dns_handoff |
+    wait_upgrade_dns_drain finish_upgrade_dns_handoff cleanup_upgrade_dns_handoff |
     write_file /usr/local/lib/dnscomplex-config/dns-handoff.sh
   render_xui_sniffing_repair
   render_egress_probe

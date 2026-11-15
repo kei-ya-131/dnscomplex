@@ -43,6 +43,7 @@ geosite_artifact_manifest() {
 systemctl() { echo "$1 $2"; }
 geosite_dns_handoff_start() { echo handoff-start; }
 geosite_dns_handoff_finish() { echo handoff-finish; }
+wait_upgrade_dns_drain() { echo "drain-$1"; }
 restart_dns_stack() { echo stack-restart; }
 wait_dns_ready() {
   echo dns-ready
@@ -71,13 +72,13 @@ eval "$(declare -f geosite_update_transaction | sed 's|/opt/AdGuardHome/AdGuardH
     def test_changed_adguard_config_only_restarts_adguard(self):
         proc, config, srs, _ = self.run_update(adguard_changed=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.splitlines(), ["handoff-start", "restart AdGuardHome", "dns-ready", "handoff-finish", "refresh"])
+        self.assertEqual(proc.stdout.splitlines(), ["handoff-start", "drain-53", "restart AdGuardHome", "dns-ready", "handoff-finish", "refresh"])
         self.assertEqual((config, srs), ("new", "new"))
 
     def test_failed_dns_readiness_restores_both_files(self):
         proc, config, srs, _ = self.run_update(adguard_changed=True, fail=True)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(proc.stdout.splitlines(), ["handoff-start", "restart AdGuardHome", "dns-ready",
+        self.assertEqual(proc.stdout.splitlines(), ["handoff-start", "drain-53", "restart AdGuardHome", "dns-ready",
                                                      "restart AdGuardHome", "dns-ready", "handoff-finish"])
         self.assertEqual((config, srs), ("old", "old"))
 
