@@ -212,7 +212,7 @@ if set_ipsec_cmd ai new-user new-secret; then exit 0; else exit $?; fi
         manager=MANAGER.replace('if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then\n  main "$@"\nfi','')
         manager+=r'''
 config_schema_keys() { :; }; load_config() { DEPLOY_MODE=vlan-gateway; }
-migrate_config_cmd() { :; }; remove_example_client_local_override() { :; }
+migrate_config_cmd() { :; };
 apply_runtime_network_settings() { :; }; render_xray_config_cmd() { :; }
 write_singbox_egress_cmd() { :; }; write_nftables_runtime_cmd() { :; }
 render_adguard_runtime() { :; }; write_update_timer_cmd() { :; }; systemctl() { :; }
@@ -235,7 +235,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
         self.assertIn('monitoring',result.stderr)
     def test_default_fix_has_transaction_and_strict_child_boundary(self):
         result=self.run_shell(r'''
-migrate_config_cmd() { :; }; remove_example_client_local_override() { :; }; apply_runtime_network_settings() { :; }
+migrate_config_cmd() { :; }; apply_runtime_network_settings() { :; }
 systemctl() { :; }; restart_ipsec_service() { :; }; write_update_timer_cmd() { :; }; render_adguard_runtime() { :; }; restart_dns_stack() { :; }
 state_transaction_manager_cmd() { event "fresh $*"; return 41; }
 if fix_cmd; then exit 0; else exit $?; fi

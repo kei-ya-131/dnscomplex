@@ -7555,15 +7555,6 @@ validate_smartdns_config_cmd() {
   rm -rf -- "$work_dir"
 }
 
-remove_example_client_local_override() {
-  [[ -f /etc/dnscomplex/local-hosts ]] || return 0
-  local tmp
-  tmp=$(mktemp)
-  awk 'tolower($0) !~ /example-client[.]local/' /etc/dnscomplex/local-hosts >"$tmp"
-  install -m 0644 "$tmp" /etc/dnscomplex/local-hosts
-  rm -f "$tmp"
-}
-
 download_geosite_source() {
   mkdir -p "$GEO_DIR"
   local tmp
@@ -12963,10 +12954,8 @@ LOCAL_CANDIDATE
 set_local_host_cmd() {
   need_root || return $?
   [[ $# -eq 2 ]] || die "usage: dnscomplex set-local-host HOST.local IPv4"
-  local host=$1 ip=$2 normalized_host
-  normalized_host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  local host=$1 ip=$2
   valid_local_hostname "$host" || die "host must be a single valid .local DNS hostname"
-  case "$normalized_host" in example-client.local|example_client.local) die "example_client .local addresses should follow mDNS or RouterOS DHCP/DNS, not dnscomplex static local-hosts" ;; esac
   valid_ipv4 "$ip" || die "IPv4 address required with octets in range 0-255"
   state_transaction_cmd set-local-host set_local_host_candidate_cmd "$host" "$ip"
 }
@@ -15140,7 +15129,6 @@ legacy_reconcile_cmd() {
   done < <(config_schema_keys)
   load_config
   migrate_config_cmd
-  remove_example_client_local_override
   apply_runtime_network_settings
   render_xray_config_cmd
   write_singbox_egress_cmd

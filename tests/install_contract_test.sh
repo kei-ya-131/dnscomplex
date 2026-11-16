@@ -851,8 +851,9 @@ case "$mss_apply_body" in
 esac
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set-local-host'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'test-local-name'
-assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'remove_example_client_local_override'
-assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'example_client .local addresses should follow mDNS or RouterOS DHCP/DNS'
+if grep -Eiq 'macbook[-_]?air' "$repo_root/install.sh" "$tmpdir/root/usr/local/sbin/dnscomplex"; then
+  fail "deployment-specific device override leaked into public installer"
+fi
 
 manager_root="$tmpdir/manager-behavior"
 manager="$tmpdir/root/usr/local/sbin/dnscomplex"
@@ -932,9 +933,7 @@ for local_failure in publish restart; do
     assert_contains "$tmpdir/local-host-calls" 'restart'
   fi
 done
-assert_local_host_rejected 'reject-example_client' 'example_client.local' '192.0.2.30'
-assert_local_host_rejected 'reject-example-client' 'example-client.local' '192.0.2.31'
-assert_local_host_rejected 'reject-host-injection' $'safe.local\nexample_client.local' '192.0.2.32'
+assert_local_host_rejected 'reject-host-injection' $'safe.local\nother-device.local' '192.0.2.32'
 assert_local_host_rejected 'reject-out-of-range-ipv4' 'router.local' '256.1.1.1'
 
 cat >"$manager_root/etc/dnscomplex/config.env" <<'EOF'
