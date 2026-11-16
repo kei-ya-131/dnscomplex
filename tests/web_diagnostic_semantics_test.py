@@ -33,7 +33,7 @@ class Diagnostics(unittest.TestCase):
 CONFIG="$FS_ROOT/config.env"
 XRAY_LISTEN_HOST=127.0.0.1; XRAY_AI_SOCKS_PORT=1081; XRAY_CN_SOCKS_PORT=1082
 render_xray_config_cmd() { printf changed >"$FS_ROOT/usr/local/etc/xray/config.json"; }
-xray_test_config_file() { [[ -s "$1" ]] && [[ $(stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1") == 600 ]]; }
+xray_test_config_file() { [[ -s "$1" ]] && [[ $(stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1") == 600 ]]; }
 systemctl() { [[ "${INACTIVE:-0}" == 0 ]]; }
 curl() { printf '%s\n' "$2" >>"$FS_ROOT/probes"; [[ "${CURL_FAIL:-0}" == 0 ]]; }
 '''

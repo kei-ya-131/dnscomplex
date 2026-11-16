@@ -41,8 +41,45 @@ bash -n "$repo_root/install.sh"
 
 bash "$repo_root/install.sh" --help >/dev/null
 
+(
+  adguard_dir="$tmpdir/adguard"
+  live="$adguard_dir/AdGuardHome"
+  mkdir "$adguard_dir"
+  printf '#!/bin/sh\nprintf "old\\n"\n' >"$live"
+  chmod +x "$live"
+  eval "$(awk '
+    /^install_adguardhome_release\(\)/ { inside=1 }
+    inside { print }
+    inside && /^[})][[:space:]]*$/ { exit }
+  ' "$repo_root/install.sh" | sed "s|/opt/AdGuardHome|$adguard_dir|g")"
+  systemctl() { touch "$tmpdir/adguard-systemctl-called"; }
+  die() { exit 1; }
+  download_install_asset() {
+    mkdir -p "$tmpdir/archive/AdGuardHome"
+    cp "$tmpdir/adguard-candidate" "$tmpdir/archive/AdGuardHome/AdGuardHome"
+    tar -czf "$2" -C "$tmpdir/archive" AdGuardHome
+  }
+  printf '#!/bin/sh\nexit 1\n' >"$tmpdir/adguard-candidate"
+  if (install_adguardhome_release); then
+    fail "installer accepted a broken AdGuard Home executable"
+  fi
+  [[ "$("$live")" == old ]] || fail "broken candidate replaced working AdGuard Home"
+  cat >"$tmpdir/adguard-candidate" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = --version ]; then
+  [ "$("$ADGUARD_LIVE")" = old ] || exit 1
+fi
+printf 'new\n'
+EOF
+  export ADGUARD_LIVE="$live"
+  install_adguardhome_release
+  [[ "$("$live")" == new ]] || fail "validated AdGuard Home was not installed"
+  [[ ! -e "$tmpdir/adguard-systemctl-called" ]] || fail "binary staging interrupted AdGuard Home"
+)
+
 cat >"$tmpdir/config.env" <<'EOF'
 DNSCOMPLEX_NONINTERACTIVE=1
+DNSCOMPLEX_VERSION=0.3.1
 WAN_IFACE=eth0
 TRANSIT_VLAN_ID=10
 LAN_VLAN_ID=20
@@ -65,6 +102,37 @@ CN_IPSEC_PASSWORD=cn-pass
 EOF
 
 DNSCOMPLEX_ROOT="$tmpdir/root" bash "$repo_root/install.sh" --dry-run --config "$tmpdir/config.env"
+installer_version=$(sed -n 's/^DNSCOMPLEX_VERSION="\([^"]*\)"$/\1/p' "$repo_root/install.sh")
+[[ "$installer_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || fail "invalid installer version: $installer_version"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_VERSION='$installer_version'"
+
+# ExecStartPost runs while the unit is activating. Only a SOCKS listener
+# owned by its MainPID can open the profile's gate during that interval.
+(
+  source "$tmpdir/root/usr/local/sbin/dnscomplex"
+  need_root() { :; }
+  profile_egress_mode() { [[ "$1" == ai ]] && echo xray || echo ipsec; }
+  profile_egress_gate_open() { echo "open-$1"; }
+  profile_egress_gate_clear() { echo "clear-$1"; }
+  systemctl() {
+    case "$1" in
+      is-active) echo activating; return 3 ;;
+      show) echo 4321 ;;
+      *) return 1 ;;
+    esac
+  }
+  ss() { printf 'LISTEN 0 4096 127.0.0.1:16054 0.0.0.0:* users:(("xray",pid=%s,fd=8))\n' "$listener_pid"; }
+  sleep() { :; }
+  XRAY_AI_SOCKS_PORT=16054
+  listener_pid=4321
+  result=$(egress_ready_cmd xray) || fail "Xray activation rejected its own SOCKS listener"
+  [[ "$result" == open-ai ]] || fail "Xray activation opened the wrong gates"
+  listener_pid=3344
+  if result=$(egress_ready_cmd xray); then
+    fail "Xray activation accepted a SOCKS listener owned by another process"
+  fi
+  [[ "$result" == clear-ai ]] || fail "Xray activation did not close the unverified gate"
+)
 
 # A dry-run upgrade must replace stale helpers/units with the same emitted bytes
 # and modes as a new install. Never invoke those intentionally stale fixtures.
@@ -162,9 +230,10 @@ parser_mode=$(stat -c '%a' "$tmpdir/root/usr/local/lib/dnscomplex-config/candida
 [[ "$parser_mode" == "755" ]] || fail "candidate parser mode is not 0755"
 DNSCOMPLEX_FS_ROOT="$tmpdir/root" bash "$tmpdir/root/usr/local/sbin/dnscomplex" validate-config "$tmpdir/root/etc/dnscomplex/config.env"
 python3 "$repo_root/tests/config_candidate_safety_test.py"
-python3 "$repo_root/tests/adguard_auth_safety_test.py"
+python3 "$repo_root/tests/adguard_auth_safety_test.py" --portable
 python3 "$repo_root/tests/secret_file_creation_test.py"
 python3 "$repo_root/tests/metrics_resource_boundary_test.py"
+python3 "$repo_root/tests/boot_lifecycle_test.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-metrics/exporter.py"
 assert_file "$tmpdir/root/usr/local/lib/dnscomplex-soak/runner.py"
 assert_file "$tmpdir/root/etc/prometheus/dnscomplex.rules.yml"
@@ -326,6 +395,36 @@ assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'eap-mschapv2'
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'dpd_delay'
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'local_addrs ='
 assert_contains "$tmpdir/root/etc/swanctl/swanctl.conf" 'id = vpn.example.net'
+cp "$tmpdir/root/etc/swanctl/swanctl.conf" "$tmpdir/installer-swanctl.conf"
+DNSCOMPLEX_FS_ROOT="$tmpdir/root" bash -c '
+  set -e
+  source "$1"
+  need_root() { :; }
+  load_config
+  write_swanctl_cmd
+' swanctl-rewrite "$tmpdir/root/usr/local/sbin/dnscomplex"
+python3 - "$tmpdir/installer-swanctl.conf" "$tmpdir/root/etc/swanctl/swanctl.conf" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+for path in sys.argv[1:]:
+    config = Path(path).read_text()
+    for profile in ("ai", "cn"):
+        primary, = re.findall(rf"(?ms)^  {profile} \{{\n.*?^  \}}$", config)
+        standby, = re.findall(rf"(?ms)^  {profile}-next \{{\n.*?^  \}}$", config)
+        assert f"      {profile} {{" in primary
+        assert "start_action = start" in primary
+        assert f"      {profile}-next {{" in standby
+        for setting in ("unique = never", "dpd_action = clear", "start_action = none", "close_action = none"):
+            assert setting in standby, (path, profile, setting)
+        for key in ("local_addrs", "remote_addrs", "eap_id", "if_id_in", "if_id_out"):
+            pattern = rf"(?m)^\s*{key} = (.+)$"
+            original, = re.findall(pattern, primary)
+            candidate, = re.findall(pattern, standby)
+            assert original == candidate, (path, profile, key)
+PY
+mv "$tmpdir/installer-swanctl.conf" "$tmpdir/root/etc/swanctl/swanctl.conf"
 assert_contains "$tmpdir/root/etc/strongswan.d/charon/resolve.conf" 'load = no'
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "IPSEC_REMOTE_ID='vpn.example.net'"
 assert_file "$tmpdir/root/etc/swanctl/x509ca/README.dnscomplex"
@@ -437,6 +536,59 @@ assert_not_contains "$tmpdir/root/etc/nftables.d/dnscomplex.nft" 'elements = { 1
 assert_contains "$tmpdir/root/usr/local/libexec/dnscomplex-lan-alias" 'dnscomplex-lan-alias-owned-source-guard'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'lan_alias_reconcile_cmd || return 1'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'lan_alias_close_cmd'
+python3 - "$tmpdir/root" <<'PY'
+import json
+import pathlib
+import re
+import runpy
+import sys
+from types import SimpleNamespace
+
+root = pathlib.Path(sys.argv[1])
+helper = runpy.run_path(str(root / "usr/local/libexec/dnscomplex-lan-alias"))
+verify = helper["_verify_live_nft_policy"]
+rules = (root / "etc/nftables.d/dnscomplex.nft").read_text()
+chains = dict(re.findall(r"^  chain (\w+) \{\n(.*?)^  \}", rules, re.M | re.S))
+# A running alias has an owned guard and nft prints packet counters.
+source_guard = ('ip saddr 198.18.255.254 ip daddr != @lan_alias_ready4 counter drop '
+                'comment "dnscomplex-lan-alias-owned-source-guard"\n')
+anchor = "ip saddr @lan_alias_source4 ip daddr != @lan_alias_ready4"
+chains["output"] = chains["output"].replace(anchor, source_guard + anchor, 1)
+set_info = dict(family="inet", table="dnscomplex", name="lan_alias_config_ready4",
+                type="ipv4_addr")
+default, = (line for line in chains["postrouting"].splitlines()
+            if '"dnscomplex-lan-alias-snat-default"' in line)
+ai = 'oifname "ipsec-ai" ip saddr @lan_alias_source4 snat ip to 10.1.4.11 comment "dnscomplex-lan-alias-snat-ai"'
+cn = 'oifname "ipsec-cn" ip saddr @lan_alias_source4 snat ip to 10.35.4.12 comment "dnscomplex-lan-alias-snat-cn"'
+
+def nft(argv):
+    if argv == ["nft", "-j", "list", "set", "inet", "dnscomplex", set_info["name"]]:
+        return SimpleNamespace(stdout=json.dumps({"nftables": [{"set": set_info}]}))
+    assert argv[:6] == ["nft", "-a", "list", "chain", "inet", "dnscomplex"], argv
+    return SimpleNamespace(stdout=re.sub(r"\bcounter\b", "counter packets 0 bytes 0",
+                                          chains[argv[6]]))
+
+verify.__globals__["_run"] = nft
+policy = dict(lan_interface="eth0.20", auto_mark="0x2024",
+              ai_mode="ipsec", cn_mode="ipsec", ai_mark="0x301", cn_mark="0x351",
+              ai_quic="allow", cn_quic="reject", ai_vip="10.1.4.11", cn_vip="10.35.4.12",
+              default_snat_interface="eth0", default_snat_kind="masquerade")
+original = chains["postrouting"]
+for ordered in ((default, ai, cn), (default, cn, ai)):
+    chains["postrouting"] = original.replace(default, "\n".join(ordered))
+    verify("198.18.255.254", policy)
+for ordered, error in (
+    ((cn, default, ai), "policy order"),
+    ((default, cn, ai.replace("10.1.4.11", "10.1.4.12")), "VIP is stale"),
+):
+    chains["postrouting"] = original.replace(default, "\n".join(ordered))
+    try:
+        verify("198.18.255.254", policy)
+    except helper["AliasSelectionError"] as exc:
+        assert error in str(exc), exc
+    else:
+        raise AssertionError(f"accepted invalid LAN alias SNAT: {ordered}")
+PY
 python3 - "$tmpdir/root/etc/nftables.d/dnscomplex.nft" <<'PY'
 import pathlib
 import sys
@@ -670,7 +822,8 @@ assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" '--include-logs minimal
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'adguard_cache_diagnostics'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'trace_domain_cmd'
 # shellcheck disable=SC2016
-assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'source="nftset:${hit,,}4"'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'actual_outbound=unknown'
+assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'IP membership does not reassign domain policy'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'status_cmd "$@" ;;'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'status [--verbose]'
 assert_contains "$tmpdir/root/usr/local/sbin/dnscomplex" 'set_socks_cmd'
@@ -940,12 +1093,16 @@ ipsec_enable_line=$(grep -nF 'for ipsec_unit in' <<<"$enable_services_body")
 ipsec_restart_line=$(grep -nF 'systemctl restart "$ipsec_unit"' <<<"$enable_services_body")
 ready_enable_line=$(grep -nF 'systemctl enable dnscomplex-ipsec-ready dnscomplex-routing' <<<"$enable_services_body")
 network_enable_line=$(grep -nF 'systemctl enable --now dnscomplex-network-ready' <<<"$enable_services_body")
+dns_restart_line=$(grep -nF 'systemctl restart smartdns AdGuardHome sing-box xray-dnscomplex' <<<"$enable_services_body")
 [[ -n "$network_enable_line" && -n "$ipsec_enable_line" && -n "$ipsec_restart_line" && -n "$ready_enable_line" ]] ||
   fail "service enable order markers are missing"
 ipsec_enable_line=${ipsec_enable_line%%:*}
 ipsec_restart_line=${ipsec_restart_line%%:*}
 ready_enable_line=${ready_enable_line%%:*}
 network_enable_line=${network_enable_line%%:*}
+dns_restart_line=${dns_restart_line%%:*}
+((network_enable_line < dns_restart_line && dns_restart_line < ipsec_enable_line)) ||
+  fail "DNS must restart after network readiness and before waiting for IPsec"
 ((network_enable_line < ipsec_enable_line)) ||
   fail "network readiness must start before IPsec services"
 ((ipsec_enable_line < ipsec_restart_line && ipsec_restart_line < ready_enable_line)) ||
@@ -1167,7 +1324,8 @@ case "$enable_services_body" in
   *'systemctl restart dnscomplex-ipsec-ready || warn'*'systemctl restart dnscomplex-routing || warn'*) ;;
   *) fail "installer must tolerate an unavailable external IPsec peer after local preflight succeeds" ;;
 esac
-case "$enable_services_body" in
+installer_timers_body=$(sed -n '/^start_installer_timers() {/,/^}/p' "$repo_root/install.sh")
+case "$installer_timers_body" in
   *'systemctl reset-failed'*'dnscomplex-cn-overrides'*'dnscomplex-nftset-refresh'*'dnscomplex-metrics-sample'*) ;;
   *) fail "installer must clear stale failures from repaired timer-triggered services" ;;
 esac
@@ -1187,6 +1345,16 @@ installer_main_body=$(awk '
   }
   END { printf "%s", last }
 ' "$repo_root/install.sh")
+case "$installer_main_body" in
+  *start_upgrade_dns_handoff*install_packages*enable_services*'DNSCOMPLEX_TIMER_MODE=1 dnscomplex update-geosite'*finish_upgrade_dns_handoff*start_installer_timers*) ;;
+  *) fail "upgrade DNS handoff must cover package and service changes through geosite publication" ;;
+esac
+assert_contains "$repo_root/install.sh" 'mktemp -d /var/tmp/dnscomplex-dns-upgrade.XXXXXX'
+assert_not_contains "$repo_root/install.sh" 'mktemp -d /run/dnscomplex-dns-upgrade.XXXXXX'
+case "$enable_services_body" in
+  *reload_installer_firewall*'systemctl restart smartdns AdGuardHome sing-box xray-dnscomplex'*) ;;
+  *) fail "installer must retain DNS handoff during firewall reload" ;;
+esac
 case "$installer_main_body" in
   *acquire_installer_maintenance_lock*install_packages*render_all*validate_rendered_install*release_installer_maintenance_lock*enable_services*'DNSCOMPLEX_TIMER_MODE=1 dnscomplex update-geosite'*'dnscomplex watchdog'*'DNSCOMPLEX_TIMER_MODE=1 dnscomplex refresh-nftsets'*'dnscomplex test || warn'*) ;;
   *) fail "installer must lock, preflight before service changes, and run final validation automatically" ;;
@@ -1577,9 +1745,13 @@ CN_IPSEC_USERNAME=cn-user
 CN_IPSEC_PASSWORD=cn-pass
 EOF
 DNSCOMPLEX_ROOT="$single_policy_tmp/root" bash "$repo_root/install.sh" --dry-run --config "$single_policy_tmp/config.env"
-assert_contains "$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc" 'dnscomplex-primary-health dnscomplex-fail-open'
-assert_contains "$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc" '/ip/firewall/mangle/disable [find where comment=dnscomplex-policy-to-vm]'
-assert_contains "$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc" '/ip/firewall/nat/disable [find where comment~\"dnscomplex-force-dns\"]'
+single_routeros="$single_policy_tmp/root/var/lib/dnscomplex/routeros.rsc"
+assert_contains "$single_routeros" '/system scheduler add name=dnscomplex-primary-health'
+assert_contains "$single_routeros" '/tool fetch url="http://192.168.50.200:9108/healthz"'
+assert_contains "$single_routeros" '/ip route disable [find where comment="dnscomplex-policy-to-vm-primary"]'
+assert_contains "$single_routeros" '/ip firewall mangle disable [find where comment="dnscomplex-policy-to-vm"]'
+assert_contains "$single_routeros" '/ip firewall nat enable [find where comment="dnscomplex-force-dns-udp" or comment="dnscomplex-force-dns-tcp"]'
+assert_not_contains "$single_routeros" '/tool/netwatch/add'
 rm -rf "$single_policy_tmp"
 
 bash "$repo_root/tests/runtime_reliability_test.sh"

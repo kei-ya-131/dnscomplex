@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Emitted operation code: local files and real signals; no native systemd claims."""
+import fcntl
 import importlib.util
 import json
 import os
@@ -51,6 +52,34 @@ class Lifecycle(unittest.TestCase):
         before = (directory / 'manifest.json').read_bytes()
         mod.status(oid)
         self.assertEqual(before, (directory / 'manifest.json').read_bytes())
+
+    def test_scheduled_update_retries_only_before_submission(self):
+        mod = self.module()
+        mod.LOCK.parent.mkdir(parents=True)
+        mod.systemctl = lambda *args: ''
+        with mod.LOCK.open('w') as holder:
+            mod.LOCK.chmod(0o600)
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            with self.assertRaises(BlockingIOError):
+                mod.submit('update-geosite', {})
+            with self.assertRaises(BlockingIOError):
+                mod.submit('update-geosite', {}, lock_timeout=0.02)
+            self.assertEqual(list(mod.OPERATIONS.iterdir()), [])
+
+            original_sleep = mod.time.sleep
+            def release_lock(_):
+                fcntl.flock(holder, fcntl.LOCK_UN)
+
+            try:
+                mod.time.sleep = release_lock
+                result = mod.submit('update-geosite', {}, lock_timeout=1)
+            finally:
+                mod.time.sleep = original_sleep
+
+        self.assertEqual(result['phase'], 'queued')
+        self.assertEqual(len(list(mod.OPERATIONS.iterdir())), 1)
+        with self.assertRaises(mod.OperationBusy):
+            mod.submit('update-geosite', {}, lock_timeout=1)
 
     def test_systemd_writer_has_bounded_cgroup_recovery_and_clean_stop_hook(self):
         def emitted_unit(description):

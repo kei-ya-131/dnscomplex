@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real HTTP/process boundaries for the installer-emitted metrics exporter."""
 import concurrent.futures
+import fcntl
 import importlib.util
 import json
 import os
@@ -33,13 +34,15 @@ class MetricsBoundary(unittest.TestCase):
         self.m.CONFIG = str(self.root / 'config.env')
         self.calls = 0
         self.health = 'healthy'
+        self.checks = []
+        self.m.MAINTENANCE_LOCK = str(self.root / 'maintenance.lock')
         # External health/process work is replaced only below the sample boundary.
         self.m.run = self.fake_run
 
     def fake_run(self, args, timeout=5, **kwargs):
         if args[1:] == ['health', '--json']:
             return subprocess.CompletedProcess(args, 0 if self.health != 'unhealthy' else 1,
-                                               json.dumps({'status': self.health, 'profiles': {}}))
+                                               json.dumps({'status': self.health, 'checks': self.checks}))
         if args[0] == 'dig':
             return subprocess.CompletedProcess(args, 0, ';; Query time: 2 msec\n')
         if args[0] == 'conntrack':
@@ -160,6 +163,24 @@ class MetricsBoundary(unittest.TestCase):
                 code, body = self.get('/healthz')
                 self.assertEqual(code, expected)
                 self.assertEqual(json.loads(body)['status'], state)
+
+    def test_health_reports_profile_and_live_maintenance_lock(self):
+        self.health = 'degraded'
+        self.checks = [{'name': 'ai-ipsec-dataplane-probe', 'status': 'warn'},
+                       {'name': 'cn-ipsec-dataplane-probe', 'status': 'ok'}]
+        self.sample()
+        self.start()
+        with open(self.m.MAINTENANCE_LOCK, 'wb') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            code, body = self.get('/healthz')
+            self.assertEqual(code, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload['maintenance'], 'busy')
+            self.assertEqual(payload['profiles'], {
+                'ai': {'ipsec-dataplane-probe': 'warn'},
+                'cn': {'ipsec-dataplane-probe': 'ok'},
+            })
+        self.assertEqual(json.loads(self.get('/healthz')[1])['maintenance'], 'idle')
 
     def test_sample_lock_prevents_a_second_process_collecting(self):
         # Hold the exact file lock in a separate process; --sample must only read
