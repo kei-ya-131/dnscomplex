@@ -8440,13 +8440,29 @@ profile_egress_gate_is_open() {
 
 egress_ready_cmd() {
   need_root
-  local action=${1:-} profile mode failed=0
+  local action=${1:-} profile mode state port pid attempt failed=0
   case "$action" in
     xray)
       for profile in ai cn; do
         mode=$(profile_egress_mode "$profile")
         if [[ "$mode" == "xray" ]]; then
-          if systemctl is-active --quiet xray-dnscomplex; then
+          state=$(systemctl is-active xray-dnscomplex 2>/dev/null || true)
+          if [[ "$state" == activating ]]; then
+            port=$XRAY_AI_SOCKS_PORT
+            [[ "$profile" != cn ]] || port=$XRAY_CN_SOCKS_PORT
+            pid=$(systemctl show xray-dnscomplex -p MainPID --value)
+            if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+              # ExecStartPost must finish before the unit can become active.
+              for ((attempt = 0; attempt < 20; attempt++)); do
+                if ss -H -ltnp "sport = :$port" | grep -Fq "pid=$pid,"; then
+                  state=active
+                  break
+                fi
+                sleep .1
+              done
+            fi
+          fi
+          if [[ "$state" == active ]]; then
             profile_egress_gate_open "$profile" || failed=1
           else
             profile_egress_gate_clear "$profile"

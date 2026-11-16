@@ -104,6 +104,34 @@ EOF
 DNSCOMPLEX_ROOT="$tmpdir/root" bash "$repo_root/install.sh" --dry-run --config "$tmpdir/config.env"
 assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_VERSION='0.3.2-rc.1'"
 
+# ExecStartPost runs while the unit is activating. Only a SOCKS listener
+# owned by its MainPID can open the profile's gate during that interval.
+(
+  source "$tmpdir/root/usr/local/sbin/dnscomplex"
+  need_root() { :; }
+  profile_egress_mode() { [[ "$1" == ai ]] && echo xray || echo ipsec; }
+  profile_egress_gate_open() { echo "open-$1"; }
+  profile_egress_gate_clear() { echo "clear-$1"; }
+  systemctl() {
+    case "$1" in
+      is-active) echo activating; return 3 ;;
+      show) echo 4321 ;;
+      *) return 1 ;;
+    esac
+  }
+  ss() { printf 'LISTEN 0 4096 127.0.0.1:16054 0.0.0.0:* users:(("xray",pid=%s,fd=8))\n' "$listener_pid"; }
+  sleep() { :; }
+  XRAY_AI_SOCKS_PORT=16054
+  listener_pid=4321
+  result=$(egress_ready_cmd xray) || fail "Xray activation rejected its own SOCKS listener"
+  [[ "$result" == open-ai ]] || fail "Xray activation opened the wrong gates"
+  listener_pid=3344
+  if result=$(egress_ready_cmd xray); then
+    fail "Xray activation accepted a SOCKS listener owned by another process"
+  fi
+  [[ "$result" == clear-ai ]] || fail "Xray activation did not close the unverified gate"
+)
+
 # A dry-run upgrade must replace stale helpers/units with the same emitted bytes
 # and modes as a new install. Never invoke those intentionally stale fixtures.
 python3 - "$repo_root/install.sh" "$tmpdir/root" "$tmpdir/artifact-baseline" <<'PY_ARTIFACTS'
