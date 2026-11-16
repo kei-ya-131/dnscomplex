@@ -7663,6 +7663,7 @@ geosite_update_transaction() (
     # sing-box watches atomically published local SRS files. SmartDNS and
     # sing-box configuration do not change in this transaction.
     if (( adguard_changed )); then
+      wait_upgrade_dns_drain 53 || return 1
       adguard_restart_attempted=1
       systemctl restart AdGuardHome || rc=$?
     fi
@@ -20628,6 +20629,20 @@ adguard["dns"]["upstream_dns"] = ["127.0.0.1:21053"]
 
 rules = [
     "table inet dnscomplex_dns_upgrade {",
+    # Keep standby UDP flows distinct so switchback can send new datagrams
+    # to the primary without removing reverse NAT for in-flight replies.
+    "  chain udp_ingress_zone {",
+    "    type filter hook prerouting priority raw; policy accept;",
+    f"    iifname {interface} udp dport 53 ct zone set 15353",
+    "  }",
+    "  chain udp_output_zone {",
+    "    type filter hook output priority raw; policy accept;",
+    "    ip daddr 127.0.0.1 udp dport 53 ct zone set 15353",
+    "  }",
+    "  chain udp_reply_zone {",
+    "    type filter hook output priority raw; policy accept;",
+    "    udp sport 15353 ct zone set 15353",
+    "  }",
     "  chain ingress {",
     "    type nat hook prerouting priority -101; policy accept;",
     f"    iifname {interface} meta l4proto {{ tcp, udp }} th dport 53 redirect to :15353",
@@ -20667,7 +20682,6 @@ PY
   for port in "${live_ports[@]}"; do
     clear_upgrade_dns_udp ipv4 "$port" "$port" -d 127.0.0.1
   done
-  for index in ipv4 ipv6; do clear_upgrade_dns_udp "$index" 53 53; done
   log "upgrade DNS handoff active"
 }
 
@@ -20696,23 +20710,34 @@ reload_installer_firewall() {
   fi
 }
 
+# Let in-flight UDP finish and give open TCP queries time to complete.
+wait_upgrade_dns_drain() {
+  local port=$1 attempt
+  for ((attempt=0; attempt<40; attempt++)); do
+    sleep .1
+    if ! ss -Hnt state established "sport = :$port" | grep . >/dev/null && ((attempt >= 19)); then
+      break
+    fi
+  done
+}
+
 finish_upgrade_dns_handoff() {
   ((dns_handoff_active)) || return 0
   # Reach the primary listener without the loopback handoff rule.
   log "DNS handoff: checking primary listeners at $(date +%s.%N)"
-  nft flush chain inet dnscomplex_dns_upgrade output
+  nft -f - <<'NFT' || return 1
+flush chain inet dnscomplex_dns_upgrade udp_output_zone
+flush chain inet dnscomplex_dns_upgrade output
+NFT
   wait_upgrade_dns 53 +notcp && wait_upgrade_dns 53 +tcp || die "primary DNS did not recover"
-  # Stop assigning new connections to standby. Existing NAT mappings still
-  # reach the running standby while outstanding DNS requests finish.
+  # New UDP datagrams use the primary zone, including from reused source
+  # ports. Standby replies keep their zone until outstanding requests drain.
   log "DNS handoff: draining standby at $(date +%s.%N)"
-  nft flush chain inet dnscomplex_dns_upgrade ingress
-  local attempt
-  for ((attempt=0; attempt<40; attempt++)); do
-    sleep .1
-    if ! ss -Hnt state established 'sport = :15353' | grep . >/dev/null && ((attempt >= 19)); then
-      break
-    fi
-  done
+  nft -f - <<'NFT' || return 1
+flush chain inet dnscomplex_dns_upgrade udp_ingress_zone
+flush chain inet dnscomplex_dns_upgrade ingress
+NFT
+  wait_upgrade_dns_drain 15353
   cleanup_upgrade_dns_handoff
   log "DNS handoff: primary restored at $(date +%s.%N)"
 }
@@ -20726,7 +20751,7 @@ cleanup_upgrade_dns_handoff() {
       if nft list table inet dnscomplex_dns_upgrade >/dev/null 2>&1; then return 1; fi
     fi
     dns_handoff_active=0
-    for family in ipv4 ipv6; do clear_upgrade_dns_udp "$family" 53 15353 || return 1; done
+    for family in ipv4 ipv6; do clear_upgrade_dns_udp "$family" 53 15353 --zone 15353 || return 1; done
     for port in 26053 26054 26055; do
       conntrack -D -f ipv4 -p udp -d 127.0.0.1 --reply-port-src "$port" >/dev/null || [[ $? == 1 ]] || return 1
     done
@@ -20929,7 +20954,7 @@ render_all() {
   render_routeros
   render_management_script
   declare -f stage_upgrade_adguard_data start_upgrade_dns_handoff wait_upgrade_dns clear_upgrade_dns_udp \
-    finish_upgrade_dns_handoff cleanup_upgrade_dns_handoff |
+    wait_upgrade_dns_drain finish_upgrade_dns_handoff cleanup_upgrade_dns_handoff |
     write_file /usr/local/lib/dnscomplex-config/dns-handoff.sh
   render_xui_sniffing_repair
   render_egress_probe
