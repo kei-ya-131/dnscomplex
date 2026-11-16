@@ -79,6 +79,7 @@ EOF
 
 cat >"$tmpdir/config.env" <<'EOF'
 DNSCOMPLEX_NONINTERACTIVE=1
+DNSCOMPLEX_VERSION=0.3.1
 WAN_IFACE=eth0
 TRANSIT_VLAN_ID=10
 LAN_VLAN_ID=20
@@ -101,6 +102,7 @@ CN_IPSEC_PASSWORD=cn-pass
 EOF
 
 DNSCOMPLEX_ROOT="$tmpdir/root" bash "$repo_root/install.sh" --dry-run --config "$tmpdir/config.env"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_VERSION='0.3.2-rc.1'"
 
 # A dry-run upgrade must replace stale helpers/units with the same emitted bytes
 # and modes as a new install. Never invoke those intentionally stale fixtures.

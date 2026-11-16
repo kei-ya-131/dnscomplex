@@ -2,7 +2,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-DNSCOMPLEX_VERSION="0.3.0"
+DNSCOMPLEX_VERSION="0.3.2-rc.1"
 DNSCOMPLEX_ROOT="${DNSCOMPLEX_ROOT:-}"
 CONFIG_PATH=""
 DRY_RUN=0
@@ -223,6 +223,7 @@ parse_args() {
 }
 
 load_config() {
+  local installer_version=$DNSCOMPLEX_VERSION
   if [[ -n "$CONFIG_PATH" ]]; then
     [[ -f "$CONFIG_PATH" ]] || die "config file not found: $CONFIG_PATH"
     set -a
@@ -230,6 +231,7 @@ load_config() {
     . "$CONFIG_PATH"
     set +a
   fi
+  DNSCOMPLEX_VERSION=$installer_version
 
   : "${AI_IPSEC_SERVER:=$AI_IPSEC_SERVER_DEFAULT}"
   : "${CN_IPSEC_SERVER:=$CN_IPSEC_SERVER_DEFAULT}"
@@ -6856,7 +6858,7 @@ write_env_var() {
 }
 
 write_config_values() {
-	    write_env_var DNSCOMPLEX_VERSION "${DNSCOMPLEX_VERSION:-0.3.0}" || return $?
+	    write_env_var DNSCOMPLEX_VERSION "${DNSCOMPLEX_VERSION:-unknown}" || return $?
     write_env_var DEPLOY_MODE "${DEPLOY_MODE:-vlan-gateway}" || return $?
 	    write_env_var WAN_IFACE "$WAN_IFACE" || return $?
     write_env_var TRANSIT_VLAN_ID "${TRANSIT_VLAN_ID:-}" || return $?
