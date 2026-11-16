@@ -102,7 +102,9 @@ CN_IPSEC_PASSWORD=cn-pass
 EOF
 
 DNSCOMPLEX_ROOT="$tmpdir/root" bash "$repo_root/install.sh" --dry-run --config "$tmpdir/config.env"
-assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_VERSION='0.3.2-rc.1'"
+installer_version=$(sed -n 's/^DNSCOMPLEX_VERSION="\([^"]*\)"$/\1/p' "$repo_root/install.sh")
+[[ "$installer_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || fail "invalid installer version: $installer_version"
+assert_contains "$tmpdir/root/etc/dnscomplex/config.env" "DNSCOMPLEX_VERSION='$installer_version'"
 
 # ExecStartPost runs while the unit is activating. Only a SOCKS listener
 # owned by its MainPID can open the profile's gate during that interval.
