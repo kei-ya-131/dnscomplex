@@ -266,4 +266,12 @@ validate_adguard_bootstrap_password
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if '--portable' in sys.argv:
+        sys.argv.remove('--portable')
+        # The full service suite runs this native HTTP case with ADGUARD_BINARY.
+        native = 'test_real_adguard_rejects_anonymous_and_accepts_existing_credentials'
+        names = ['AdGuardAuthSafety.' + name for name in
+                 unittest.defaultTestLoader.getTestCaseNames(AdGuardAuthSafety) if name != native]
+        unittest.main(defaultTest=names)
+    else:
+        unittest.main()

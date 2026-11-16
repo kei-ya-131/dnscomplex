@@ -21,13 +21,13 @@
   - `vlan-gateway`: transit/LAN VLAN mode
 - Included example config: `examples/routeros-policy.config.env`
 
-Latest release: **v0.3.1**. See [security fixes, validation and upgrade notes](docs/releases/v0.3.1.md).
+Current version: **v0.3.2**. See the [v0.3.2 release and upgrade notes](docs/releases/v0.3.2.md) and the [v0.3.1 security notes](docs/releases/v0.3.1.md).
 
 ## Repository Layout
 
 - `install.sh`: main installer and runtime renderer
 - `tests/`: installer, runtime, configuration, routing and recovery regression tests
-- `tools/`: bounded profile data-plane probe
+- `tools/`: bounded profile data-plane probe and public regression / VM acceptance collectors
 - `docs/releases/`: public, deployment-independent release notes
 - `examples/routeros-policy.config.env`: non-interactive example config
 
@@ -73,20 +73,19 @@ dnscomplex metrics-sample
 dnscomplex soak --duration 60 --clients 50 --dns-qps 20 --profiles ai,cn,default
 dnscomplex validate-config /etc/dnscomplex/config.env
 dnscomplex render-config --redacted
-dnscomplex update-software --channel stable
-dnscomplex update-software --channel pinned --version v1.2.3
+sudo dnscomplex update-software --allow-unverified-release-assets --channel stable
 dnscomplex support-bundle --include-logs standard
 ```
 
 Default service endpoints:
 
 - Web UI: `http://<vm-ip>:8088`
-- AdGuard Home: reach `127.0.0.1:3000` through the existing SOCKS/VPN management path. AdGuard requires its own login. On a new installation or a legacy installation with no users, username `admin` starts with the current `DNSCOMPLEX_WEB_PASSWORD` (8–72 UTF-8 bytes, as required for initialization). Existing AdGuard accounts and password hashes are preserved on reinstall and runtime updates; their independent passwords do not constrain the web password. Later dnscomplex password changes do not reset AdGuard.
+- AdGuard Home: open the **AdGuard** tab in the Web UI and sign in with an AdGuard account. The embedded interface shares the management page's browser origin and uses a separate login session. Direct access to `127.0.0.1:3000` is also available through the existing SOCKS/VPN management path. On a new installation or a legacy installation with no users, username `admin` starts with the current `DNSCOMPLEX_WEB_PASSWORD` (8–72 UTF-8 bytes, as required for initialization). Existing AdGuard accounts and password hashes are preserved on reinstall and runtime updates; their independent passwords do not constrain the web password. Later dnscomplex password changes do not reset AdGuard.
 - Metrics and RouterOS health probe: `http://<vm-ip>:9108/metrics`
 - Health probe JSON: `http://<vm-ip>:9108/healthz`
 - SOCKS in `routeros-policy` mode: `<vm-ip>:10800` (the configured LAN address only)
 
-HTTP management remains available on the trusted LAN and through SOCKS. HTTP credentials and cookies are unencrypted on the LAN hop after the VPN exits; these fixes do not add transport encryption. Keep these listeners off the public Internet.
+HTTP management remains available on the trusted LAN and through SOCKS. HTTP credentials and cookies are unencrypted on the LAN hop after the VPN exits; this is an accepted deployment risk, not a transport-security fix. Keep these listeners off the public Internet.
 
 Metrics HTTP endpoints and the dashboard read a cached sample instead of launching host probes per request. The existing sampler runs 15 seconds after its preceding run finishes; missing, invalid or over-60-second-old snapshots return unavailable. Incomplete collection is marked with `collection_complete` / `dnscomplex_collection_complete`; `/healthz` fails closed for incomplete data. A fresh `degraded` health result retains the existing successful health-probe status.
 
@@ -110,21 +109,108 @@ python3 tests/web_operation_contract_test.py
 python3 tests/soak_resource_limits_test.py
 ```
 
-Local dry-runs and authentication regression tests require Python 3 with PyYAML and bcrypt; normal Debian installation provisions the distribution packages.
+Local dry-runs and authentication regression tests require Python 3 with PyYAML and bcrypt. Debian installation provisions these packages.
 
 The installer contract includes runtime reliability tests. Native namespace/wire tests require Linux, privileges and the binaries/versions described in their source; they are not represented as passing on other hosts. Historical one-off deployment helpers, their version-pinned acceptance tests, private baselines and captures are not distributed; they are not part of the installer or public regression suite.
 
+For a single regression entry point with per-command logs, exit codes, source identity and explicit PASS/FAIL/SKIP reporting:
+
+```bash
+python3 tools/validate.py --suite core --output output/core-run-001
+```
+
+The Debian 13 GitHub Actions workflow uses this same entry point. Its optional native job is manual and runs only on a disposable hosted runner. VM reboot/recovery acceptance is collected separately and requires a designated disposable VM; the collector never initiates a reboot or fault injection. See [validation scope, prerequisites and VM procedures](docs/validation.md).
+
+`trace-domain` separates expected domain policy from observed nftset membership, including shared CDN IPs. It preserves the existing profile/outbound fields and reports DNS, readiness-gate and missing-evidence diagnostics. Actual client egress remains `unknown` until independently probed; this read-only diagnostic does not repair services.
+
 ## Updates and Support Bundles
 
-The daily update timer refreshes domain/geosite/SRS data; it does not promise unattended Debian or proxy-core upgrades. Explicit `update-software` commands are separate.
+The daily update timer refreshes domain/geosite/SRS data. It does not update Debian packages, proxy cores, or the dnscomplex installer/runtime itself.
+
+### Optional single-client RouterOS failover
+
+A single-node `routeros-policy` install includes `/usr/local/lib/dnscomplex-routeros/client.py`.
+Use it with RouterOS 7.24 and a dedicated, enabled IPv4 prerouting rule that
+matches one client's source IP and MAC. The rule's routing table must send the
+selected traffic through the dnscomplex VM. Keep this client out of the shared
+`dnscomplex-clients` group and other DNS interception rules. RouterOS must be
+reachable from the client and able to answer the client's UDP and TCP DNS when
+the VM path fails. The profile supports one client per router. Keep the client probe running while the profile is installed. Confirm the probe destination stays routed via RouterOS. If an ICMP redirect changes that route, correct the redirect behavior before enabling the profile.
+
+Generate the RouterOS files on the VM. Replace the addresses and rule/table
+names with the actual client and routing policy. Choose an IPv4 HTTPS
+destination with a matching hostname that is reachable both through the VM and
+through the RouterOS fallback.
+
+```bash
+python3 /usr/local/lib/dnscomplex-routeros/client.py render \
+  --client 192.168.50.22 --mac 02:00:00:00:00:22 \
+  --rule my-client-policy --table my-client-table \
+  --target "$HTTPS_IPV4" --host example.com --output ./routeros-client
+```
+
+Copy that same `client.py` to the selected client and start the probe there.
+Use the same client, target, hostname and port as in the render command. Import
+`install.rsc` on RouterOS after verifying the existing rule and route.
+
+```bash
+python3 client.py probe --client 192.168.50.22 \
+  --target "$HTTPS_IPV4" --host example.com
+```
+
+The client reserves source ports 46400–46591 for the UDP DNS, TCP DNS and HTTPS
+probes and reports results on TCP 19119. The report binds to the configured
+client IPv4 address and only accepts the configured RouterOS IPv4 address.
+The Scheduler requires both the VM's health and a fresh client report. A
+failed probe, stopped agent or sample older than six seconds causes fallback
+at the next poll. The probes continue to use the VM while in fallback, and two
+successful rounds are required before the client reports recovery.
+
+Import the matching `remove.rsc` to stop the Scheduler, remove the profile and
+restore the original enabled client policy, then stop the probe on the client.
+For a bounded test, `render --test-ports 46900-46905` restricts normal DNS
+interception to those source ports, and `probe --lifetime 170` stops the agent
+automatically. A test can route just the HTTPS probe destination via RouterOS
+and send the DNS probes directly to RouterOS, keeping the client's default
+gateway and system DNS unchanged.
+
+### GitHub-managed components
+
+Clean installs use checksum-verified Debian amd64/arm64 assets for sing-box 1.14.0, SmartDNS Release48.4, AdGuard Home v0.107.79 and Xray v26.3.27. The installer rejects an unsupported architecture or a checksum mismatch before installing the affected asset. These versions match the amd64 runtime observed on the test VM. Clean-install acceptance for this exact combination is pending.
+
+`update-software` updates `sing-box`, `SmartDNS`, `AdGuard Home`, and `Xray-core`. Run it as root only after reviewing the selected upstream releases:
+
+```bash
+sudo dnscomplex update-software --allow-unverified-release-assets --channel stable
+```
+
+`--allow-unverified-release-assets` is required on every invocation because these assets are not covered by a uniform trusted signature chain. It acknowledges that limitation; it does not enable signature verification. Omitting it stops the update before component changes.
 
 `DNSCOMPLEX_UPDATE_CHANNEL` controls explicit runtime updates:
 
 - `stable`: use latest non-prerelease GitHub releases.
 - `beta`: allow the newest non-draft GitHub release, including prereleases.
-- `pinned`: update GitHub-managed binaries only to `DNSCOMPLEX_PINNED_VERSION`.
+- `pinned`: request the exact `DNSCOMPLEX_PINNED_VERSION` tag from each of the four upstream repositories. `--version TAG` also selects pinned mode. This is one shared tag, not a per-component version map or the dnscomplex release version; upstream tag formats differ, so do not use a placeholder such as `v1.2.3` as a working upgrade recipe. Confirm that the tag and required assets exist in all four repositories before using pinned mode.
 
-`update-software` still performs backup, package/release update, config checks, health checks, and rollback on failure. Logs are written under `/var/log/dnscomplex/update-*.log`.
+`--channel` overrides the configured channel. Without an explicit channel, `GITHUB_RELEASE_POLICY=pinned` also forces pinned selection. `update-software` backs up configuration and component binaries, validates configuration, restarts changed component services, and checks readiness and health. On failure it attempts application rollback; incomplete rollback is reported as failure and requires operator recovery. It does not run `apt` or upgrade dnscomplex itself. Logs are written under `/var/log/dnscomplex/update-*.log` and `update-latest.log`.
+
+### Debian packages
+
+Create and verify an external VM snapshot and console access before updating Debian packages, then run:
+
+```bash
+sudo dnscomplex system-update --acknowledge-no-os-rollback
+```
+
+This separate command runs `apt-get update` and `apt-get upgrade -y --with-new-pkgs`, followed by dnscomplex tests. It does not update the GitHub-managed components or provide OS rollback. A failed package upgrade may be partially applied; inspect apt/dpkg state or restore the external snapshot. It does not reboot the VM automatically.
+
+### dnscomplex installer/runtime
+
+To upgrade dnscomplex itself, review the target release notes and installer checksum, retain the existing configuration and a usable backup, and follow the installer dry-run and installation steps above with that release's `install.sh`. Reinstallation may restart services and briefly interrupt traffic. Neither `update-software` nor `system-update` downloads a new dnscomplex installer.
+
+On a release that provides the binding migration, run `sudo dnscomplex update-software --ipsec-bindings` to migrate AI and CN from fixed IPv4 VIPs to interface binding. This mode saves the current sing-box configuration at `/var/lib/dnscomplex/ipsec-bindings-before-upgrade.json` and uses one guarded sing-box restart. Existing connections can close during that restart. Run `sudo dnscomplex restore --ipsec-bindings` to restore the saved configuration. The saved fixed VIPs must still match the active tunnels, and the remaining sing-box settings must still match the snapshot. The command removes the snapshot after verifying a successful restore.
+
+### Support bundles
 
 `support-bundle` creates a redacted `.tar.gz` for GitHub issues. It removes IPsec passwords, Xray URIs/UUIDs, GitHub tokens, private IPv4/IPv6 addresses, `.local` hostnames, cookies, and session-like secrets before packaging.
 

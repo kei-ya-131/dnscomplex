@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Installer-emitted HTTP code; only loopback sockets and synthetic local files."""
 import importlib.util
+import http.client
 import io
 import json
 import os
@@ -56,6 +57,57 @@ class HTTPBounds(unittest.TestCase):
         sock=self.sock(); sock.sendall((f'POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWRtaW46dGVzdA==\r\n'+headers+'\r\n').encode()+body)
         if eof: sock.shutdown(socket.SHUT_WR)
         return self.receive(sock)
+    def test_adguard_proxy_keeps_both_authentication_boundaries(self):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        seen = []
+
+        class AdGuard(BaseHTTPRequestHandler):
+            def do_PUT(self):
+                seen.append((self.path, self.rfile.read(int(self.headers['Content-Length']))))
+                self.send_response(204)
+                self.end_headers()
+
+            def do_GET(self):
+                seen.append((self.path, self.headers.get('Cookie'), self.headers.get('Authorization')))
+                self.send_response(302)
+                self.send_header('Location', '/login.html')
+                self.send_header('Set-Cookie', 'agh_session=fixture; Path=/; HttpOnly')
+                self.end_headers()
+
+        upstream = HTTPServer(('127.0.0.1', 0), AdGuard)
+        thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(upstream.server_close)
+        self.addCleanup(upstream.shutdown)
+        self.m.ADGUARD_UPSTREAM = upstream.server_address
+
+        def request(path, headers=None, method='GET', body=None):
+            conn = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+            try:
+                conn.request(method, path, body=body, headers=headers or {})
+                response = conn.getresponse()
+                return response.status, response.headers, response.read()
+            finally:
+                conn.close()
+
+        self.assertEqual(request('/adguard/control/status')[0], 401)
+        auth = {'Authorization': 'Basic YWRtaW46dGVzdA==',
+                'Cookie': 'dnscomplex_session=unrelated; agh_session=fixture'}
+        self.assertEqual(request('/adguard/%2e%2e/api/config', auth)[0], 404)
+        self.assertEqual(request('/adguard/control/login', {**auth, 'Origin': 'http://other.invalid'},
+                                 'POST', b'{}')[0], 403)
+        self.assertEqual(seen, [])
+        status, headers, _ = request('/adguard/', auth)
+        self.assertEqual(status, 302)
+        self.assertEqual(headers['Location'], '/adguard/login.html')
+        self.assertIn('Path=/adguard/', headers.get_all('Set-Cookie')[0])
+        self.assertEqual(seen, [('/', 'agh_session=fixture', None)])
+        body = b'{"language":"en"}'
+        origin = 'http://%s:%s' % self.server.server_address
+        self.assertEqual(request('/adguard/control/profile/update', {**auth, 'Origin': origin},
+                                 'PUT', body)[0], 204)
+        self.assertEqual(seen[-1], ('/control/profile/update', body))
     def test_rejects_missing_invalid_duplicate_and_transfer_length_before_cli(self):
         for headers in ['', 'Content-Length: -1\r\n','Content-Length: 1e6\r\n','Content-Length: +2\r\n','Content-Length: 2\r\nContent-Length: 2\r\n','Content-Length: 2\r\nTransfer-Encoding: chunked\r\n']:
             with self.subTest(headers=headers): self.assertIn(b' 400 ',self.request(headers,b'{}'))
