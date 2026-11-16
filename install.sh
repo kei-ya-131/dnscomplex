@@ -1814,7 +1814,7 @@ validate_rendered_smartdns() {
 }
 
 render_local_hosts() {
-  local target tmp
+  local target
   target=$(target_path /etc/dnscomplex/local-hosts)
   if [[ ! -e "$target" ]]; then
     write_file /etc/dnscomplex/local-hosts <<'EOF'
@@ -1823,10 +1823,6 @@ render_local_hosts() {
 # 192.0.2.10 example-host.local
 EOF
   fi
-  tmp=$(mktemp)
-  awk 'tolower($0) !~ /example-client[.]local/' "$target" >"$tmp"
-  install -m 0644 "$tmp" "$target"
-  rm -f "$tmp"
 }
 
 write_adguard_allow_rules() {
